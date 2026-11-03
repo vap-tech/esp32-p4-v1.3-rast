@@ -2,7 +2,10 @@
 #![no_main]
 
 use esp32_p4::{
-    devices::gt911::{Gt911, Kind, Tracker},
+    devices::{
+        gt911::{Gt911, Kind, Tracker},
+        rx8025t::Rx8025t,
+    },
     hal,
 };
 
@@ -104,6 +107,39 @@ extern "C" fn rust_main() -> ! {
                 "touch alive frames={} errors={} us={}",
                 frames, errors, now
             );
+            match Rx8025t::read(&mut i2c, &mut timer) {
+                Ok(rtc) => {
+                    let _ = write!(console, "RTC raw:");
+                    for byte in rtc.raw {
+                        let _ = write!(console, " {:02x}", byte);
+                    }
+                    let _ = writeln!(console);
+                    let _ = writeln!(
+                        console,
+                        "RTC VLF={} VDET={} RESET={} TEST={} usable={}",
+                        rtc.voltage_low(),
+                        rtc.voltage_detected(),
+                        rtc.stopped(),
+                        rtc.test_mode(),
+                        rtc.time_usable()
+                    );
+                    match rtc.datetime() {
+                        Ok(t) => {
+                            let _ = writeln!(
+                                console,
+                                "RTC {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                                t.year, t.month, t.day, t.hour, t.minute, t.second
+                            );
+                        }
+                        Err(_) => {
+                            let _ = writeln!(console, "RTC invalid calendar (BCD/date/weekday)");
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = writeln!(console, "RTC read: {:?}", error);
+                }
+            }
             heartbeat = now;
         }
         timer.delay_us(10_000);
