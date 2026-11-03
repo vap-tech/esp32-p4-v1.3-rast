@@ -1,0 +1,47 @@
+//! USB Serial/JTAG console; inherits the PHY setup from ROM.
+use core::{fmt, marker::PhantomData};
+
+const FIFO: *mut u32 = 0x500d_2000 as *mut u32;
+const CONFIG: *mut u32 = 0x500d_2004 as *mut u32;
+
+/// Exclusive blocking console. No allocator, buffering, or USB stack.
+pub struct Console {
+    _exclusive: PhantomData<*mut ()>,
+}
+
+impl Console {
+    /// # Safety
+    /// Caller must exclusively own USB Serial/JTAG and keep its clock/PHY enabled.
+    pub unsafe fn new() -> Self {
+        Self {
+            _exclusive: PhantomData,
+        }
+    }
+
+    fn put(&mut self, byte: u8) {
+        unsafe {
+            while CONFIG.read_volatile() & 2 == 0 {
+                core::hint::spin_loop();
+            }
+            FIFO.write_volatile(byte as u32);
+        }
+    }
+
+    fn flush(&mut self) {
+        unsafe { CONFIG.write_volatile(1) };
+    }
+}
+
+impl fmt::Write for Console {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        for byte in text.bytes() {
+            if byte == b'\n' {
+                self.put(b'\r');
+            }
+            self.put(byte);
+        }
+        // Submit even a short packet. Longer writes are sent when FIFO fills.
+        self.flush();
+        Ok(())
+    }
+}
