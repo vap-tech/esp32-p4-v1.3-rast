@@ -1,4 +1,6 @@
 fn main() {
     println!("cargo:rerun-if-changed=link.x");
-    println!("cargo:rustc-link-arg=-Tlink.x");
+    if std::env::var("TARGET").as_deref() == Ok("riscv32imafc-unknown-none-elf") {
+        println!("cargo:rustc-link-arg=-Tlink.x");
+    }
 }
