@@ -98,6 +98,13 @@ pub struct PacketErrors {
     pub raw: u8,
 }
 
+/// Result of a bounded experiment, not proof that the panel entered BIST.
+#[derive(Clone, Copy, Debug)]
+pub struct BistProbe {
+    pub host_during_probe: crate::hal::dsi::Status,
+    pub observation_us: u64,
+}
+
 /// Owns the board's DSI host, LCD RESET and PWM backlight.
 pub struct Display {
     dsi: Dsi,
@@ -210,6 +217,34 @@ impl Display {
     }
     pub fn host_status(&mut self) -> crate::hal::dsi::Status {
         self.dsi.diagnostics()
+    }
+
+    /// Experimental vendor-page pair from a first-hand JD9165 bring-up report.
+    /// Stops host video, writes page1 05=01/06=40, observes for 25 seconds, then
+    /// always attempts hardware reset + normal init to restore user settings.
+    /// No USB writes occur while armed, so console backpressure cannot prevent
+    /// timed restoration. The caller must visually verify the panel output.
+    pub fn probe_panel_bist(&mut self, timer: &mut Timer) -> Result<BistProbe, Error> {
+        self.awake()?;
+        let result = (|| {
+            self.dsi.set_video_enabled(false);
+            self.dsi.write_dcs(0x30, &[1], timer)?;
+            self.dsi.write_dcs(0x05, &[1], timer)?;
+            self.dsi.write_dcs(0x06, &[0x40], timer)?;
+            self.dsi.write_dcs(0x30, &[0], timer)?;
+            timer.delay_us(1_000);
+            let host_during_probe = self.dsi.diagnostics();
+            let start = timer.now_us();
+            timer.delay_us(25_000_000);
+            Ok(BistProbe {
+                host_during_probe,
+                observation_us: timer.now_us().wrapping_sub(start) & ((1 << 48) - 1),
+            })
+        })();
+        // Recover even if an experimental write failed on a nonzero page.
+        let _ = self.dsi.write_dcs(0x30, &[0], timer);
+        self.reset(Reset::Hardware, timer)?;
+        result
     }
 
     pub fn set_pattern(&mut self, pattern: Pattern) -> Result<(), Error> {
@@ -421,6 +456,8 @@ pub fn init(dsi: &mut Dsi, reset: &mut Output<27>, timer: &mut Timer) -> Result<
     configure(dsi, timer)
 }
 fn configure(dsi: &mut Dsi, timer: &mut Timer) -> Result<[u8; 3], Error> {
+    // Explicitly restore the base page, including after experimental commands.
+    dsi.write_dcs(0x30, &[0], timer)?;
     let id = dsi.read_dcs(0x04, 3, timer)?.to_le_bytes();
     dsi.write_dcs(0x36, &[0], timer)?;
     for &(command, data, delay_ms) in INIT {

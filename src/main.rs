@@ -187,7 +187,7 @@ extern "C" fn rust_main() -> ! {
 }
 
 fn display_help(console: &mut hal::usb_serial::Console) {
-    let _ = writeln!(console, "DISPLAY commands: ? help; q status; L scanline-probe; e error-counter(clear); v/h/b patterns; i/I invert on/off; x/y/n mirror X/Y/none; c/C BGR/RGB; d/D display off/on; j/J idle on/off; k/f/N black/white/normal; s/w sleep/wake; t/u/T TE vblank/both/off; l TE line300; g idle-green; r/R soft/hard reset; 6/7 RGB565 at650/750; 8 RGB888 at750; z RGB565 at550");
+    let _ = writeln!(console, "DISPLAY commands: ? help; q status; B BIST-probe25s; L scanline-probe; e error-counter(clear); v/h/b patterns; i/I invert on/off; x/y/n mirror X/Y/none; c/C BGR/RGB; d/D display off/on; j/J idle on/off; k/f/N black/white/normal; s/w sleep/wake; t/u/T TE vblank/both/off; l TE line300; g idle-green; r/R soft/hard reset; 6/7 RGB565 at650/750; 8 RGB888 at750; z RGB565 at550");
 }
 
 fn display_command(
@@ -199,6 +199,21 @@ fn display_command(
     use hal::dsi::{LaneRate, PixelFormat};
     use jd9165::{ColorOrder, Fill, Reset, TearEffect};
     let result = match command {
+        b'B' => {
+            let _ = writeln!(
+                console,
+                "BIST PROBE: host video OFF for 25 seconds; automatic restoration follows"
+            );
+            let result = panel.probe_panel_bist(timer);
+            let _ = writeln!(console, "BIST_RESULT {:?}", result);
+            let _ = writeln!(
+                console,
+                "BIST_RESTORED duty={} PANEL {:?}",
+                panel.pwm_duty(),
+                panel.snapshot(timer)
+            );
+            return;
+        }
         b'?' => {
             display_help(console);
             return;

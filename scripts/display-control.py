@@ -51,8 +51,8 @@ try:
     for command in args.commands:
         print('HOST -> ' + command, flush=True)
         os.write(fd, command.encode('ascii'))
-        marker = {'?': b'DISPLAY commands:', 'q': b'IDLE_COLOR', 'e': b'PANEL_ERRORS', 'L': b'SCAN '}.get(command, b'CMD ' + command.encode() + b' ')
-        receive(marker)
+        marker = {'?': b'DISPLAY commands:', 'q': b'IDLE_COLOR', 'e': b'PANEL_ERRORS', 'L': b'SCAN ', 'B': b'BIST_RESTORED'}.get(command, b'CMD ' + command.encode() + b' ')
+        receive(marker, timeout=40 if command == 'B' else 10)
         receive(timeout=args.hold)
 finally:
     os.close(fd)

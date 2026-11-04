@@ -27,6 +27,7 @@ pub enum Error {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Status {
+    pub video_enabled: bool,
     pub version: u32,
     pub phy: u32,
     pub fifo: u32,
@@ -141,6 +142,7 @@ impl Dsi {
     /// Caller must own DSI exclusively; reading error latches can consume them.
     pub unsafe fn status() -> Status {
         Status {
+            video_enabled: read(HOST + 0x34) & 1 == 0 && read(HOST + 0x04) & 1 != 0,
             version: read(HOST),
             phy: read(HOST + 0xb0),
             fifo: read(HOST + 0x74),
