@@ -13,10 +13,12 @@ impl<const PIN: u8> Output<PIN> {
     ///
     /// # Safety
     /// Caller must own this pad exclusively and ensure it is available on the
-    /// board. Supports GPIO0..31, excluding USB PHY pins 24..27. Clocks must not
+    /// board. Supports GPIO0..31, excluding USB pins 24..26. GPIO27 is usable
+    /// only when USB FS OTG is disabled (this board uses it for LCD RESET).
+    /// USB Serial/JTAG uses GPIO24/25 and is unaffected. Clocks must not
     /// be reconfigured concurrently. Does not configure power domains or holds.
     pub unsafe fn new_low() -> Self {
-        assert!(PIN < 32 && !(PIN >= 24 && PIN <= 27));
+        assert!(PIN < 32 && !(PIN >= 24 && PIN <= 26));
         let mut output = Self {
             _exclusive: PhantomData,
         };

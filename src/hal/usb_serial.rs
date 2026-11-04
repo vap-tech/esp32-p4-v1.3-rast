@@ -30,6 +30,17 @@ impl Console {
     fn flush(&mut self) {
         unsafe { CONFIG.write_volatile(1) };
     }
+
+    /// Read one host byte if available; never blocks.
+    pub fn read_byte(&mut self) -> Option<u8> {
+        unsafe {
+            if CONFIG.read_volatile() & (1 << 2) != 0 {
+                Some(FIFO.read_volatile() as u8)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 impl fmt::Write for Console {
