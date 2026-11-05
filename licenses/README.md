@@ -23,3 +23,30 @@ v6.1 `components/esp_hal_ledc/esp32p4/include/hal/ledc_ll.h` and
 `components/esp_driver_ledc/src/ledc.c`, Copyright 2023–2026 Espressif Systems
 (Shanghai) CO LTD, Apache-2.0. PWM arithmetic and the GPIO sampling diagnostic
 are implemented locally.
+
+`src/hal/csi.rs` adapts the CSI host/PHY/bridge, DW-GDMA, ISP input bypass
+and cache synchronization register sequences from ESP-IDF v6.1, commit above,
+Copyright 2023–2026 Espressif Systems (Shanghai) CO LTD, Apache-2.0:
+
+- `components/esp_hal_cam/{mipi_csi_hal.c,esp32p4/include/hal/}`
+- `components/esp_driver_cam/csi/src/esp_cam_ctlr_csi.c`
+- `components/esp_hal_dma/esp32p4/include/hal/dw_gdma_ll.h`
+- `components/esp_driver_isp/src/isp_core.c`
+- `components/soc/esp32p4/register/hw_ver1/soc/{cache,dw_gdma,isp,mipi_csi_host,mipi_csi_bridge}_reg.h`
+
+`src/devices/ov02c10.rs` adapts the sensor register table from the open
+[esp-video-components PR #46](https://github.com/espressif/esp-video-components/pull/46),
+head `ed9f3ddc8bff764b02a0b7c22dd7179b99bdb6a3`,
+`esp_cam_sensor/sensors/ov02c10/private_include/ov02c10_settings.h`,
+Copyright 2024 Espressif Systems (Shanghai) CO LTD, Apache-2.0.
+The crop, polling capture and diagnostic application are local additions.
+
+`src/hal/psram.rs` adapts AP HEX PSRAM/MSPI register settings from ESP-IDF v6.1
+`components/esp_psram/device/esp_psram_impl_ap_hex.c` and
+`components/esp_hal_mspi/esp32p4/include/hal/{psram_ctrlr_ll,mspi_ll}.h`,
+Copyright 2019–2026 Espressif Systems (Shanghai) CO LTD, Apache-2.0.
+Mode register commands call resident mask-ROM SPI helpers using the published
+`components/esp_rom/esp32p4/include/esp32p4/rom/opi_flash.h` ABI and eco0_4 linker addresses.
+No SDK object files are linked. One-buffer DMA reload and the diagnostics are local.
+The DSI bridge framebuffer setup in `src/hal/dsi.rs` was checked against v6.1
+`components/esp_lcd/dsi/esp_lcd_panel_dpi.c` and its corresponding HAL/LL.

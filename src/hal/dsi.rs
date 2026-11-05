@@ -4,7 +4,7 @@
 // SPDX-FileCopyrightText: 2023-2025 Espressif Systems (Shanghai) CO LTD
 // SPDX-License-Identifier: Apache-2.0
 //! Minimal MIPI DSI host for P4 rev 1.x, 2 lanes, 550 Mbps, VC0.
-//! Command writes and hardware patterns only; no DMA/framebuffer/interrupts.
+//! DCS, hardware patterns and one-buffer RGB565 DMA scanout; no interrupts.
 use super::time::Timer;
 use core::marker::PhantomData;
 
@@ -78,6 +78,7 @@ pub struct Dsi {
     rate: LaneRate,
     format: PixelFormat,
     observed_errors: [u32; 2],
+    scanout: bool,
 }
 
 impl Dsi {
@@ -93,6 +94,7 @@ impl Dsi {
             rate: LaneRate::Mbps550,
             format: PixelFormat::Rgb565,
             observed_errors: [0; 2],
+            scanout: false,
         };
         enable_ldo3();
         timer.delay_us(5_000);
@@ -168,6 +170,114 @@ impl Dsi {
         status.errors1 |= self.observed_errors[1];
         self.observed_errors = [0; 2];
         status
+    }
+
+    /// Start a continuously reloaded one-buffer RGB565 scanout on DW-GDMA CH2.
+    /// # Safety
+    /// Own DMA channel 1; PSRAM identity mapping covers `address..address+1228800`.
+    /// Keep the framebuffer alive until stop_framebuffer. No global DMA resets.
+    pub unsafe fn start_framebuffer(
+        &mut self,
+        address: usize,
+        timer: &mut Timer,
+    ) -> Result<(), Error> {
+        self.stop_framebuffer();
+        self.set_video_config(LaneRate::Mbps550, PixelFormat::Rgb565, timer)?;
+        const DMA: usize = 0x5008_1000;
+        const CH: usize = DMA + 0x200;
+        modify(CLOCK + 0x14, 0, 1 << 13);
+        modify(CLOCK + 0x18, 0, 1 << 5);
+        write(DMA + 0x10, 1);
+        write(HOST + 4, 0);
+        write(BRIDGE + 4, 0);
+        write(BRIDGE, 1);
+        write(BRIDGE + 0x40, 1024 << 4);
+        write(BRIDGE + 0x44, 1);
+        modify(CLOCK + 0x28, 0, 1 << 30);
+        modify(
+            CLOCK + 0x3c,
+            (3 << 5) | (0xff << 8),
+            (1 << 5) | (4 << 8) | (1 << 7),
+        );
+        // Diagnostic: match the known-good VPG/SDK 48-MHz DPI clock.
+        write(HOST + 0x48, (20 * 550 + 192) / 384);
+        write(HOST + 0x4c, (136 * 550 + 192) / 384);
+        write(HOST + 0x50, (1340 * 550 + 192) / 384);
+        write(HOST + 0x38, 0xbf02); // VPG disabled, burst/LP retained.
+        write(BRIDGE + 0x30, (600 << 16) | 634);
+        write(BRIDGE + 0x34, (2 << 16) | 12);
+        write(BRIDGE + 0x38, (1024 << 16) | 1340);
+        write(BRIDGE + 0x3c, (20 << 16) | 136);
+        write(BRIDGE + 0x18, 2); // RGB565.
+        write(BRIDGE + 0x0c, (1 << 31) | 153600);
+        write(BRIDGE + 0x88, 1 << 4); // DMA flow, one block per frame.
+        modify(BRIDGE + 0x6c, 1 << 28, 0);
+        write(BRIDGE + 8, 256);
+        write(BRIDGE + 0x8c, 768);
+        write(BRIDGE + 0x50, 0);
+        write(BRIDGE + 0x54, 1);
+        write(CH, address as u32);
+        write(CH + 4, 0);
+        write(CH + 8, 0x5010_5000);
+        write(CH + 12, 0);
+        write(CH + 0x10, 153599);
+        write(
+            CH + 0x18,
+            (1 << 30) | 1 | (1 << 6) | (3 << 8) | (3 << 11) | (8 << 14) | (7 << 18),
+        );
+        write(CH + 0x1c, (1 << 6) | (15 << 7) | (1 << 15) | (15 << 16));
+        write(CH + 0x20, 5); // Auto-reload source and destination each block.
+        write(CH + 0x24, 1 | (5 << 17) | (7 << 23) | (3 << 27));
+        write(CH + 0x80, u32::MAX);
+        write(CH + 0x90, 0);
+        write(CH + 0x98, u32::MAX);
+        write(BRIDGE + 4, 1);
+        unsafe {
+            core::arch::asm!("fence rw, rw", options(nostack));
+        }
+        write(DMA + 0x18, 0x202);
+        write(HOST + 0x34, 0);
+        write(HOST + 4, 1);
+        write(BRIDGE + 0x40, (1024 << 4) | 1);
+        write(BRIDGE + 0x44, 1);
+        self.scanout = true;
+        Ok(())
+    }
+
+    pub fn framebuffer_status(&mut self) -> [u32; 12] {
+        let status = [
+            read(0x5008_1018),
+            read(0x5008_1288),
+            read(0x5008_1230),
+            read(0x5008_1200),
+            read(BRIDGE + 0x58),
+            read(BRIDGE + 0x14),
+            read(BRIDGE + 0x40),
+            read(BRIDGE + 0x88),
+            read(BRIDGE + 0x18),
+            read(HOST + 0x10),
+            read(BRIDGE + 0x90),
+            read(BRIDGE + 0x44),
+        ];
+        write(BRIDGE + 0x54, 1);
+        status
+    }
+
+    pub fn stop_framebuffer(&mut self) {
+        if !self.scanout {
+            return;
+        }
+        self.scanout = false;
+        write(BRIDGE + 0x40, 1024 << 4);
+        write(BRIDGE + 0x44, 1);
+        write(BRIDGE + 4, 0);
+        write(0x5008_101c, 0x202); // Abort only channel 1.
+        for _ in 0..20000 {
+            if read(0x5008_1018) & 2 == 0 {
+                return;
+            }
+        }
+        panic!("DSI DMA abort timeout");
     }
 
     fn phy_write(&mut self, address: u8, value: u8) {
@@ -373,6 +483,7 @@ impl Dsi {
     /// 1024x600 test pattern, using the selected format/rate and board timings.
     /// Uses the host's VPG, so no framebuffer or DMA is needed.
     pub fn start_pattern(&mut self, pattern: Pattern) {
+        self.stop_framebuffer();
         write(HOST + 0x04, 0);
         // Keep the external DPI input disabled. VPG supplies pixels internally.
         write(BRIDGE + 0x40, 0);

@@ -1,6 +1,6 @@
 //! JC1060P470C display: panel commands, DSI patterns, reset and backlight.
 //! Register semantics: JADARD JD9165A-A Rev.0.0.1, checked on the board's BA panel.
-//! No heap, framebuffer or runtime dependency.
+//! No heap/runtime dependency. Optional PSRAM framebuffer scanout on DMA CH2.
 use crate::hal::{
     dsi::{Dsi, Error as DsiError, LaneRate, Pattern, PixelFormat},
     gpio::Output,
@@ -136,8 +136,8 @@ impl Display {
             dsi,
             reset,
             backlight,
-            pattern: Pattern::Ber,
-            brightness: 5,
+            pattern: Pattern::Vertical,
+            brightness: 25,
             address: 0,
             inverted: false,
             idle: false,
@@ -215,6 +215,27 @@ impl Display {
     pub fn pwm_duty(&self) -> u16 {
         self.backlight.duty()
     }
+    /// # Safety
+    /// Keep this PSRAM framebuffer alive until stop_framebuffer; own DMA CH2.
+    pub unsafe fn start_framebuffer(
+        &mut self,
+        address: usize,
+        timer: &mut Timer,
+    ) -> Result<(), Error> {
+        self.awake()?;
+        unsafe {
+            self.dsi.start_framebuffer(address, timer)?;
+        }
+        Ok(())
+    }
+    pub fn framebuffer_status(&mut self) -> [u32; 12] {
+        self.dsi.framebuffer_status()
+    }
+    pub fn stop_framebuffer(&mut self) {
+        self.dsi.stop_framebuffer();
+        self.dsi.start_pattern(self.pattern);
+    }
+
     pub fn host_status(&mut self) -> crate::hal::dsi::Status {
         self.dsi.diagnostics()
     }
