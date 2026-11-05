@@ -52,7 +52,7 @@ try:
         print('HOST -> ' + command, flush=True)
         os.write(fd, command.encode('ascii'))
         marker = {'?': b'DISPLAY commands:', 'q': b'IDLE_COLOR', 'e': b'PANEL_ERRORS', 'L': b'SCAN ', 'B': b'BIST_RESTORED'}.get(command, b'CMD ' + command.encode() + b' ')
-        receive(marker, timeout=180 if command == 'W' else (40 if command == 'B' else 10))
+        receive(marker, timeout=180 if command == 'W' else (40 if command in ('B', 'M') else 10))
         receive(timeout=args.hold)
 finally:
     os.close(fd)

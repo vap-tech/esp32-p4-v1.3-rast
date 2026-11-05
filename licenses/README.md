@@ -50,3 +50,16 @@ Mode register commands call resident mask-ROM SPI helpers using the published
 No SDK object files are linked. One-buffer DMA reload and the diagnostics are local.
 The DSI bridge framebuffer setup in `src/hal/dsi.rs` was checked against v6.1
 `components/esp_lcd/dsi/esp_lcd_panel_dpi.c` and its corresponding HAL/LL.
+
+`src/hal/sdmmc.rs` adapts native SDMMC clock/reset, command and internal IDMAC
+register sequences from ESP-IDF v6.1 (same commit above), Apache-2.0:
+`components/esp_hal_sd/esp32p4/include/hal/sdmmc_ll.h`,
+`components/esp_driver_sdmmc/src/sd_host_sdmmc.c`,
+`components/esp_hal_pmu/esp32p4/include/hal/ldo_ll.h` and hw_ver1
+SDMMC/HP_SYS_CLKRST/LP_CLKRST/PMU register definitions,
+Copyright 2023–2026 Espressif Systems (Shanghai) CO LTD.
+The standalone SDHC protocol, bounded polling/cache synchronization and
+read/write/restore diagnostic commands are local Rust code. No SDK code is linked.
+
+SD SCR/SD Status/CMD6 field layouts were checked against ESP-IDF v6.1
+`components/sdmmc/include/sd_protocol_defs.h` and `components/sdmmc/sdmmc_sd.c`.

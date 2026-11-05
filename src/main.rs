@@ -230,6 +230,15 @@ extern "C" fn rust_main() -> ! {
                 let _ = esp32_p4::devices::ov02c10::stream(&mut i2c, &mut timer, false);
                 camera_live = false;
                 let _ = writeln!(console, "CMD O camera stopped");
+            } else if command == b'Y' {
+                let result = sdmmc_info(&mut timer, &mut console);
+                let _ = writeln!(console, "CMD Y {:?}", result);
+            } else if command == b'@' {
+                let result = sdmmc_write_probe(&mut timer, &mut console);
+                let _ = writeln!(console, "CMD @ {:?}", result);
+            } else if command == b'M' {
+                let result = sdmmc_probe(&mut timer, &mut console);
+                let _ = writeln!(console, "CMD M {:?}", result);
             } else if command == b'Q' {
                 if let (Some(fb), Some(panel)) = (framebuffer.as_mut(), display.as_mut()) {
                     if camera_live {
@@ -528,7 +537,7 @@ extern "C" fn rust_main() -> ! {
 }
 
 fn display_help(console: &mut hal::usb_serial::Console) {
-    let _ = writeln!(console, "DISPLAY commands: +/- backlight5%; ]/[ digital gain; }}/{{ analogue gain; >/< exposure; = controls; Q panel RGB probe; E gray/RGB check; W full screenshot; H thumbnail; V camera-live; G camera-test-live; O camera-stop; F framebuffer; S fb-status; U patterns; P psram-test; a camera-info; A camera-test; o camera-scene; ? help; q status; B BIST-probe25s; L scanline-probe; e error-counter(clear); v/h/b patterns; i/I invert on/off; x/y/n mirror X/Y/none; c/C BGR/RGB; d/D display off/on; j/J idle on/off; k/f/N black/white/normal; s/w sleep/wake; t/u/T TE vblank/both/off; l TE line300; g idle-green; r/R soft/hard reset; 6/7 RGB565 at650/750; 8 RGB888 at750; z RGB565 at550");
+    let _ = writeln!(console, "DISPLAY commands: +/- backlight5%; ]/[ digital gain; }}/{{ analogue gain; >/< exposure; = controls; Y SD capabilities (no speed switch); M SDMMC read-only probe; @ SD write/verify/restore last sector; Q panel RGB probe; E gray/RGB check; W full screenshot; H thumbnail; V camera-live; G camera-test-live; O camera-stop; F framebuffer; S fb-status; U patterns; P psram-test; a camera-info; A camera-test; o camera-scene; ? help; q status; B BIST-probe25s; L scanline-probe; e error-counter(clear); v/h/b patterns; i/I invert on/off; x/y/n mirror X/Y/none; c/C BGR/RGB; d/D display off/on; j/J idle on/off; k/f/N black/white/normal; s/w sleep/wake; t/u/T TE vblank/both/off; l TE line300; g idle-green; r/R soft/hard reset; 6/7 RGB565 at650/750; 8 RGB888 at750; z RGB565 at550");
 }
 
 fn display_command(
@@ -767,4 +776,178 @@ extern "C" fn rust_trap(cause: u32, pc: u32, value: u32) -> ! {
     loop {
         core::hint::spin_loop();
     }
+}
+
+fn sdmmc_probe(
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<bool, hal::sdmmc::Error> {
+    let _ = writeln!(
+        console,
+        "SDMMC init slot0 GPIO39..44, native SD, read-only probe"
+    );
+    let mut card = unsafe { hal::sdmmc::Sdmmc::new(timer) }?;
+    let _ = writeln!(console, "SDMMC {:?}", card.info);
+    let mut sector = [0u8; 512];
+    card.read_sector(0, &mut sector, timer)?;
+    let mbr = sector;
+    if sector[510..] != [0x55, 0xaa] {
+        let _ = writeln!(console, "SDMMC invalid MBR signature; stopping probe");
+        return Ok(false);
+    }
+    let partition = u32::from_le_bytes(sector[454..458].try_into().unwrap());
+    let _ = writeln!(
+        console,
+        "SDMMC 1bit/400kHz MBR signature=55aa partition={}",
+        partition
+    );
+    card.set_four_bit(timer)?;
+    card.read_sector(0, &mut sector, timer)?;
+    if sector != mbr {
+        let _ = writeln!(
+            console,
+            "SDMMC MBR mismatch between 1bit and 4bit; stopping probe"
+        );
+        return Ok(false);
+    }
+    let _ = writeln!(
+        console,
+        "SDMMC 4bit/25MHz MBR matches, capacity={} bytes",
+        card.info.sectors * 512
+    );
+    card.read_sector(partition, &mut sector, timer)?;
+    let _ = writeln!(console, "SDMMC partition LBA={} signature={:02x?} label={:?} fs={:?} bytes_per_sector={} sectors_per_cluster={}",
+        partition, &sector[510..], core::str::from_utf8(&sector[71..82]), core::str::from_utf8(&sector[82..90]),
+        u16::from_le_bytes([sector[11],sector[12]]), sector[13]);
+    if sector[510..] != [0x55, 0xaa] || u64::from(partition) + 2048 > card.info.sectors {
+        let _ = writeln!(
+            console,
+            "SDMMC invalid partition boot sector or probe range"
+        );
+        return Ok(false);
+    }
+    let mut previous = None;
+    for pass in 0..2 {
+        if pass == 1 {
+            card.configure_bus(timer)?;
+            let _ = writeln!(console, "SDMMC negotiated {:?}", card.info);
+            card.read_sector(0, &mut sector, timer)?;
+            if sector != mbr {
+                let _ = writeln!(console, "SDMMC MBR mismatch after speed change");
+                return Ok(false);
+            }
+        }
+        let start = timer.now_us();
+        let mut checksum = 0x811c9dc5u32;
+        // 1MiB, CMD17 per sector; baseline includes DMA setup/cache sync overhead.
+        for lba in partition..partition + 2048 {
+            card.read_sector(lba, &mut sector, timer)?;
+            for chunk in sector.as_chunks::<4>().0 {
+                checksum = (checksum ^ u32::from_le_bytes(*chunk)).wrapping_mul(0x01000193);
+            }
+        }
+        let us = timer.now_us().wrapping_sub(start) & ((1 << 48) - 1);
+        let _ = writeln!(
+            console,
+            "SDMMC READ pass={} clock_hz={} sectors=2048 us={} KiB_s={} checksum={:08x}",
+            pass,
+            card.info.clock_hz,
+            us,
+            1_024_000_000 / us.max(1),
+            checksum
+        );
+        if previous.is_some_and(|old| old != checksum) {
+            let _ = writeln!(console, "SDMMC read checksum mismatch; stopping probe");
+            return Ok(false);
+        }
+        previous = Some(checksum);
+    }
+    let _ = writeln!(
+        console,
+        "SDMMC repeated 1MiB reads match; registers={:08x?}",
+        card.registers()
+    );
+    Ok(true)
+}
+
+fn sdmmc_write_probe(
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<bool, hal::sdmmc::Error> {
+    let mut card = unsafe { hal::sdmmc::Sdmmc::new(timer) }?;
+    card.configure_bus(timer)?;
+    let _ = writeln!(console, "SDMMC write bus {:?}", card.info);
+    let lba = (card.info.sectors - 1) as u32;
+    let mut original = [0u8; 512];
+    card.read_sector(lba, &mut original, timer)?;
+    let pattern: [u8; 512] =
+        core::array::from_fn(|i| (i as u8).wrapping_mul(73) ^ ((i >> 3) as u8) ^ 0xa5);
+    let mut actual = [0u8; 512];
+    let start = timer.now_us();
+    let checked = (|| {
+        card.write_sector(lba, &pattern, timer)?;
+        card.read_sector(lba, &mut actual, timer)?;
+        Ok(actual == pattern)
+    })();
+    let _ = writeln!(
+        console,
+        "SDMMC WRITE_TEST lba={} result={:?} us={}",
+        lba,
+        checked,
+        timer.now_us().wrapping_sub(start) & ((1 << 48) - 1)
+    );
+    // Always attempt restoration, including when the trial write/read failed.
+    card.write_sector(lba, &original, timer)?;
+    card.read_sector(lba, &mut actual, timer)?;
+    let restored = actual == original;
+    let _ = writeln!(
+        console,
+        "SDMMC WRITE_RESTORE lba={} matches={}",
+        lba, restored
+    );
+    checked.map(|matched| matched && restored)
+}
+
+fn sdmmc_info(
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<(), hal::sdmmc::Error> {
+    let mut card = unsafe { hal::sdmmc::Sdmmc::new(timer) }?;
+    let _ = writeln!(console, "SD_INFO {:?}", card.info);
+    let scr = card.read_scr(timer)?;
+    let _ = writeln!(console, "SD_SCR raw={:02x?}", scr);
+    let bits = u64::from_be_bytes(scr);
+    let _ = writeln!(console, "SD_SCR structure={} sd_spec={} spec3={} spec4={} specx={} bus_width_mask={:x} CMD23={} CMD20={}",
+        bits>>60, (bits>>56)&15, (bits>>47)&1, (bits>>42)&1, (bits>>38)&15,
+        (bits>>48)&15, (bits>>33)&1, (bits>>32)&1);
+    let status = card.read_sd_status(timer)?;
+    let _ = writeln!(console, "SD_STATUS raw={:02x?}", status);
+    let _ = writeln!(console, "SD_STATUS bus_width_code={} speed_class_code={} performance_move_MB_s={} AU_code={} UHS_grade={}",
+        status[0]>>6, status[8], status[9], status[10]>>4, status[14]>>4);
+    let csd = card.info.csd;
+    let classes = (csd[2] >> 20) & 0xfff;
+    let _ = writeln!(
+        console,
+        "SD_CSD tran_speed_code={:02x} command_classes={:03x} permanent_WP={} temporary_WP={}",
+        csd[3] & 255,
+        classes,
+        (csd[0] >> 13) & 1,
+        (csd[0] >> 12) & 1
+    );
+    if classes & (1 << 10) != 0 && (bits >> 56) & 15 >= 1 {
+        let switch = card.check_speed(timer)?;
+        let _ = writeln!(console, "SD_CMD6_CHECK raw={:02x?}", switch);
+        let support = u16::from_be_bytes([switch[12], switch[13]]);
+        let _ = writeln!(console, "SD_CMD6_CHECK max_current_mA={} access_modes={:04x} default={} high_speed={} SDR50={} SDR104={} DDR50={} check_result={} status_version={}",
+            u16::from_be_bytes([switch[0],switch[1]]), support, support&1!=0, support&2!=0,
+            support&4!=0, support&8!=0, support&16!=0, switch[16]&15, switch[17]);
+    } else {
+        let _ = writeln!(console, "SD_CMD6_CHECK unsupported by declared SCR/CSD");
+    }
+    let _ = writeln!(
+        console,
+        "SD_INFO unchanged width={} clock_hz={} voltage=3300mV (no CMD11, no CMD6 switch)",
+        card.info.width, card.info.clock_hz
+    );
+    Ok(())
 }
