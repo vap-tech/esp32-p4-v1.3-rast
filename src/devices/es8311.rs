@@ -53,7 +53,7 @@ impl Es8311 {
             (0x37, 0x08),
             (0x45, 0),
             (0x31, 0x60),
-            (0x32, 0x8f),
+            (0x32, 0x95), // -21 dB, 3 dB above the earlier quiet baseline
         ] {
             Self::write(bus, timer, reg, value)?;
         }

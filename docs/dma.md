@@ -221,3 +221,9 @@ canary. Это результат конкретного JPEG/нагрузки �
 Метрики и цифровой capture должны быть проверены в том числе искусственной
 задержкой producer; их overhead измеряется отдельно. Конечные тесты не дают
 гарантии минимального аудиозапаса для произвольной будущей нагрузки.
+
+## Follow-up completed
+
+The planned live WAV + JPEG/LCD test, continuous sample comparison, refill-latency
+bounds and detector fault injection have been implemented and run. The earlier
+"not yet implemented" plan is historical at commit 187c18e. [Current results](wav-lab.md).

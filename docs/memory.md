@@ -178,3 +178,8 @@ L1 I+D при L2=0 также проверены: Matrix 2.628 s, Loeffler 1.696
 SD/I2S handoffs и смешанная нагрузка с I+D проверены отдельно: [DMA](dma.md).
 Текущая нижняя карта расширяет CODE budget до 132 KiB за счёт переиспользования
 загрузочного стека для временного SD scratch; арена 496 KiB сохранена.
+
+The live WAV diagnostic preallocates **53952 B** in the internal arena for PCM
+scratch, reference history and RX DMA. This replaces deeply nested scratch on the
+call stack: measured peak is **10812/16384 B**. Arena used returns to zero after
+confirmed RX/TX park. [Validation and limits](wav-lab.md).

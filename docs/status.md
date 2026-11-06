@@ -1,5 +1,16 @@
 # Состояние проекта — 2026-11-06
 
+## Live WAV + JPEG + LCD with digital verification
+
+One SD/FAT32 volume now supports independent readonly SharedFile cursors.
+Minute runs passed with I ON / D OFF and with I+D ON: 23/34 JPEG frames,
+965120/983552 consecutively verified stereo frames, zero sample mismatches and
+TX errors. Observed min OWN count=3, max refill latency upper bound 4.893/3.649 ms.
+Injected repeat detected at the exact frame; injected delay counted one underrun.
+Stack peak 10812 B; scratch preallocated in SRAM. DAC -21 dB (+3 dB).
+[Coverage, limits and diagnostic build](wav-lab.md).
+
+
 ## DMA validation after stable baseline
 
 SD dirty-RX / guard soak passed with I+D ON; LCD passed repeated JPEG updates.
@@ -88,7 +99,7 @@ Current boot defaults remain all-bypass; runtime experiments are opt-in.
 
 | Параметр | Значение |
 | --- | --- |
-| LCD DPI | 48 MHz, расчётная развёртка около 56.5 Hz |
+| LCD DPI | 48 MHz, согласованные HTOTAL=1344 / HLINE=1925, расчётная развёртка около 56.33 Hz |
 | DSI | 2 lanes × 550 Mbps |
 | Подсветка по умолчанию | 25% |
 | Exposure камеры | 1120 строк, VTS 1164 |

@@ -51,6 +51,9 @@ PHY lock, stop state, FIFO и чтение ограничены таймером
 VSW/VBP/VFP=2/12/20. Host использует byte clock 68.75 MHz и ожидаемые
 50 MHz: HSA=28, HBP=187, HLINE=1843, VSA=2, VBP=12, VFP=20, VACTIVE=600.
 Расчётная частота VPG по HLINE и 634 строкам ≈58.84 Hz; физически не измерялась.
+Это тайминги внутреннего VPG. Для framebuffer используются согласованные
+HTOTAL=1344 при 48 MHz и HLINE=1925 при 68.75 MHz (около 56.33 Hz),
+HSW/HBP/HFP=20/136/164; подробности и ограничения — в [framebuffer.md](framebuffer.md).
 Burst with sync pulses, LP в интервалах blanking, per-frame BTA отключён.
 Приложение меняет вертикальные/горизонтальные полосы примерно раз в 5 секунд.
 Для смены ориентации host кратко переводится в standby; состояние PLL и панели

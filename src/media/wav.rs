@@ -83,6 +83,15 @@ impl Wave {
         input: &mut R,
         frames: &mut [u32; 512],
     ) -> Result<usize, Error<R::Error>> {
+        self.read_frames_with_scratch(input, frames, &mut [0; 2048])
+    }
+    /// Same PCM expansion with caller-owned scratch for deeply nested render loops.
+    pub fn read_frames_with_scratch<R: Input>(
+        &self,
+        input: &mut R,
+        frames: &mut [u32; 512],
+        raw: &mut [u8; 2048],
+    ) -> Result<usize, Error<R::Error>> {
         let position = input.position();
         let end = self.data_offset + self.data_bytes;
         if position < self.data_offset || position > end {
@@ -90,7 +99,6 @@ impl Wave {
         }
         let stride = usize::from(self.channels) * 2;
         let n = ((end - position) as usize / stride).min(frames.len());
-        let mut raw = [0; 2048];
         read_exact(input, &mut raw[..n * stride])?;
         for (i, frame) in frames.iter_mut().enumerate() {
             *frame = if i < n {

@@ -292,6 +292,22 @@ impl Tx {
         }
         Ok(())
     }
+    /// Nonblocking stop request. Keep resources alive until stop() confirms park.
+    pub fn request_stop(&mut self) {
+        unsafe {
+            write(I2S + 0x24, TX_CONF);
+            write(DMA + 0xe0, 1);
+        }
+    }
+    /// Non-atomic physical snapshot; includes in-flight/prefetched descriptors.
+    pub fn stream_owned_mask(&self) -> u8 {
+        let base = (core::ptr::addr_of!(STREAM_DESC) as usize + 0x4000_0000) as *const Descriptor;
+        let mut mask = 0;
+        for i in 0..STREAM_BUFFERS {
+            mask |= ((unsafe { (*base.add(i)).0.as_ptr().read_volatile() } >> 31) as u8) << i;
+        }
+        mask
+    }
     pub fn start(&mut self, timer: &mut Timer) -> Result<(), Error> {
         unsafe {
             write(I2S + 0x74, 1 << 31);
@@ -514,3 +530,6 @@ mod tests {
         assert_eq!(DATA_BITS, 16);
     }
 }
+
+#[cfg(feature = "audio-lab")]
+pub mod capture;

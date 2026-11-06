@@ -31,6 +31,10 @@ parser.add_argument('--l2-probe', action='store_true', help='read-only L2 positi
 parser.add_argument('--sd-stress', action='store_true', help='read-only dirty RX DMA soak, active framebuffer required')
 parser.add_argument('--mixed-stress', action='store_true', help='muted PCM DMA + SD JPEG + LCD soak')
 parser.add_argument('--play-stall', nargs='?', const='SATIE.WAV', help='inject underrun; expects owner error and safe cleanup')
+parser.add_argument('--wav-lab', action='store_true', help='60s real WAV + SD JPEG + continuous GPIO9 capture (audio-lab build)')
+parser.add_argument('--wav-lab-stall', action='store_true', help='inject stall in live WAV lab and verify one underrun')
+parser.add_argument('--wav-lab-control', action='store_true', help='8 JPEG + live WAV with RX disabled for overhead comparison')
+parser.add_argument('--wav-lab-repeat', action='store_true', help='inject one repeated TX frame and require precise RX detection')
 args = parser.parse_args()
 if args.seconds is not None and (args.seconds <= 0 or args.play is None):
     parser.error('--seconds requires --play and a positive duration')
@@ -149,6 +153,16 @@ try:
         line = receive(b'JPEG PROFILE DONE', timeout=180)
         if b'Err(' in line or b'guards=false' in line:
             raise RuntimeError('JPEG profile failed; see firmware reply')
+    for enabled, command in [(args.wav_lab, 'wav-lab'), (args.wav_lab_stall, 'wav-lab-stall'), (args.wav_lab_control, 'wav-lab-control'), (args.wav_lab_repeat, 'wav-lab-repeat')]:
+        if enabled:
+            os.write(fd, (':' + command + '\n').encode('ascii'))
+            try:
+                line = receive(b'WAV LAB DONE', timeout=180)
+            except KeyboardInterrupt:
+                os.write(fd, b'\x1b')
+                line = receive(b'WAV LAB DONE', timeout=10)
+            if b'Err(' in line or b'guards=false' in line or b'guard_ok: false' in line:
+                raise SystemExit('WAV lab failed')
     if args.jpeg_idct_bench is not None:
         print('HOST -> jpeg-idct-bench ' + args.jpeg_idct_bench, flush=True)
         os.write(fd, (':jpeg-idct-bench ' + args.jpeg_idct_bench + '\n').encode('ascii'))

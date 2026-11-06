@@ -698,6 +698,78 @@ impl<D: BlockDevice> File<'_, D> {
     }
 }
 
+/// Owns one mounted volume; it cannot be replaced while borrowed file cursors live.
+pub struct SharedVolume<D> {
+    inner: core::cell::RefCell<Fat32<D>>,
+}
+impl<D> SharedVolume<D> {
+    pub fn new(volume: Fat32<D>) -> Self {
+        Self {
+            inner: core::cell::RefCell::new(volume),
+        }
+    }
+    pub fn into_inner(self) -> Fat32<D> {
+        self.inner.into_inner()
+    }
+}
+/// Independent readonly cursor sharing one volume. Each operation borrows the
+/// volume only for its duration; handles cannot outlive or migrate to another FS.
+pub struct SharedFile<'a, D> {
+    volume: &'a SharedVolume<D>,
+    entry: DirEntry,
+    position: u32,
+    hint_index: u32,
+    hint_cluster: u32,
+}
+impl<'a, D: BlockDevice> SharedFile<'a, D> {
+    pub fn open(volume: &'a SharedVolume<D>, path: &str) -> Result<Self, Error<D::Error>> {
+        let mut fs = volume.inner.borrow_mut();
+        let file = fs.open(path)?;
+        Ok(Self {
+            volume,
+            entry: file.entry,
+            position: 0,
+            hint_index: 0,
+            hint_cluster: file.hint_cluster,
+        })
+    }
+    pub fn len(&self) -> u32 {
+        self.entry.size
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn position(&self) -> u32 {
+        self.position
+    }
+    pub fn seek(&mut self, position: u32) -> Result<(), Error<D::Error>> {
+        if position > self.len() {
+            return Err(Error::InvalidOffset);
+        }
+        self.position = position;
+        Ok(())
+    }
+    pub fn read(&mut self, out: &mut [u8]) -> Result<usize, Error<D::Error>> {
+        let mut fs = self.volume.inner.borrow_mut();
+        let mut file = File {
+            fs: &mut fs,
+            entry: self.entry,
+            position: self.position,
+            hint_index: self.hint_index,
+            hint_cluster: self.hint_cluster,
+        };
+        let result = file.read(out);
+        // Preserve completed-chunk progress even when the transport reports an error.
+        self.position = file.position;
+        self.hint_index = file.hint_index;
+        self.hint_cluster = file.hint_cluster;
+        result
+    }
+    pub(crate) fn with_device<R>(&self, operation: impl FnOnce(&mut D) -> R) -> R {
+        operation(&mut self.volume.inner.borrow_mut().device)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -867,6 +939,50 @@ mod tests {
     fn check(bytes: &[u8], offset: usize) {
         for (i, byte) in bytes.iter().enumerate() {
             assert_eq!(*byte, pattern(offset + i), "offset {}", offset + i);
+        }
+    }
+    #[test]
+    fn shared_cursor_keeps_completed_progress_on_io_error() {
+        let volume = SharedVolume::new(Fat32::mount(Partition::mbr(disk(), 0).unwrap()).unwrap());
+        let mut a = SharedFile::open(&volume, "FAST.BIN").unwrap();
+        let mut b = SharedFile::open(&volume, "FRAG.BIN").unwrap();
+        b.seek(4095).unwrap();
+        volume.inner.borrow_mut().device.device_mut().fail_at = Some(cluster_lba(7));
+        let mut out = vec![0; a.len() as usize];
+        assert!(a.read(&mut out).is_err());
+        assert_eq!(a.position(), 8192);
+        assert_eq!(b.position(), 4095);
+        volume.inner.borrow_mut().device.device_mut().fail_at = None;
+        let pos = a.position() as usize;
+        assert_eq!(a.read(&mut out[pos..]).unwrap(), out.len() - pos);
+        assert_eq!(a.position(), a.len());
+        assert_eq!(b.read(&mut [0; 3]).unwrap(), 3);
+        assert_eq!(b.position(), 4098);
+    }
+    #[test]
+    fn shared_cursors_preserve_offsets_and_cluster_hints() {
+        let mut fs = Fat32::mount(Partition::mbr(disk(), 0).unwrap()).unwrap();
+        let mut a = fs.open("FAST.BIN").unwrap();
+        let mut fast = vec![0; a.len() as usize];
+        a.read(&mut fast).unwrap();
+        let mut b = fs.open("FRAG.BIN").unwrap();
+        let mut frag = vec![0; b.len() as usize];
+        b.read(&mut frag).unwrap();
+        let volume = SharedVolume::new(fs);
+        let mut a = SharedFile::open(&volume, "FAST.BIN").unwrap();
+        let mut b = SharedFile::open(&volume, "FRAG.BIN").unwrap();
+        for (ap, bp) in [(0, 0), (4093, 4095), (8190, 8001), (31, 63), (12000, 8999)] {
+            a.seek(ap).unwrap();
+            b.seek(bp).unwrap();
+            for _ in 0..3 {
+                let mut buf = [0; 777];
+                let p = a.position() as usize;
+                let n = a.read(&mut buf).unwrap();
+                assert_eq!(&buf[..n], &fast[p..p + n]);
+                let p = b.position() as usize;
+                let n = b.read(&mut buf).unwrap();
+                assert_eq!(&buf[..n], &frag[p..p + n]);
+            }
         }
     }
     #[test]

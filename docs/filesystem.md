@@ -201,3 +201,13 @@ Z видит CONFIG.TXT в корне, старый `LOGOS/DUMMY.565` по-пр�
 FSInfo/backup, empty/nested file, отказ от перезаписи, активную FAT без
 зеркалирования, терминатор на границе секторов, сбой записи данных и dirty mirror.
 Форматирование и clippy также проходят.
+
+## Multiple readonly cursors, one controller
+
+`SharedVolume::new(fs)` owns a volume with a private RefCell; `SharedFile::open`
+borrows it briefly per operation while keeping an independent position and cluster
+hint. This permits cooperative WAV/JPEG reads without duplicating SDMMC ownership,
+heap allocation or a runtime. File cursors bind to their volume; it cannot be
+replaced/consumed while a cursor is still used. The exclusive File API remains.
+Host tests cover interleaved fragmented reads, seeks and progress after I/O errors.
+[On-board simultaneous WAV/JPEG validation](wav-lab.md).

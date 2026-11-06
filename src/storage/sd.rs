@@ -81,3 +81,12 @@ impl super::fat32::File<'_, super::Partition<SdDevice<'_>>> {
         operation(self.device_mut().device_mut().timer)
     }
 }
+
+impl super::fat32::SharedFile<'_, super::Partition<SdDevice<'_>>> {
+    pub fn read_stats(&self) -> ReadStats {
+        self.with_device(|d| d.device_mut().stats())
+    }
+    pub fn with_timer<R>(&self, operation: impl FnOnce(&mut Timer) -> R) -> R {
+        self.with_device(|d| operation(d.device_mut().timer))
+    }
+}

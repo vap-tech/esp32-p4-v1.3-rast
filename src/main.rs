@@ -10,6 +10,9 @@ use esp32_p4::{
     hal,
 };
 
+#[cfg(feature = "audio-lab")]
+mod audio_lab;
+
 use core::{arch::global_asm, fmt::Write, panic::PanicInfo};
 
 global_asm!(
@@ -224,7 +227,39 @@ extern "C" fn rust_main() -> ! {
                         continue;
                     }
                 };
-                if line == "mixed-stress" {
+                if line == "wav-lab"
+                    || line == "wav-lab-stall"
+                    || line == "wav-lab-control"
+                    || line == "wav-lab-repeat"
+                {
+                    #[cfg(feature = "audio-lab")]
+                    {
+                        if camera_live || !scanout_active || internal_arena.stats().used != 0 {
+                            let _ = writeln!(console, "WAV LAB DONE Err(state)");
+                            continue;
+                        }
+                        let result = audio_lab::run(
+                            framebuffer.as_mut().unwrap(),
+                            &internal_arena,
+                            &mut i2c,
+                            &mut timer,
+                            &mut console,
+                            line,
+                        );
+                        internal_arena.reset();
+                        let _ = writeln!(
+                            console,
+                            "WAV LAB DONE {:?} guards={} stack={:?}",
+                            result,
+                            framebuffer.as_ref().unwrap().guards_ok(),
+                            hal::memory::stack_usage()
+                        );
+                    }
+                    #[cfg(not(feature = "audio-lab"))]
+                    {
+                        let _ = writeln!(console, "WAV LAB DONE Err(build audio-lab)");
+                    }
+                } else if !cfg!(feature = "audio-lab") && line == "mixed-stress" {
                     if camera_live || !scanout_active {
                         let _ = writeln!(console, "MIXED DONE Err(state)");
                         continue;
@@ -238,7 +273,7 @@ extern "C" fn rust_main() -> ! {
                         framebuffer.as_ref().unwrap().guards_ok(),
                         hal::memory::stack_usage()
                     );
-                } else if line == "sd-stress" {
+                } else if !cfg!(feature = "audio-lab") && line == "sd-stress" {
                     if camera_live || !scanout_active {
                         let _ = writeln!(console, "SD STRESS DONE Err(state)");
                         continue;
@@ -470,7 +505,10 @@ extern "C" fn rust_main() -> ! {
                         scanout_active,
                         fb.guards_ok()
                     );
-                } else if let Some(path) = line.strip_prefix("jpeg-idct-bench ") {
+                } else if let Some(path) = line
+                    .strip_prefix("jpeg-idct-bench ")
+                    .filter(|_| !cfg!(feature = "audio-lab"))
+                {
                     if camera_live || !scanout_active || framebuffer.is_none() {
                         let _=writeln!(console,"JPEG IDCT DONE Err(requires active framebuffer, camera off; use --image first)");
                         continue;
@@ -488,7 +526,10 @@ extern "C" fn rust_main() -> ! {
                         framebuffer.as_ref().unwrap().guards_ok(),
                         hal::memory::stack_usage()
                     );
-                } else if let Some(path) = line.strip_prefix("jpeg-profile ") {
+                } else if let Some(path) = line
+                    .strip_prefix("jpeg-profile ")
+                    .filter(|_| !cfg!(feature = "audio-lab"))
+                {
                     if camera_live || !scanout_active || framebuffer.is_none() {
                         let _=writeln!(console,"JPEG PROFILE DONE Err(requires active framebuffer, camera off; use --image first)");
                         continue;
@@ -506,7 +547,10 @@ extern "C" fn rust_main() -> ! {
                         framebuffer.as_ref().unwrap().guards_ok(),
                         hal::memory::stack_usage()
                     );
-                } else if let Some(path) = line.strip_prefix("jpeg-bench ") {
+                } else if let Some(path) = line
+                    .strip_prefix("jpeg-bench ")
+                    .filter(|_| !cfg!(feature = "audio-lab"))
+                {
                     if camera_live || !scanout_active || framebuffer.is_none() {
                         let _=writeln!(console,"JPEG BENCH DONE Err(requires active framebuffer, camera off; use --image first)");
                         continue;
@@ -527,6 +571,7 @@ extern "C" fn rust_main() -> ! {
                 } else if let Some(path) = line
                     .strip_prefix("play ")
                     .or_else(|| line.strip_prefix("play-stall "))
+                    .filter(|_| !cfg!(feature = "audio-lab"))
                 {
                     let result = sd_audio(
                         path,
@@ -653,28 +698,28 @@ extern "C" fn rust_main() -> ! {
                 let _ = esp32_p4::devices::ov02c10::stream(&mut i2c, &mut timer, false);
                 camera_live = false;
                 let _ = writeln!(console, "CMD O camera stopped");
-            } else if command == b'p' {
+            } else if !cfg!(feature = "audio-lab") && command == b'p' {
                 let result = audio_tone(&mut i2c, &mut timer, &mut console);
                 let _ = writeln!(console, "CMD p {:?}", result);
-            } else if command == b'!' {
+            } else if !cfg!(feature = "audio-lab") && command == b'!' {
                 let result = sd_config_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD ! {:?}", result);
-            } else if command == b'Z' {
+            } else if !cfg!(feature = "audio-lab") && command == b'Z' {
                 let result = sd_fat_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD Z {:?}", result);
-            } else if command == b'Y' {
+            } else if !cfg!(feature = "audio-lab") && command == b'Y' {
                 let result = sdmmc_info(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD Y {:?}", result);
-            } else if command == b'#' {
+            } else if !cfg!(feature = "audio-lab") && command == b'#' {
                 let result = sdmmc_multi_write_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD # {:?}", result);
-            } else if command == b'@' {
+            } else if !cfg!(feature = "audio-lab") && command == b'@' {
                 let result = sdmmc_write_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD @ {:?}", result);
-            } else if command == b'm' {
+            } else if !cfg!(feature = "audio-lab") && command == b'm' {
                 let result = sdmmc_multi_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD m {:?}", result);
-            } else if command == b'M' {
+            } else if !cfg!(feature = "audio-lab") && command == b'M' {
                 let result = sdmmc_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD M {:?}", result);
             } else if command == b'Q' {
@@ -1273,7 +1318,7 @@ fn audio_tone(
             let before = tx.status();
             let _ = writeln!(
                 console,
-                "AUDIO PLAY PA=GPIO11 1000Hz 16000Hz PCM16 stereo/16bit slots DAC=-24dB peak=4096/32768 {:?}",
+                "AUDIO PLAY PA=GPIO11 1000Hz 16000Hz PCM16 stereo/16bit slots DAC=-21dB peak=4096/32768 {:?}",
                 before
             );
             pa.set_high();
@@ -2002,7 +2047,7 @@ fn sd_audio(
         }
         let _ = writeln!(
             console,
-            "MEDIA PLAY START path={} rate={} channels={} data={} DAC=-24dB ESC=stop",
+            "MEDIA PLAY START path={} rate={} channels={} data={} DAC=-21dB ESC=stop",
             path, wave.sample_rate, wave.channels, wave.data_bytes
         );
         file.with_timer(|timer| tx.start(timer)).map_err(audio)?;

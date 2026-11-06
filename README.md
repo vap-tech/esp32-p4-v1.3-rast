@@ -57,7 +57,7 @@ HAL доступен через `esp32_p4::hal`; драйверы внешних
 
 Монитор использует только стандартную библиотеку Python (Linux). Он освобождает DTR/RTS и переподключается после USB reset. Во время прошивки монитор нужно остановить. В этой сессии обычный монитор espflash оставлял плату в download mode; для проверки запуска используется `scripts/monitor.py`.
 
-Текущий образ — **141616 байт**. Read-only RTC выводится с heartbeat; VLF/VDET установлены, календарь некорректен, время не менялось. На плате подтверждены GT911 1024×600, поток касаний и подтверждение кадров. Результаты предыдущих проверок I²C, таймера и GPIO сохранены в документации. Минимальный исходный образ 368 байт и особенности запуска описаны в [docs/boot.md](docs/boot.md).
+Текущий образ — **141936 байт**. Read-only RTC выводится с heartbeat; VLF/VDET установлены, календарь некорректен, время не менялось. На плате подтверждены GT911 1024×600, поток касаний и подтверждение кадров. Результаты предыдущих проверок I²C, таймера и GPIO сохранены в документации. Минимальный исходный образ 368 байт и особенности запуска описаны в [docs/boot.md](docs/boot.md).
 
 Локальный справочник по регистрам: `~/esp-idf`, tag `v6.1`. SDK не устанавливается и в сборку не подключается.
 
@@ -127,3 +127,8 @@ DMA validation: dirty SD RX, repeated LCD updates, four-block I2S streaming,
 underrun/restart and mixed PCM + SD JPEG + LCD passed on rev1.3 with I+D ON.
 `--play SATIE.WAV` now streams through a four-block ring; `--mixed-stress` uses
 generated PCM with the speaker disabled. [Coverage and commands](docs/dma.md).
+
+Real WAV/JPEG lab: one SD/FAT32 volume, independent readonly cursors, continuous
+GPIO9 RX sample comparison and ring latency bounds. Both I-only and I+D passed
+minute runs; the detector catches an injected repeated frame without DMA error.
+Default DAC volume is now **-21 dB** (+3 dB). [Results and build](docs/wav-lab.md).

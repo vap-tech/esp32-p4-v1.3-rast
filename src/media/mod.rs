@@ -34,6 +34,22 @@ impl<D: crate::storage::BlockDevice> Input for crate::storage::fat32::File<'_, D
         self.read(out)
     }
 }
+impl<D: crate::storage::BlockDevice> Input for crate::storage::fat32::SharedFile<'_, D> {
+    type Error = crate::storage::Error<D::Error>;
+    fn len(&self) -> u32 {
+        self.len()
+    }
+    fn position(&self) -> u32 {
+        self.position()
+    }
+    fn seek(&mut self, position: u32) -> Result<(), Self::Error> {
+        self.seek(position)
+    }
+    fn read(&mut self, out: &mut [u8]) -> Result<usize, Self::Error> {
+        self.read(out)
+    }
+}
+
 pub fn read_exact<R: Input>(input: &mut R, mut out: &mut [u8]) -> Result<(), Error<R::Error>> {
     while !out.is_empty() {
         let n = input.read(out).map_err(Error::Io)?;

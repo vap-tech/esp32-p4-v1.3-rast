@@ -182,3 +182,10 @@ ring, owner check enabled, double cache maintenance and explicit OWN handoff.
 60 s SD WAV + LCD and generated PCM + JPEG/LCD mixed tests passed. Underrun
 stops DMA; a subsequent playback command reinitializes the channel. No automatic
 resume of the same file is implemented. [Current validation and commands](dma.md).
+
+## Live WAV and digital comparison
+
+Current default DAC reg32=**0x95 / -21 dB**, raised 3 dB at user request.
+The 0x8F/-24 dB figures above describe the earlier quiet baseline. Real WAV with
+SD JPEG/LCD now passed continuous GPIO9 capture in both cache configurations.
+[Sample continuity, ring metrics, negative tests and limits](wav-lab.md).

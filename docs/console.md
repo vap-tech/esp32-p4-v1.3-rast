@@ -63,3 +63,7 @@ Additional diagnostics:
 See [DMA validation](dma.md) for setup and limits.
 
 Cache controls: `:icache on/off`, `:dcache on/off`, `:l2 on/off` (l2-128 build), `:l2-probe`.
+
+Live WAV diagnostic (audio-lab build): `:wav-lab`, `:wav-lab-control`,
+`:wav-lab-repeat`, `:wav-lab-stall` with matching script flags.
+[Setup and unavailable legacy commands in this build](wav-lab.md).

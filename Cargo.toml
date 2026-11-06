@@ -6,6 +6,8 @@ edition = "2021"
 [features]
 # Experimental rev1.x layout; not a runtime memory-size toggle.
 l2-128 = []
+# Long WAV/JPEG capture diagnostics; omit legacy bench commands to bound code size.
+audio-lab = []
 
 [dependencies]
 

@@ -191,7 +191,9 @@ impl Dsi {
         write(HOST + 4, 0);
         write(BRIDGE + 4, 0);
         write(BRIDGE, 1);
-        write(BRIDGE + 0x40, 1024 << 4);
+        // Do not mask FIFO underruns on the visible lines. The field at
+        // bits 15:4 is a line-count interrupt mask, not the frame width.
+        write(BRIDGE + 0x40, 0);
         write(BRIDGE + 0x44, 1);
         modify(CLOCK + 0x28, 0, 1 << 30);
         modify(
@@ -199,14 +201,18 @@ impl Dsi {
             (3 << 5) | (0xff << 8),
             (1 << 5) | (4 << 8) | (1 << 7),
         );
-        // Diagnostic: match the known-good VPG/SDK 48-MHz DPI clock.
+        // DPI = 48 MHz, lane byte clock = 550 / 8 = 68.75 MHz.
+        // Their ratio is 275/192: choose 7*192 DPI clocks per line and
+        // 7*275 byte clocks, so both sides have exactly the same period.
+        // TRM 43.4 video timing requires matching line durations to avoid
+        // line-buffer overflow. Only HFP grows (160 -> 164 pixels).
         write(HOST + 0x48, (20 * 550 + 192) / 384);
         write(HOST + 0x4c, (136 * 550 + 192) / 384);
-        write(HOST + 0x50, (1340 * 550 + 192) / 384);
+        write(HOST + 0x50, 1925);
         write(HOST + 0x38, 0xbf02); // VPG disabled, burst/LP retained.
         write(BRIDGE + 0x30, (600 << 16) | 634);
         write(BRIDGE + 0x34, (2 << 16) | 12);
-        write(BRIDGE + 0x38, (1024 << 16) | 1340);
+        write(BRIDGE + 0x38, (1024 << 16) | 1344);
         write(BRIDGE + 0x3c, (20 << 16) | 136);
         write(BRIDGE + 0x18, 2); // RGB565.
         write(BRIDGE + 0x0c, (1 << 31) | 153600);
@@ -238,7 +244,7 @@ impl Dsi {
         write(DMA + 0x18, 0x202);
         write(HOST + 0x34, 0);
         write(HOST + 4, 1);
-        write(BRIDGE + 0x40, (1024 << 4) | 1);
+        write(BRIDGE + 0x40, 1);
         write(BRIDGE + 0x44, 1);
         self.scanout = true;
         Ok(())
