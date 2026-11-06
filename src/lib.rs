@@ -3,3 +3,7 @@
 pub mod hal;
 
 pub mod devices;
+
+pub mod storage;
+
+pub mod media;

@@ -118,7 +118,72 @@ extern "C" fn rust_main() -> ! {
     let mut camera_controls = esp32_p4::devices::ov02c10::Controls::preview();
     loop {
         if let Some(command) = console.read_byte() {
-            if matches!(command, b'+' | b'-') {
+            if command == b':' {
+                let mut line = [0u8; 96];
+                let line = match media_command_line(&mut console, &mut timer, &mut line) {
+                    Ok(line) => line,
+                    Err(error) => {
+                        let _ = writeln!(console, "MEDIA ERROR {}", error);
+                        continue;
+                    }
+                };
+                if let Some(path) = line.strip_prefix("image ") {
+                    if camera_live {
+                        let _ = writeln!(console, "MEDIA IMAGE DONE Err(camera active; use O)");
+                        continue;
+                    }
+                    if display.is_none() {
+                        let _ = writeln!(console, "MEDIA IMAGE DONE Err(display unavailable)");
+                        continue;
+                    }
+                    if framebuffer.is_none() {
+                        let memory = match psram.take() {
+                            Some(memory) => Ok(memory),
+                            None => unsafe { hal::psram::Psram::new(&mut timer) },
+                        };
+                        match memory {
+                            Ok(mut memory) => {
+                                if let Err(error) = memory.check() {
+                                    let _ = writeln!(console, "MEDIA IMAGE DONE Err({:?})", error);
+                                    continue;
+                                }
+                                framebuffer =
+                                    Some(esp32_p4::devices::framebuffer::Framebuffer::new(memory));
+                            }
+                            Err(error) => {
+                                let _ = writeln!(console, "MEDIA IMAGE DONE Err({:?})", error);
+                                continue;
+                            }
+                        }
+                    }
+                    let fb = framebuffer.as_mut().unwrap();
+                    let result = sd_image(path, fb, &mut timer, &mut console);
+                    if result.is_ok() && !scanout_active {
+                        let result = unsafe {
+                            display.as_mut().unwrap().start_framebuffer(
+                                esp32_p4::devices::framebuffer::DMA_ADDRESS,
+                                &mut timer,
+                            )
+                        };
+                        scanout_active = result.is_ok();
+                        let _ = writeln!(console, "MEDIA SCANOUT {:?}", result);
+                    }
+                    let _ = writeln!(
+                        console,
+                        "MEDIA IMAGE DONE {:?} active={} guards={}",
+                        result,
+                        scanout_active,
+                        fb.guards_ok()
+                    );
+                } else if let Some(path) = line.strip_prefix("play ") {
+                    let result = sd_audio(path, &mut i2c, &mut timer, &mut console);
+                    let _ = writeln!(console, "MEDIA PLAY DONE {:?}", result);
+                } else {
+                    let _ = writeln!(console, "MEDIA ERROR expected :image PATH or :play PATH");
+                }
+            } else if command == 27 {
+                let _ = writeln!(console, "MEDIA PLAY DONE Ok(idle)");
+            } else if matches!(command, b'+' | b'-') {
                 if let Some(panel) = display.as_mut() {
                     let brightness = if command == b'+' {
                         panel.brightness().saturating_add(5).min(100)
@@ -230,6 +295,15 @@ extern "C" fn rust_main() -> ! {
                 let _ = esp32_p4::devices::ov02c10::stream(&mut i2c, &mut timer, false);
                 camera_live = false;
                 let _ = writeln!(console, "CMD O camera stopped");
+            } else if command == b'p' {
+                let result = audio_tone(&mut i2c, &mut timer, &mut console);
+                let _ = writeln!(console, "CMD p {:?}", result);
+            } else if command == b'!' {
+                let result = sd_config_probe(&mut timer, &mut console);
+                let _ = writeln!(console, "CMD ! {:?}", result);
+            } else if command == b'Z' {
+                let result = sd_fat_probe(&mut timer, &mut console);
+                let _ = writeln!(console, "CMD Z {:?}", result);
             } else if command == b'Y' {
                 let result = sdmmc_info(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD Y {:?}", result);
@@ -543,9 +617,10 @@ extern "C" fn rust_main() -> ! {
 }
 
 fn display_help(console: &mut hal::usb_serial::Console) {
-    let _ = writeln!(console, "DISPLAY commands: +/- backlight5%; ]/[ digital gain; }}/{{ analogue gain; >/< exposure; = controls; Y SD capabilities (no speed switch); M SDMMC read-only probe; m SD multi-block read benchmark; # SD multi-write/verify/restore last 9 sectors; @ SD write/verify/restore last sector; Q panel RGB probe; E gray/RGB check; W full screenshot; H thumbnail; V camera-live; G camera-test-live; O camera-stop; F framebuffer; S fb-status; U patterns; P psram-test; a camera-info; A camera-test; o camera-scene; ? help; q status; B BIST-probe25s; L scanline-probe; e error-counter(clear); v/h/b patterns; i/I invert on/off; x/y/n mirror X/Y/none; c/C BGR/RGB; d/D display off/on; j/J idle on/off; k/f/N black/white/normal; s/w sleep/wake; t/u/T TE vblank/both/off; l TE line300; g idle-green; r/R soft/hard reset; 6/7 RGB565 at650/750; 8 RGB888 at750; z RGB565 at550");
+    let _ = writeln!(console, "DISPLAY commands: :image PATH / :play PATH (ESC stops audio); +/- backlight5%; ]/[ digital gain; }}/{{ analogue gain; >/< exposure; = controls; p quiet 1kHz speaker tone 2s; ! FAT32 create/verify CONFIG.TXT; Z FAT32 list/read-only file check; Y SD capabilities (no speed switch); M SDMMC read-only probe; m SD multi-block read benchmark; # SD multi-write/verify/restore last 9 sectors; @ SD write/verify/restore last sector; Q panel RGB probe; E gray/RGB check; W full screenshot; H thumbnail; V camera-live; G camera-test-live; O camera-stop; F framebuffer; S fb-status; U patterns; P psram-test; a camera-info; A camera-test; o camera-scene; ? help; q status; B BIST-probe25s; L scanline-probe; e error-counter(clear); v/h/b patterns; i/I invert on/off; x/y/n mirror X/Y/none; c/C BGR/RGB; d/D display off/on; j/J idle on/off; k/f/N black/white/normal; s/w sleep/wake; t/u/T TE vblank/both/off; l TE line300; g idle-green; r/R soft/hard reset; 6/7 RGB565 at650/750; 8 RGB888 at750; z RGB565 at550");
 }
 
+#[inline(never)]
 fn display_command(
     command: u8,
     panel: &mut jd9165::Display,
@@ -657,6 +732,7 @@ static mut CAMERA_BUFFER: CameraBuffer = CameraBuffer {
     after: [0; 64],
 };
 
+#[inline(never)]
 fn camera_command(
     command: u8,
     csi: &mut Option<hal::csi::Csi>,
@@ -784,6 +860,325 @@ extern "C" fn rust_trap(cause: u32, pc: u32, value: u32) -> ! {
     }
 }
 
+// A periodic 1kHz sine at 16kHz, duplicated to both PCM16 slots, peak -18dBFS.
+static AUDIO_TONE: [u32; 512] = {
+    let sine: [i16; 16] = [
+        0, 1567, 2896, 3784, 4096, 3784, 2896, 1567, 0, -1567, -2896, -3784, -4096, -3784, -2896,
+        -1567,
+    ];
+    let mut frames = [0; 512];
+    let mut i = 0;
+    while i < frames.len() {
+        let sample = sine[i % 16] as u16 as u32;
+        frames[i] = sample | (sample << 16);
+        i += 1;
+    }
+    frames
+};
+
+enum AudioError {
+    Codec(hal::i2c::Error),
+    I2s(hal::i2s::Error),
+}
+impl core::fmt::Debug for AudioError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Codec(error) => f.debug_tuple("Codec").field(error).finish(),
+            Self::I2s(error) => f.debug_tuple("I2s").field(error).finish(),
+        }
+    }
+}
+
+#[inline(never)]
+fn audio_tone(
+    bus: &mut hal::i2c::I2c,
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<(), AudioError> {
+    use esp32_p4::devices::es8311::Es8311;
+    let mut pa = unsafe { hal::gpio::Output::<11>::new_low() };
+    let mut tx = unsafe { hal::i2s::Tx::new(&AUDIO_TONE, timer) }.map_err(AudioError::I2s)?;
+    let result = (|| {
+        // Old working capture enabled I2S clocks before opening the codec.
+        tx.start(timer).map_err(AudioError::I2s)?;
+        let mut codec = Es8311::new(bus, timer).map_err(AudioError::Codec)?;
+        let _ = writeln!(console, "AUDIO ES8311 {:?}", codec.snapshot(bus, timer));
+        let play = (|| {
+            timer.delay_us(50_000);
+            let before = tx.status();
+            let _ = writeln!(
+                console,
+                "AUDIO PLAY PA=GPIO11 1000Hz 16000Hz PCM16 stereo/16bit slots DAC=-24dB peak=4096/32768 {:?}",
+                before
+            );
+            pa.set_high();
+            codec.mute(bus, timer, false).map_err(AudioError::Codec)?;
+            let _ = writeln!(
+                console,
+                "AUDIO PADS [DOUT,WS,BCLK,MCLK] high/4096,edges={:?} PA={} codec={:?}",
+                tx.pin_activity(),
+                pa.level(),
+                codec.snapshot(bus, timer)
+            );
+            let own = tx.capture(9, timer).map_err(AudioError::I2s)?;
+            let _ = writeln!(
+                console,
+                "AUDIO RX OWN raw={:x} desc={:08x} words={:08x?}",
+                own.dma,
+                own.descriptor,
+                &own.words[..16]
+            );
+            codec
+                .reference_output(bus, timer, true)
+                .map_err(AudioError::Codec)?;
+            let reference = tx.capture(48, timer).map_err(AudioError::I2s)?;
+            let _ = writeln!(
+                console,
+                "AUDIO RX CODEC raw={:x} desc={:08x} words={:08x?}",
+                reference.dma,
+                reference.descriptor,
+                &reference.words[..16]
+            );
+            codec
+                .reference_output(bus, timer, false)
+                .map_err(AudioError::Codec)?;
+            timer.delay_us(2_000_000);
+            let after = tx.status();
+            let _ = writeln!(
+                console,
+                "AUDIO SENT {:?} fifo_delta={} bck_delta={}",
+                after,
+                after.fifo.wrapping_sub(before.fifo),
+                after.bck.wrapping_sub(before.bck)
+            );
+            if after.dma & (1 << 2) != 0 || after.dma & (1 << 1) == 0 {
+                return Err(AudioError::I2s(hal::i2s::Error::Dma(after.dma)));
+            }
+            Ok(())
+        })();
+        let mute = codec.mute(bus, timer, true).map_err(AudioError::Codec);
+        timer.delay_us(20_000);
+        pa.set_low();
+        play.and(mute)
+    })();
+    pa.set_low();
+    let stop = tx.stop(timer).map_err(AudioError::I2s);
+    let _ = writeln!(console, "AUDIO STOP PA={} {:?}", pa.level(), tx.status());
+    result.and(stop)
+}
+
+type FsProbeError =
+    esp32_p4::storage::Error<esp32_p4::storage::Error<esp32_p4::storage::sd::Error>>;
+
+const BOARD_CONFIG: &[u8] = b"# ESP32-P4 board configuration\n[display]\nbrightness_percent=25\n[camera]\nenabled=false\n[storage]\nbus_width=4\nclock_hz=50000000\n";
+
+#[inline(never)]
+fn sd_config_probe(
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<bool, FsProbeError> {
+    use esp32_p4::storage::{
+        fat32::Fat32,
+        sd::{Error as SdError, SdDevice},
+        Error, Partition,
+    };
+    let transport_error = |error| Error::Device(Error::Device(SdError::Card(error)));
+    let mut card = unsafe { hal::sdmmc::Sdmmc::new(timer) }.map_err(transport_error)?;
+    card.configure_bus(timer).map_err(transport_error)?;
+    let partition = Partition::mbr(SdDevice::new(card, timer), 0).map_err(Error::Device)?;
+    let mut fs = Fat32::mount(partition)?;
+    match fs.create_new("CONFIG.TXT", BOARD_CONFIG) {
+        Ok(()) => {
+            let _ = writeln!(console, "FAT32 CONFIG CREATED bytes={}", BOARD_CONFIG.len());
+        }
+        Err(Error::AlreadyExists) => {
+            let _ = writeln!(console, "FAT32 CONFIG EXISTS (not overwritten)");
+        }
+        Err(error) => return Err(error),
+    }
+    // Destroy both filesystem caches and mount from the physical device again.
+    let mut fs = Fat32::mount(fs.into_inner())?;
+    let mut file = fs.open("CONFIG.TXT")?;
+    let mut actual = [0u8; BOARD_CONFIG.len()];
+    let n = file.read(&mut actual)?;
+    let matches = file.len() as usize == BOARD_CONFIG.len()
+        && n == BOARD_CONFIG.len()
+        && actual == BOARD_CONFIG;
+    let _ = writeln!(
+        console,
+        "FAT32 CONFIG REMOUNT bytes={} matches={}\n{}",
+        n,
+        matches,
+        core::str::from_utf8(&actual[..n]).unwrap_or("<not UTF-8>")
+    );
+    Ok(matches)
+}
+
+#[inline(never)]
+fn sd_fat_probe(
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<bool, FsProbeError> {
+    use esp32_p4::storage::{
+        fat32::Fat32,
+        sd::{Error as SdError, SdDevice},
+        Error, Partition,
+    };
+    let transport_error = |error| Error::Device(Error::Device(SdError::Card(error)));
+    let mut card = unsafe { hal::sdmmc::Sdmmc::new(timer) }.map_err(transport_error)?;
+    card.configure_bus(timer).map_err(transport_error)?;
+    let _ = writeln!(console, "FAT32 CARD {:?}", card.info);
+    let started = timer.now_us();
+    let result = {
+        let partition = Partition::mbr(SdDevice::new(card, timer), 0).map_err(Error::Device)?;
+        let _ = writeln!(console, "FAT32 PARTITION start={}", partition.start());
+        let mut fs = Fat32::mount(partition)?;
+        let _ = writeln!(console, "FAT32 MOUNT {:?}", fs.geometry());
+        let mut chosen = None;
+        let mut parent = None;
+        let mut directories = [None; 4];
+        let mut directory_count = 0;
+        let mut count = 0;
+        fs.read_dir("/", |entry| {
+            let _ = writeln!(
+                console,
+                "FAT32 ENTRY {} {} bytes={}",
+                if entry.is_directory() { "DIR" } else { "FILE" },
+                entry.name,
+                entry.size
+            );
+            if !entry.is_directory()
+                && entry.size > 0
+                && chosen
+                    .is_none_or(|old: esp32_p4::storage::fat32::DirEntry| entry.size > old.size)
+            {
+                chosen = Some(entry);
+            }
+            if entry.is_directory() && directory_count < directories.len() {
+                directories[directory_count] = Some(entry.name);
+                directory_count += 1;
+            }
+            count += 1;
+            count < 64
+        })?;
+        for name in directories.into_iter().flatten() {
+            let mut path = short_path::Path::new();
+            let _ = write!(path, "{}", name);
+            let mut count = 0;
+            fs.read_dir(path.as_str(), |entry| {
+                let _ = writeln!(
+                    console,
+                    "FAT32 ENTRY {}/{} bytes={} dir={}",
+                    name,
+                    entry.name,
+                    entry.size,
+                    entry.is_directory()
+                );
+                if !entry.is_directory()
+                    && entry.size > 0
+                    && chosen.is_none_or(|old| entry.size > old.size)
+                {
+                    chosen = Some(entry);
+                    parent = Some(name);
+                }
+                count += 1;
+                count < 16
+            })?;
+        }
+        let matched = if let Some(entry) = chosen {
+            let mut path = short_path::Path::new();
+            if let Some(parent) = parent {
+                let _ = write!(path, "{}/", parent);
+            }
+            let _ = write!(path, "{}", entry.name);
+            let mut file = fs.open(path.as_str())?;
+            // Read at most 1 MiB twice with different chunk boundaries. This
+            // exercises full batches, partial edges, rewind and EOF on small files.
+            let bytes = file.len().min(1_048_576);
+            let buffer = unsafe { &mut *core::ptr::addr_of_mut!(SD_PROBE_BUFFER) };
+            let mut reference = None;
+            for chunk in [8192usize, 777] {
+                file.seek(0)?;
+                let mut remaining = bytes as usize;
+                let mut hash = 0x811c9dc5u32;
+                while remaining != 0 {
+                    let requested = chunk.min(remaining);
+                    let n = file.read(&mut buffer[..requested])?;
+                    if n == 0 {
+                        return Ok(false);
+                    }
+                    if remaining == bytes as usize {
+                        let _ = writeln!(console, "FAT32 FIRST {:02x?}", &buffer[..n.min(32)]);
+                    }
+                    for &byte in &buffer[..n] {
+                        hash = (hash ^ u32::from(byte)).wrapping_mul(0x01000193);
+                    }
+                    remaining -= n;
+                }
+                let _ = writeln!(
+                    console,
+                    "FAT32 READ file={} size={} checked={} chunk={} hash={:08x}",
+                    path.as_str(),
+                    file.len(),
+                    bytes,
+                    chunk,
+                    hash
+                );
+                if reference.is_some_and(|value| value != hash) {
+                    return Ok(false);
+                }
+                reference = Some(hash);
+            }
+            true
+        } else {
+            let _ = writeln!(
+                console,
+                "FAT32 no nonempty regular file in first 64 root entries"
+            );
+            true
+        };
+        let stats = fs.into_inner().into_inner().stats();
+        let _ = writeln!(console, "FAT32 BLOCK_IO {:?}", stats);
+        matched
+    };
+    let _ = writeln!(
+        console,
+        "FAT32 read-only probe total_us={}",
+        timer.now_us().wrapping_sub(started) & ((1 << 48) - 1)
+    );
+    Ok(result)
+}
+
+// Fixed-size formatting buffer for an 8.3 path; no heap and no dependencies.
+mod short_path {
+    pub struct Path {
+        bytes: [u8; 26],
+        len: usize,
+    }
+    impl Path {
+        pub fn new() -> Self {
+            Self {
+                bytes: [0; 26],
+                len: 0,
+            }
+        }
+        pub fn as_str(&self) -> &str {
+            core::str::from_utf8(&self.bytes[..self.len]).unwrap()
+        }
+    }
+    impl core::fmt::Write for Path {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            if self.len + s.len() > self.bytes.len() {
+                return Err(core::fmt::Error);
+            }
+            self.bytes[self.len..self.len + s.len()].copy_from_slice(s.as_bytes());
+            self.len += s.len();
+            Ok(())
+        }
+    }
+}
+
+#[inline(never)]
 fn sdmmc_probe(
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
@@ -879,6 +1274,7 @@ fn sdmmc_probe(
 // Used only by synchronous console diagnostics, never by an interrupt.
 static mut SD_PROBE_BUFFER: [u8; hal::sdmmc::MAX_TRANSFER] = [0; hal::sdmmc::MAX_TRANSFER];
 
+#[inline(never)]
 fn sdmmc_multi_probe(
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
@@ -929,6 +1325,7 @@ fn sdmmc_multi_probe(
     Ok(true)
 }
 
+#[inline(never)]
 fn sdmmc_multi_write_probe(
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
@@ -978,6 +1375,7 @@ fn sdmmc_multi_write_probe(
     checked.map(|matched| matched && restored)
 }
 
+#[inline(never)]
 fn sdmmc_write_probe(
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
@@ -1016,6 +1414,7 @@ fn sdmmc_write_probe(
     checked.map(|matched| matched && restored)
 }
 
+#[inline(never)]
 fn sdmmc_info(
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
@@ -1058,4 +1457,263 @@ fn sdmmc_info(
         card.info.width, card.info.clock_hz
     );
     Ok(())
+}
+
+fn media_command_line<'a>(
+    console: &mut hal::usb_serial::Console,
+    timer: &mut hal::time::Timer,
+    buffer: &'a mut [u8; 96],
+) -> Result<&'a str, &'static str> {
+    let started = timer.now_us();
+    let mut len = 0;
+    let mut overflow = false;
+    loop {
+        if timer.now_us().wrapping_sub(started) & ((1 << 48) - 1) > 2_000_000 {
+            return Err("command timeout");
+        }
+        if let Some(byte) = console.read_byte() {
+            if byte == b'\n' {
+                if overflow {
+                    return Err("command too long");
+                }
+                return core::str::from_utf8(&buffer[..len]).map_err(|_| "ASCII command required");
+            }
+            if byte == b'\r' {
+                continue;
+            }
+            if !byte.is_ascii_graphic() && byte != b' ' {
+                overflow = true;
+            }
+            if len < buffer.len() {
+                buffer[len] = byte;
+                len += 1;
+            } else {
+                overflow = true;
+            }
+        }
+    }
+}
+
+#[inline(never)]
+fn sd_image(
+    path: &str,
+    fb: &mut esp32_p4::devices::framebuffer::Framebuffer,
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<(), esp32_p4::media::Error<FsProbeError>> {
+    use esp32_p4::{
+        media::{jpeg, Error},
+        storage::{
+            fat32::Fat32,
+            sd::{Error as SdError, SdDevice},
+            Partition,
+        },
+    };
+    let started = timer.now_us();
+    let transport = |e| {
+        Error::Io(esp32_p4::storage::Error::Device(
+            esp32_p4::storage::Error::Device(SdError::Card(e)),
+        ))
+    };
+    let mut card = unsafe { hal::sdmmc::Sdmmc::new(timer) }.map_err(transport)?;
+    card.configure_bus(timer).map_err(transport)?;
+    let partition = Partition::mbr(SdDevice::new(card, timer), 0)
+        .map_err(|e| Error::Io(esp32_p4::storage::Error::Device(e)))?;
+    let mut fs = Fat32::mount(partition).map_err(Error::Io)?;
+    let mut file = fs.open(path).map_err(Error::Io)?;
+    let _ = writeln!(
+        console,
+        "MEDIA IMAGE START path={} bytes={} CPU baseline JPEG -> RGB565",
+        path,
+        file.len()
+    );
+    let info = jpeg::decode(&mut file, 1024, 600, |x, y, pixels| {
+        fb.write_run(x, y, pixels)
+    })?;
+    fb.finish_writes();
+    let elapsed = file.with_timer(|timer| timer.now_us().wrapping_sub(started) & ((1 << 48) - 1));
+    let _ = writeln!(
+        console,
+        "MEDIA JPEG {:?} us={} pixels={:04x?}",
+        info,
+        elapsed,
+        fb.sample()
+    );
+    Ok(())
+}
+
+enum PlaybackError {
+    Media(esp32_p4::media::Error<FsProbeError>),
+    Audio(AudioError),
+}
+impl core::fmt::Debug for PlaybackError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Media(error) => f.debug_tuple("Media").field(error).finish(),
+            Self::Audio(error) => f.debug_tuple("Audio").field(error).finish(),
+        }
+    }
+}
+impl From<esp32_p4::media::Error<FsProbeError>> for PlaybackError {
+    fn from(error: esp32_p4::media::Error<FsProbeError>) -> Self {
+        Self::Media(error)
+    }
+}
+
+#[inline(never)]
+fn sd_audio(
+    path: &str,
+    bus: &mut hal::i2c::I2c,
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<(), PlaybackError> {
+    use esp32_p4::{
+        devices::es8311::Es8311,
+        media::{wav::Wave, Error},
+        storage::{
+            fat32::Fat32,
+            sd::{Error as SdError, SdDevice},
+            Partition,
+        },
+    };
+    let transport = |e| {
+        PlaybackError::Media(Error::Io(esp32_p4::storage::Error::Device(
+            esp32_p4::storage::Error::Device(SdError::Card(e)),
+        )))
+    };
+    let io = |e| PlaybackError::Media(Error::Io(e));
+    let audio = |e| PlaybackError::Audio(AudioError::I2s(e));
+    let codec_error = |e| PlaybackError::Audio(AudioError::Codec(e));
+    let mut card = unsafe { hal::sdmmc::Sdmmc::new(timer) }.map_err(transport)?;
+    card.configure_bus(timer).map_err(transport)?;
+    let partition = Partition::mbr(SdDevice::new(card, timer), 0)
+        .map_err(|e| io(esp32_p4::storage::Error::Device(e)))?;
+    let mut fs = Fat32::mount(partition).map_err(io)?;
+    let mut file = fs.open(path).map_err(io)?;
+    let wave = Wave::parse(&mut file)?;
+    if wave.sample_rate != 16000 {
+        return Err(Error::Unsupported("playback clock currently 16000 Hz; use SATIE.WAV").into());
+    }
+    let mut pa = unsafe { hal::gpio::Output::<11>::new_low() };
+    let mut tx = file
+        .with_timer(|timer| unsafe { hal::i2s::Tx::new(&[0], timer) })
+        .map_err(audio)?;
+    let mut codec = None;
+    let result = (|| {
+        // Keep initial silence running while the codec is configured, then reprime
+        // a parked DMA ring with actual samples before opening the amplifier.
+        file.with_timer(|timer| tx.start(timer)).map_err(audio)?;
+        codec = Some(
+            file.with_timer(|timer| Es8311::new(bus, timer))
+                .map_err(codec_error)?,
+        );
+        file.with_timer(|timer| tx.stop(timer)).map_err(audio)?;
+        // Reinitialize clocks/descriptors without resetting the configured codec.
+        tx = file
+            .with_timer(|timer| unsafe { hal::i2s::Tx::new_stream(timer) })
+            .map_err(audio)?;
+        let mut frames = [0u32; 512];
+        let mut total_frames = 0u32;
+        let mut last_audio = None;
+        for i in 0..hal::i2s::STREAM_BUFFERS {
+            let n = wave.read_frames(&mut file, &mut frames)?;
+            total_frames += n as u32;
+            if n != 0 {
+                last_audio = Some(i);
+            }
+            file.with_timer(|timer| tx.stream_refill(i, &frames, timer))
+                .map_err(audio)?;
+        }
+        let _ = writeln!(
+            console,
+            "MEDIA PLAY START path={} rate={} channels={} data={} DAC=-24dB ESC=stop",
+            path, wave.sample_rate, wave.channels, wave.data_bytes
+        );
+        file.with_timer(|timer| tx.start(timer)).map_err(audio)?;
+        file.with_timer(|timer| codec.as_mut().unwrap().mute(bus, timer, false))
+            .map_err(codec_error)?;
+        pa.set_high();
+        let mut index = 0;
+        let mut refill_count = 0u32;
+        let mut max_read_us = 0;
+        let mut waiting = file.with_timer(|timer| timer.now_us());
+        loop {
+            if console.read_byte() == Some(27) {
+                let _ = writeln!(console, "MEDIA PLAY STOP requested");
+                break;
+            }
+            let ready = file.with_timer(|timer| tx.stream_ready(index, timer));
+            if let Err(ref error) = ready {
+                let _ = writeln!(
+                    console,
+                    "MEDIA DMA ERROR index={} refills={} frames={} {:?} {:?}",
+                    index,
+                    refill_count,
+                    total_frames,
+                    error,
+                    tx.status()
+                );
+            }
+            if !ready.map_err(audio)? {
+                if file.with_timer(|timer| timer.now_us().wrapping_sub(waiting) & ((1 << 48) - 1))
+                    > 200_000
+                {
+                    return Err(audio(hal::i2s::Error::Timeout("stream DMA release")));
+                }
+                continue;
+            }
+            // Once EOF is known, drain through the final data descriptor. A full
+            // silent ring follows it, giving time to mute before stale data repeats.
+            if file.position() == wave.data_offset + wave.data_bytes && last_audio == Some(index) {
+                break;
+            }
+            let start = file.with_timer(|timer| timer.now_us());
+            let n = wave.read_frames(&mut file, &mut frames)?;
+            total_frames += n as u32;
+            if n != 0 {
+                last_audio = Some(index);
+            }
+            file.with_timer(|timer| tx.stream_refill(index, &frames, timer))
+                .map_err(audio)?;
+            max_read_us = max_read_us
+                .max(file.with_timer(|timer| timer.now_us().wrapping_sub(start) & ((1 << 48) - 1)));
+            index = (index + 1) % hal::i2s::STREAM_BUFFERS;
+            refill_count += 1;
+            waiting = file.with_timer(|timer| timer.now_us());
+            if refill_count.is_multiple_of(320) {
+                let _ = writeln!(
+                    console,
+                    "MEDIA PLAY PROGRESS frames={} max_refill_us={}",
+                    total_frames, max_read_us
+                );
+            }
+        }
+        // Descriptor EOF means drained AHB FIFO; allow the small I2S FIFO tail
+        // to leave before muting (the next buffer contains silence near file EOF).
+        file.with_timer(|timer| timer.delay_us(2_000));
+        let _ = writeln!(
+            console,
+            "MEDIA PLAY SENT frames={} refills={} max_refill_us={} dma={:?}",
+            total_frames,
+            refill_count,
+            max_read_us,
+            tx.status()
+        );
+        Ok(())
+    })();
+    let mute = if let Some(codec) = codec.as_mut() {
+        file.with_timer(|timer| codec.mute(bus, timer, true))
+            .map_err(codec_error)
+    } else {
+        Ok(())
+    };
+    pa.set_low();
+    let stop = file.with_timer(|timer| tx.stop(timer)).map_err(audio);
+    let _ = writeln!(
+        console,
+        "MEDIA AUDIO STOP PA={} {:?}",
+        pa.level(),
+        tx.status()
+    );
+    result.and(mute).and(stop)
 }

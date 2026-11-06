@@ -3,6 +3,7 @@ pub mod csi;
 pub mod dsi;
 pub mod gpio;
 pub mod i2c;
+pub mod i2s;
 pub mod ledc;
 pub mod psram;
 pub mod sdmmc;

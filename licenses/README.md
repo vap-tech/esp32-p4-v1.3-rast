@@ -63,3 +63,12 @@ read/write/restore diagnostic commands are local Rust code. No SDK code is linke
 
 SD SCR/SD Status/CMD6 field layouts were checked against ESP-IDF v6.1
 `components/sdmmc/include/sd_protocol_defs.h` and `components/sdmmc/sdmmc_sd.c`.
+
+`src/hal/i2s.rs` adapts I2S clock/format and AHB GDMA register sequences from
+ESP-IDF v6.1 (same commit above), Apache-2.0, `esp_hal_i2s` and `esp_hal_dma`
+P4 LL plus hw_ver1 register definitions. `src/devices/es8311.rs` adapts the
+DAC register initialization and volume scale from Espressif `esp_codec_dev`,
+Copyright 2023 Espressif Systems (Shanghai) CO LTD, Apache-2.0:
+[es8311.c](https://github.com/espressif/esp-adf/blob/68ce88ad4dcf2cadc3f2d45635de5d4305e51498/components/esp_codec_dev/device/es8311/es8311.c).
+The fixed buffer transport, test tone, bounded polling and PA cleanup are local.
+No ADF/IDF runtime or C objects are linked.

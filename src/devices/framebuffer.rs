@@ -93,6 +93,22 @@ impl Framebuffer {
             core::arch::asm!("fence rw, rw", options(nostack));
         }
     }
+    /// Write one bounded RGB565 run (e.g. an MCU row from the JPEG reader).
+    pub fn write_run(&mut self, x: usize, y: usize, pixels: &[u16]) {
+        assert!(y < HEIGHT && x <= WIDTH && pixels.len() <= WIDTH - x);
+        for (i, &pixel) in pixels.iter().enumerate() {
+            unsafe {
+                (CPU_ADDRESS as *mut u16)
+                    .add(y * WIDTH + x + i)
+                    .write_volatile(pixel);
+            }
+        }
+    }
+    pub fn finish_writes(&mut self) {
+        unsafe {
+            core::arch::asm!("fence rw, rw", options(nostack));
+        }
+    }
     pub fn pixel(&self, x: usize, y: usize) -> Option<u16> {
         if x >= WIDTH || y >= HEIGHT {
             return None;
