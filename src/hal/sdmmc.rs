@@ -7,6 +7,14 @@ const BASE: usize = 0x5008_3000;
 const SDIO_PLL_HZ: u32 = 200_000_000;
 const HOST_DIV: u32 = 2;
 const MASK: u64 = (1 << 48) - 1;
+/// Maximum bytes per sector transfer (16 sectors), bounded internal SRAM use.
+pub const MAX_TRANSFER: usize = 8192;
+const DMA_CHUNK: usize = 4096;
+#[repr(C, align(64))]
+struct DmaBuffer([u32; MAX_TRANSFER / 4]);
+// The unsafe constructor grants exclusive controller AND workspace ownership.
+// Static SRAM avoids placing an 8 KiB bounce buffer on the small boot stack.
+static mut DMA_BUFFER: DmaBuffer = DmaBuffer([0; MAX_TRANSFER / 4]);
 const RESPONSE: u32 = (1 << 6) | (1 << 8);
 const ERRORS: u32 = (1 << 1)
     | (1 << 6)
@@ -90,7 +98,7 @@ fn wait_clear(offset: usize, bits: u32, timer: &mut Timer, command: u8) -> Resul
 }
 impl Sdmmc {
     /// # Safety
-    /// Exclusive SDMMC controller/slot0 and GPIO39..44 ownership. Card uses 3.3V;
+    /// Exclusive SDMMC controller/slot0, GPIO39..44 and static DMA workspace ownership. Card uses 3.3V;
     /// LDO4 supplies the SD pad domain at the 3.3V rail; no UHS voltage switch.
     pub unsafe fn new(timer: &mut Timer) -> Result<Self, Error> {
         unsafe {
@@ -244,7 +252,7 @@ impl Sdmmc {
             timer.delay_us(1_000);
         }
         let mut status = [0u8; 64];
-        self.data_command(6, 0x80ff_fff1, &mut status, false, timer)?;
+        self.data_command(6, 0x80ff_fff1, &mut status, timer)?;
         if status[16] & 15 != 1 {
             return Err(error(6));
         }
@@ -298,7 +306,11 @@ impl Sdmmc {
         write(0x28, arg);
         write(
             0x2c,
-            (1 << 31) | (1 << 29) | (1 << 13) | flags | u32::from(cmd),
+            (1 << 31)
+                | (1 << 29)
+                | if cmd == 12 { 1 << 14 } else { 1 << 13 }
+                | flags
+                | u32::from(cmd),
         );
         let start = timer.now_us();
         loop {
@@ -322,54 +334,89 @@ impl Sdmmc {
         out: &mut [u8; 512],
         timer: &mut Timer,
     ) -> Result<(), Error> {
-        if u64::from(lba) >= self.info.sectors {
-            return Err(error(17));
-        }
-        let address = sector_argument(lba, self.info.ocr).ok_or_else(|| error(17))?;
-        self.data_command(17, address, out, false, timer)
+        self.read_sectors(lba, out, timer)
     }
-    /// Write one logical sector and wait until the card returns to TRANSFER/READY.
-    /// No filesystem mapping or allocation is performed.
+    /// Read 1..=16 consecutive 512-byte sectors. Multi-block uses CMD18 and
+    /// controller-generated CMD12; no CMD23 support is required from the card.
+    pub fn read_sectors(
+        &mut self,
+        lba: u32,
+        out: &mut [u8],
+        timer: &mut Timer,
+    ) -> Result<(), Error> {
+        let cmd = if out.len() == 512 { 17 } else { 18 };
+        let address = transfer_argument(lba, out.len(), self.info.sectors, self.info.ocr)
+            .ok_or_else(|| error(cmd))?;
+        self.data_command(cmd, address, out, timer)
+    }
+    /// Write a sector and wait for TRANSFER/READY. No filesystem allocation.
     pub fn write_sector(
         &mut self,
         lba: u32,
         data: &[u8; 512],
         timer: &mut Timer,
     ) -> Result<(), Error> {
-        let mut copy = *data;
-        if u64::from(lba) >= self.info.sectors {
-            return Err(error(24));
-        }
-        let address = sector_argument(lba, self.info.ocr).ok_or_else(|| error(24))?;
-        self.data_command(24, address, &mut copy, true, timer)
+        self.write_sectors(lba, data, timer)
+    }
+    /// Write 1..=16 consecutive sectors using CMD24/CMD25 and auto CMD12.
+    pub fn write_sectors(&mut self, lba: u32, data: &[u8], timer: &mut Timer) -> Result<(), Error> {
+        let cmd = if data.len() == 512 { 24 } else { 25 };
+        let address = transfer_argument(lba, data.len(), self.info.sectors, self.info.ocr)
+            .ok_or_else(|| error(cmd))?;
+        // data_command uses a separate output slice only for read transfers.
+        self.transfer(cmd, address, &mut [], Some(data), data.len(), timer)
     }
     fn data_command(
         &mut self,
         cmd: u8,
         argument: u32,
         out: &mut [u8],
-        writing: bool,
+        timer: &mut Timer,
+    ) -> Result<(), Error> {
+        let len = out.len();
+        self.transfer(cmd, argument, out, None, len, timer)
+    }
+    fn transfer(
+        &mut self,
+        cmd: u8,
+        argument: u32,
+        out: &mut [u8],
+        input: Option<&[u8]>,
+        len: usize,
         timer: &mut Timer,
     ) -> Result<(), Error> {
         #[repr(C, align(64))]
-        struct Aligned<const N: usize>([u32; N]);
-        if out.is_empty() || out.len() > 512 || !out.len().is_multiple_of(4) {
+        struct Descriptors([[u32; 16]; MAX_TRANSFER / DMA_CHUNK]);
+        if len == 0 || len > MAX_TRANSFER || !len.is_multiple_of(4) {
             return Err(error(cmd));
         }
-        let mut data = Aligned([0xa5a5_a5a5; 128]);
-        if writing {
-            for (i, chunk) in out.as_chunks::<4>().0.iter().enumerate() {
+        let writing = input.is_some();
+        let multi = cmd == 18 || cmd == 25;
+        let data = unsafe { &mut *core::ptr::addr_of_mut!(DMA_BUFFER) };
+        if let Some(input) = input {
+            for (i, chunk) in input.as_chunks::<4>().0.iter().enumerate() {
                 data.0[i] = u32::from_le_bytes(*chunk);
             }
         }
-        let mut desc = Aligned([0u32; 16]);
-        desc.0[0] = (1 << 31) | (1 << 3) | (1 << 2); // OWN, FS, LS.
-        desc.0[1] = out.len() as u32;
-        desc.0[2] = data.0.as_mut_ptr() as u32;
+        let mut desc = Descriptors([[0; 16]; MAX_TRANSFER / DMA_CHUNK]);
         let desc_addr = desc.0.as_mut_ptr() as usize;
         let data_addr = data.0.as_mut_ptr() as usize;
-        sync_cache(desc_addr, 64, 8, timer)?;
-        sync_cache(data_addr, 512, 8, timer)?;
+        let count = len.div_ceil(DMA_CHUNK);
+        for i in 0..count {
+            let last = i + 1 == count;
+            desc.0[i][0] = (1 << 31) | (1 << 4) // OWN, chained addresses.
+                | if i == 0 { 1 << 3 } else { 0 }
+                | if last { 1 << 2 } else { 1 << 1 };
+            desc.0[i][1] = (len - i * DMA_CHUNK).min(DMA_CHUNK) as u32;
+            desc.0[i][2] = (data_addr + i * DMA_CHUNK) as u32;
+            desc.0[i][3] = if last {
+                0
+            } else {
+                (desc_addr + (i + 1) * 64) as u32
+            };
+        }
+        sync_cache(desc_addr, count * 64, 8, timer)?;
+        sync_cache(data_addr, len.next_multiple_of(64), 8, timer)?;
         write(0, 6);
         wait_clear(0, 6, timer, cmd)?;
         write(0x80, 1);
@@ -377,15 +424,15 @@ impl Sdmmc {
         write(0x88, desc_addr as u32);
         write(0x8c, u32::MAX);
         write(0x90, 0x1f); // IDMAC completion latches need masks set; global CPU IRQ stays off.
-        write(0x1c, out.len() as u32);
-        write(0x20, out.len() as u32);
+        write(0x1c, if multi { 512 } else { len as u32 });
+        write(0x20, len as u32);
         write(0, (1 << 25) | (1 << 5));
         write(0x80, (1 << 7) | (1 << 1) | (2 << 8));
         let result = (|| {
             let r1 = self.command(
                 cmd,
                 argument,
-                RESPONSE | (1 << 9) | (u32::from(writing) << 10),
+                RESPONSE | (1 << 9) | (u32::from(writing) << 10) | (u32::from(multi) << 12),
                 timer,
             )?[0];
             if r1 & 0xfdff_e008 != 0 {
@@ -396,7 +443,10 @@ impl Sdmmc {
                 if read(0x44) & ERRORS != 0 || read(0x8c) & ((1 << 2) | (1 << 5)) != 0 {
                     return Err(error(cmd));
                 }
-                if read(0x44) & (1 << 3) != 0 && read(0x8c) & if writing { 1 } else { 2 } != 0 {
+                if read(0x44) & (1 << 3) != 0
+                    && (!multi || read(0x44) & (1 << 14) != 0)
+                    && read(0x8c) & if writing { 1 } else { 2 } != 0
+                {
                     break;
                 }
                 if expired(timer, start, 500_000) {
@@ -411,18 +461,24 @@ impl Sdmmc {
         if wait_clear(0, 4, timer, cmd).is_err() {
             panic!("SDMMC DMA stop timeout");
         }
+        if result.is_err() && multi {
+            // Best effort abort after failed stream. CMD12 bypasses wait-data.
+            let _ = self.command(12, 0, RESPONSE, timer);
+        }
         result?;
-        sync_cache(desc_addr, 64, 1, timer)?;
-        sync_cache(data_addr, 512, 1, timer)?;
-        if unsafe { desc.0.as_ptr().read_volatile() } & ((1 << 31) | (1 << 30)) != 0 {
-            return Err(error(cmd));
+        sync_cache(desc_addr, count * 64, 1, timer)?;
+        sync_cache(data_addr, len.next_multiple_of(64), 1, timer)?;
+        for i in 0..count {
+            if unsafe { desc.0[i].as_ptr().read_volatile() } & ((1 << 31) | (1 << 30)) != 0 {
+                return Err(error(cmd));
+            }
         }
         for i in 0..if writing { 0 } else { out.len() / 4 } {
             let value = unsafe { data.0.as_ptr().add(i).read_volatile() };
             out[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
         }
         write(0x44, u32::MAX);
-        if writing {
+        if writing || multi {
             let start = timer.now_us();
             loop {
                 let r1 = self.command(13, u32::from(self.info.rca) << 16, RESPONSE, timer)?[0];
@@ -444,21 +500,21 @@ impl Sdmmc {
     pub fn read_scr(&mut self, timer: &mut Timer) -> Result<[u8; 8], Error> {
         self.app_prefix(timer)?;
         let mut bytes = [0; 8];
-        self.data_command(51, 0, &mut bytes, false, timer)?;
+        self.data_command(51, 0, &mut bytes, timer)?;
         Ok(bytes)
     }
     /// ACMD13, 64-byte SD Status. Does not change speed or bus width.
     pub fn read_sd_status(&mut self, timer: &mut Timer) -> Result<[u8; 64], Error> {
         self.app_prefix(timer)?;
         let mut bytes = [0; 64];
-        self.data_command(13, 0, &mut bytes, false, timer)?;
+        self.data_command(13, 0, &mut bytes, timer)?;
         Ok(bytes)
     }
     /// CMD6 mode 0: check High Speed function; other groups stay unchanged.
     /// The high switch bit is deliberately zero: this NEVER enables High Speed.
     pub fn check_speed(&mut self, timer: &mut Timer) -> Result<[u8; 64], Error> {
         let mut bytes = [0; 64];
-        self.data_command(6, 0x00ff_fff1, &mut bytes, false, timer)?;
+        self.data_command(6, 0x00ff_fff1, &mut bytes, timer)?;
         Ok(bytes)
     }
     fn app_prefix(&mut self, timer: &mut Timer) -> Result<(), Error> {
@@ -501,6 +557,20 @@ fn sync_cache(address: usize, len: usize, operation: u32, timer: &mut Timer) -> 
     Ok(())
 }
 
+fn transfer_argument(lba: u32, len: usize, sectors: u64, ocr: u32) -> Option<u32> {
+    if len == 0
+        || len > MAX_TRANSFER
+        || !len.is_multiple_of(512)
+        || u64::from(lba) + (len / 512) as u64 > sectors
+    {
+        return None;
+    }
+    if ocr & (1 << 30) == 0 {
+        sector_argument(lba.checked_add((len / 512 - 1) as u32)?, ocr)?;
+    }
+    sector_argument(lba, ocr)
+}
+
 fn sector_argument(lba: u32, ocr: u32) -> Option<u32> {
     if ocr & (1 << 30) != 0 {
         Some(lba)
@@ -530,6 +600,20 @@ fn decode_capacity(csd: [u32; 4]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn multi_block_ranges_and_addressing() {
+        assert_eq!(transfer_argument(7, 1024, 9, 0), Some(3584));
+        assert_eq!(transfer_argument(7, 1024, 8, 0), None);
+        assert_eq!(transfer_argument(0, 0, 100, 0), None);
+        assert_eq!(transfer_argument(0, 513, 100, 0), None);
+        assert_eq!(transfer_argument(0, MAX_TRANSFER + 512, 100, 0), None);
+        assert_eq!(
+            transfer_argument(0xfffffff0, 8192, 1u64 << 32, 1 << 30),
+            Some(0xfffffff0)
+        );
+        assert_eq!(transfer_argument(u32::MAX, 1024, 1u64 << 32, 1 << 30), None);
+        assert_eq!(transfer_argument(8_388_607, 1024, 10_000_000, 0), None);
+    }
     #[test]
     fn sdsc_capacity_and_byte_address_boundaries() {
         // CSD v1: C_SIZE=4095, MULT=7, READ_BL_LEN=10 => 2 GiB.

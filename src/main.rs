@@ -233,9 +233,15 @@ extern "C" fn rust_main() -> ! {
             } else if command == b'Y' {
                 let result = sdmmc_info(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD Y {:?}", result);
+            } else if command == b'#' {
+                let result = sdmmc_multi_write_probe(&mut timer, &mut console);
+                let _ = writeln!(console, "CMD # {:?}", result);
             } else if command == b'@' {
                 let result = sdmmc_write_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD @ {:?}", result);
+            } else if command == b'm' {
+                let result = sdmmc_multi_probe(&mut timer, &mut console);
+                let _ = writeln!(console, "CMD m {:?}", result);
             } else if command == b'M' {
                 let result = sdmmc_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD M {:?}", result);
@@ -537,7 +543,7 @@ extern "C" fn rust_main() -> ! {
 }
 
 fn display_help(console: &mut hal::usb_serial::Console) {
-    let _ = writeln!(console, "DISPLAY commands: +/- backlight5%; ]/[ digital gain; }}/{{ analogue gain; >/< exposure; = controls; Y SD capabilities (no speed switch); M SDMMC read-only probe; @ SD write/verify/restore last sector; Q panel RGB probe; E gray/RGB check; W full screenshot; H thumbnail; V camera-live; G camera-test-live; O camera-stop; F framebuffer; S fb-status; U patterns; P psram-test; a camera-info; A camera-test; o camera-scene; ? help; q status; B BIST-probe25s; L scanline-probe; e error-counter(clear); v/h/b patterns; i/I invert on/off; x/y/n mirror X/Y/none; c/C BGR/RGB; d/D display off/on; j/J idle on/off; k/f/N black/white/normal; s/w sleep/wake; t/u/T TE vblank/both/off; l TE line300; g idle-green; r/R soft/hard reset; 6/7 RGB565 at650/750; 8 RGB888 at750; z RGB565 at550");
+    let _ = writeln!(console, "DISPLAY commands: +/- backlight5%; ]/[ digital gain; }}/{{ analogue gain; >/< exposure; = controls; Y SD capabilities (no speed switch); M SDMMC read-only probe; m SD multi-block read benchmark; # SD multi-write/verify/restore last 9 sectors; @ SD write/verify/restore last sector; Q panel RGB probe; E gray/RGB check; W full screenshot; H thumbnail; V camera-live; G camera-test-live; O camera-stop; F framebuffer; S fb-status; U patterns; P psram-test; a camera-info; A camera-test; o camera-scene; ? help; q status; B BIST-probe25s; L scanline-probe; e error-counter(clear); v/h/b patterns; i/I invert on/off; x/y/n mirror X/Y/none; c/C BGR/RGB; d/D display off/on; j/J idle on/off; k/f/N black/white/normal; s/w sleep/wake; t/u/T TE vblank/both/off; l TE line300; g idle-green; r/R soft/hard reset; 6/7 RGB565 at650/750; 8 RGB888 at750; z RGB565 at550");
 }
 
 fn display_command(
@@ -868,6 +874,108 @@ fn sdmmc_probe(
         card.registers()
     );
     Ok(true)
+}
+
+// Used only by synchronous console diagnostics, never by an interrupt.
+static mut SD_PROBE_BUFFER: [u8; hal::sdmmc::MAX_TRANSFER] = [0; hal::sdmmc::MAX_TRANSFER];
+
+fn sdmmc_multi_probe(
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<bool, hal::sdmmc::Error> {
+    let mut card = unsafe { hal::sdmmc::Sdmmc::new(timer) }?;
+    card.configure_bus(timer)?;
+    let _ = writeln!(console, "SD_MULTI {:?}", card.info);
+    let buffer = unsafe { &mut *core::ptr::addr_of_mut!(SD_PROBE_BUFFER) };
+    let mut single = [0u8; 512];
+    // Exercise both descriptors and nonzero LBAs, including the card's last block.
+    for lba in [0, 2048, (card.info.sectors - 16) as u32] {
+        card.read_sectors(lba, buffer, timer)?;
+        for i in 0..16 {
+            card.read_sector(lba + i, &mut single, timer)?;
+            if single != buffer[i as usize * 512..(i as usize + 1) * 512] {
+                let _ = writeln!(console, "SD_MULTI byte mismatch lba={}", lba + i);
+                return Ok(false);
+            }
+        }
+    }
+    let _ = writeln!(console, "SD_MULTI head/middle/tail byte comparisons match");
+    let mut baseline = None;
+    for sectors in [1usize, 2, 8, 16] {
+        let start = timer.now_us();
+        let mut checksum = 0x811c9dc5u32;
+        for offset in (0..2048u32).step_by(sectors) {
+            let bytes = &mut buffer[..sectors * 512];
+            card.read_sectors(2048 + offset, bytes, timer)?;
+            for chunk in bytes.as_chunks::<4>().0 {
+                checksum = (checksum ^ u32::from_le_bytes(*chunk)).wrapping_mul(0x01000193);
+            }
+        }
+        let us = timer.now_us().wrapping_sub(start) & ((1 << 48) - 1);
+        let _ = writeln!(
+            console,
+            "SD_MULTI READ burst_sectors={} bytes=1048576 us={} KiB_s={} checksum={:08x}",
+            sectors,
+            us,
+            1_024_000_000 / us.max(1),
+            checksum
+        );
+        if baseline.is_some_and(|value| value != checksum) {
+            let _ = writeln!(console, "SD_MULTI checksum mismatch");
+            return Ok(false);
+        }
+        baseline = Some(checksum);
+    }
+    Ok(true)
+}
+
+fn sdmmc_multi_write_probe(
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<bool, hal::sdmmc::Error> {
+    const LEN: usize = 9 * 512; // Cross the 4096B descriptor boundary.
+    let mut card = unsafe { hal::sdmmc::Sdmmc::new(timer) }?;
+    card.configure_bus(timer)?;
+    let lba = (card.info.sectors - 9) as u32;
+    let original = &mut [0u8; LEN];
+    card.read_sectors(lba, original, timer)?;
+    let buffer = unsafe { &mut *core::ptr::addr_of_mut!(SD_PROBE_BUFFER) };
+    let bytes = &mut buffer[..LEN];
+    let pattern = |i: usize| (i as u8).wrapping_mul(73) ^ ((i >> 8) as u8) ^ 0xa5;
+    for (i, byte) in bytes.iter_mut().enumerate() {
+        *byte = pattern(i);
+    }
+    let start = timer.now_us();
+    let checked = (|| {
+        card.write_sectors(lba, bytes, timer)?;
+        card.read_sectors(lba, bytes, timer)?;
+        Ok(bytes
+            .iter()
+            .enumerate()
+            .all(|(i, byte)| *byte == pattern(i)))
+    })();
+    let _ = writeln!(
+        console,
+        "SD_MULTI WRITE_TEST lba={} sectors=9 result={:?} us={}",
+        lba,
+        checked,
+        timer.now_us().wrapping_sub(start) & ((1 << 48) - 1)
+    );
+    // A failed stream may need reinitialization before restoring the RAM backup.
+    if checked.is_err() {
+        card = unsafe { hal::sdmmc::Sdmmc::new(timer) }?;
+        card.configure_bus(timer)?;
+    }
+    // Always restore after a failed trial as well. Power loss is not atomic.
+    card.write_sectors(lba, original, timer)?;
+    card.read_sectors(lba, bytes, timer)?;
+    let restored = bytes == original;
+    let _ = writeln!(
+        console,
+        "SD_MULTI WRITE_RESTORE lba={} sectors=9 matches={}",
+        lba, restored
+    );
+    checked.map(|matched| matched && restored)
 }
 
 fn sdmmc_write_probe(
