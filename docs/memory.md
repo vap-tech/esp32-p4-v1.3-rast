@@ -13,8 +13,9 @@ PSRAM используется только через uncached alias. Глоб�
 | Диапазон | Размер | Владелец/назначение |
 | --- | ---: | --- |
 | 30100000…30101FFF | 8 KiB | SPM: entry, trap vector, переключение cache policy |
-| 4FF00000…4FF1FFFF | 128 KiB | ROM-loaded text/rodata |
-| 4FF20000…4FF27FFF | 32 KiB | data/BSS и временный boot stack |
+| 4FF00000…4FF20FFF | 132 KiB | ROM-loaded text/rodata budget |
+| 4FF21000…4FF25FFF | 20 KiB | data/BSS и boot audit |
+| 4FF26000…4FF27FFF | 8 KiB | boot stack, после старта scratch legacy SD diagnostics |
 | 4FF28000…4FF3FFFF | 96 KiB | Сохраняем свободным, включая ROM shared buffers, ROM data/stacks |
 | 4FF40000…4FFBBFFF | **496 KiB** | Внутренняя арена, отдельная от data/BSS |
 | 4FFBC000…4FFBFFFF | **16 KiB** | Runtime stack, watermark и нижняя контрольная зона 64 B |
@@ -173,3 +174,7 @@ all-bypass. [Документация эксперимента](icache.md).
 L1 I+D при L2=0 также проверены: Matrix 2.628 s, Loeffler 1.696 s.
 Для 128 KiB L2 добавлена отдельная feature-раскладка (арена 368 KiB); выигрыш
 в SRAM JPEG отсутствует. [Карта памяти, DMA maintenance, результаты](cache-matrix.md).
+
+SD/I2S handoffs и смешанная нагрузка с I+D проверены отдельно: [DMA](dma.md).
+Текущая нижняя карта расширяет CODE budget до 132 KiB за счёт переиспользования
+загрузочного стека для временного SD scratch; арена 496 KiB сохранена.

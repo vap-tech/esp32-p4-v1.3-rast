@@ -57,7 +57,7 @@ HAL доступен через `esp32_p4::hal`; драйверы внешних
 
 Монитор использует только стандартную библиотеку Python (Linux). Он освобождает DTR/RTS и переподключается после USB reset. Во время прошивки монитор нужно остановить. В этой сессии обычный монитор espflash оставлял плату в download mode; для проверки запуска используется `scripts/monitor.py`.
 
-Текущий образ — **137520 байт**. Read-only RTC выводится с heartbeat; VLF/VDET установлены, календарь некорректен, время не менялось. На плате подтверждены GT911 1024×600, поток касаний и подтверждение кадров. Результаты предыдущих проверок I²C, таймера и GPIO сохранены в документации. Минимальный исходный образ 368 байт и особенности запуска описаны в [docs/boot.md](docs/boot.md).
+Текущий образ — **141616 байт**. Read-only RTC выводится с heartbeat; VLF/VDET установлены, календарь некорректен, время не менялось. На плате подтверждены GT911 1024×600, поток касаний и подтверждение кадров. Результаты предыдущих проверок I²C, таймера и GPIO сохранены в документации. Минимальный исходный образ 368 байт и особенности запуска описаны в [docs/boot.md](docs/boot.md).
 
 Локальный справочник по регистрам: `~/esp-idf`, tag `v6.1`. SDK не устанавливается и в сборку не подключается.
 
@@ -77,14 +77,16 @@ Native microSD SDMMC slot 0, SDIO PLL200, 4-bit/25 MHz и High Speed 50 MHz,
 
 Аудио bring-up: I²S1 TX → ES8311 → NS4150, AHB DMA, тестовый тон командой p.
 PA_CTRL=GPIO11, слышимый тон подтверждён пользователем; цифровой loopback
-через GPIO48 тоже проверен. WAV parser и экспериментальный SD playback добавлены, но звук с SD пока не работает: DMA descriptor error. Запись микрофона не реализована.
+через GPIO48 тоже проверен. WAV с SD проверен на четырёхблочном DMA-кольце:
+60 секунд без DMA errors, underrun останавливает канал и позволяет новый запуск.
+Аналоговое качество WAV в этом тесте ещё требует подтверждения слушателем. Запись микрофона не реализована.
 [docs/audio.md](docs/audio.md).
 
 JPEG и WAV с карты включаются только командами, без автозапуска:
 
 ```sh
 python3 scripts/display-control.py --image HOME.JPG
-python3 scripts/display-control.py --play SATIE.WAV   # пока ошибка DMA, звука нет
+python3 scripts/display-control.py --play SATIE.WAV
 python3 scripts/display-control.py --stop
 ```
 
@@ -120,3 +122,8 @@ L1 I-cache при нулевом L2 проверен на плате: `--icache 
 а оба L1 при L2=0 дают **2.628 s Matrix / 1.696 s Loeffler** с полной SRAM-ареной.
 `--dcache on/off` — экспериментальный режим для JPEG/SD/LCD; default boot не менялся.
 [Карта 128KiB L2, проверка DMA и результаты](docs/cache-matrix.md).
+
+DMA validation: dirty SD RX, repeated LCD updates, four-block I2S streaming,
+underrun/restart and mixed PCM + SD JPEG + LCD passed on rev1.3 with I+D ON.
+`--play SATIE.WAV` now streams through a four-block ring; `--mixed-stress` uses
+generated PCM with the speaker disabled. [Coverage and commands](docs/dma.md).

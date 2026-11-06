@@ -23,12 +23,12 @@ const DATA_BITS: u32 = 16;
 const TX_CONF: u32 =
     (1 << 12) | (1 << 13) | (1 << 14) | (1 << 15) | (1 << 19) | (1 << 30) | ((BCLK_DIV - 1) << 21);
 const MASK: u64 = (1 << 48) - 1;
-pub const STREAM_BUFFERS: usize = 2;
+pub const STREAM_BUFFERS: usize = 4;
 #[repr(C, align(64))]
-struct Buffer([u32; 1024]);
+struct Buffer([u32; 512 * STREAM_BUFFERS]);
 #[repr(C, align(64))]
 struct Descriptor([u32; 16]);
-static mut BUFFER: Buffer = Buffer([0; 1024]);
+static mut BUFFER: Buffer = Buffer([0; 512 * STREAM_BUFFERS]);
 static mut STREAM_DESC: [Descriptor; STREAM_BUFFERS] =
     [const { Descriptor([0; 16]) }; STREAM_BUFFERS];
 static mut DESC: Descriptor = Descriptor([0; 16]);
@@ -58,7 +58,7 @@ pub struct Status {
     pub link: u32,
     pub descriptor: u32,
     pub config: u32,
-    pub owners: [u32; STREAM_BUFFERS],
+    pub owners: [[u32; 3]; STREAM_BUFFERS],
 }
 pub struct Tx {
     _exclusive: PhantomData<*mut ()>,
@@ -87,20 +87,35 @@ fn wait(
     }
     Ok(())
 }
-fn sync(addr: usize, len: u32, timer: &mut Timer) -> Result<(), Error> {
+fn sync(addr: usize, len: u32, _timer: &mut Timer) -> Result<(), Error> {
+    sync_now(addr, len)
+}
+// Polled DMA service does not borrow the timer held by an SD file. Bound cache
+// maintenance by 16M CPU cycles (100ms at the measured 160MHz), not an IRQ/runtime.
+fn sync_now(addr: usize, len: u32) -> Result<(), Error> {
     unsafe {
         core::arch::asm!("fence rw, rw", options(nostack));
         write(0x3ff1_009c, 1 << 4);
         write(0x3ff1_00a0, addr as u32);
         write(0x3ff1_00a4, len);
-        write(0x3ff1_0098, 8);
     }
-    wait(0x3ff1_0098, 8, 0, timer, "cache")?;
+    for _ in 0..2 {
+        unsafe {
+            write(0x3ff1_0098, 8);
+        }
+        let start = super::time::cycle_count();
+        while unsafe { read(0x3ff1_0098) } & 16 == 0 {
+            if super::time::cycle_count().wrapping_sub(start) > 16_000_000 {
+                return Err(Error::Timeout("cache"));
+            }
+        }
+    }
     unsafe {
         core::arch::asm!("fence rw, rw", options(nostack));
     }
     Ok(())
 }
+
 impl Tx {
     /// # Safety
     /// Exclusive I2S1, GPIO9/10/12/13/48, AHB DMA pair 0 (TX/RX) and static audio DMA storage.
@@ -189,7 +204,7 @@ impl Tx {
             _exclusive: PhantomData,
         })
     }
-    /// Two 512-frame buffers (64 ms at 16 kHz). Same exclusive resources as new().
+    /// Four 512-frame buffers (128 ms at 16 kHz). Same exclusive resources as new().
     /// Starts with silence; prime each buffer with stream_refill before start().
     /// # Safety
     /// See new(). No cyclic tone or other TX owner may coexist.
@@ -198,7 +213,7 @@ impl Tx {
         let data = core::ptr::addr_of_mut!(BUFFER).cast::<u32>();
         let descs = core::ptr::addr_of_mut!(STREAM_DESC).cast::<Descriptor>();
         unsafe {
-            for i in 0..1024 {
+            for i in 0..512 * STREAM_BUFFERS {
                 data.add(i).write(0);
             }
             for i in 0..STREAM_BUFFERS {
@@ -208,7 +223,7 @@ impl Tx {
                 (*descs.add(i)).0[2] = descs.add((i + 1) % STREAM_BUFFERS) as u32;
             }
         }
-        sync(data as usize, 4096, timer)?;
+        sync(data as usize, (2048 * STREAM_BUFFERS) as u32, timer)?;
         sync(descs as usize, (STREAM_BUFFERS * 64) as u32, timer)?;
         unsafe {
             modify(DMA + 0xd0, 0, 1 << 2); // Auto writeback clears OWN after each buffer.
@@ -217,12 +232,16 @@ impl Tx {
         Ok(this)
     }
     /// True after DMA releases this buffer. Descriptor lines never share CPU data.
-    pub fn stream_ready(&mut self, index: usize, timer: &mut Timer) -> Result<bool, Error> {
+    pub fn stream_ready(&mut self, index: usize, _timer: &mut Timer) -> Result<bool, Error> {
+        self.stream_released(index)
+    }
+    /// Poll buffer ownership without borrowing SYSTIMER from a file transport.
+    pub fn stream_released(&mut self, index: usize) -> Result<bool, Error> {
         if index >= STREAM_BUFFERS {
             return Err(Error::InvalidBuffer);
         }
         let ints = unsafe { read(DMA + 0x30) };
-        if ints & ((1 << 2) | (1 << 3) | (1 << 4)) != 0 {
+        if ints & ((1 << 2) | (1 << 4) | (1 << 5)) != 0 {
             return Err(Error::Dma(ints));
         }
         // DMA writes OWN asynchronously. Use the uncached SRAM alias after the
@@ -231,7 +250,6 @@ impl Tx {
         unsafe {
             core::arch::asm!("fence rw, rw", options(nostack));
         }
-        let _ = timer;
         Ok(unsafe { (*desc.add(index)).0.as_ptr().read_volatile() } & (1 << 31) == 0)
     }
 
@@ -242,7 +260,12 @@ impl Tx {
         frames: &[u32; 512],
         timer: &mut Timer,
     ) -> Result<(), Error> {
-        if !self.stream_ready(index, timer)? {
+        let _ = timer;
+        self.stream_refill_now(index, frames)
+    }
+    /// Refill a released block from a cooperative event loop or renderer callback.
+    pub fn stream_refill_now(&mut self, index: usize, frames: &[u32; 512]) -> Result<(), Error> {
+        if !self.stream_released(index)? {
             return Err(Error::InvalidBuffer);
         }
         let data = unsafe {
@@ -257,7 +280,7 @@ impl Tx {
         unsafe {
             core::ptr::copy_nonoverlapping(frames.as_ptr(), data, 512);
         }
-        sync(data as usize, 2048, timer)?;
+        sync_now(data as usize, 2048)?;
         unsafe {
             (*desc)
                 .0
@@ -441,10 +464,14 @@ impl Tx {
                 descriptor: read(DMA + 0xf0),
                 config: read(DMA + 0xd0),
                 owners: core::array::from_fn(|i| {
-                    (*core::ptr::addr_of!(STREAM_DESC).cast::<Descriptor>().add(i))
-                        .0
-                        .as_ptr()
-                        .read_volatile()
+                    core::array::from_fn(|word| {
+                        ((core::ptr::addr_of!(STREAM_DESC) as usize + 0x4000_0000)
+                            as *const Descriptor)
+                            .add(i)
+                            .cast::<u32>()
+                            .add(word)
+                            .read_volatile()
+                    })
                 }),
             }
         }

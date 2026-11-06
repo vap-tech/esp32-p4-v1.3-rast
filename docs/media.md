@@ -361,3 +361,10 @@ target/idct-arithmetic-audit.txt, target/clock-audit-disassembly.txt.
 Следующий эксперимент: [отдельный Loeffler IDCT](idct.md), матрица сохранена,
 ошибки до цвета/в RGB565 измерены, сравнение L–M–M–L на плате выполнено.
 Матрица остаётся обычным default; --jpeg-idct-bench выбирает новый вариант явно.
+
+## Update: streaming ring validated
+
+The earlier two-buffer `Dma(5)` failure is historical. A four-block ring with
+owner check and double cache maintenance passed SD WAV playback and mixed-load
+tests. The waveform, failure injection, memory layout and remaining limitations
+are documented in [dma.md](dma.md). Ordinary JPEG IDCT selection is unchanged.

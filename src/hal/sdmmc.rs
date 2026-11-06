@@ -349,6 +349,47 @@ impl Sdmmc {
             .ok_or_else(|| error(cmd))?;
         self.data_command(cmd, address, out, timer)
     }
+    /// Read-only diagnostic: publish tail canaries, dirty RX cache lines, then
+    /// use the normal DMA path. Returns (tail intact, dirty line observed).
+    #[inline(never)]
+    pub fn read_poisoned(
+        &mut self,
+        lba: u32,
+        out: &mut [u8],
+        salt: u32,
+        timer: &mut Timer,
+    ) -> Result<(bool, bool), Error> {
+        if out.is_empty() || out.len() > MAX_TRANSFER || !out.len().is_multiple_of(512) {
+            return Err(error(17));
+        }
+        let ptr = core::ptr::addr_of_mut!(DMA_BUFFER).cast::<u32>();
+        for i in 0..MAX_TRANSFER / 4 {
+            unsafe {
+                ptr.add(i).write_volatile(salt);
+            }
+        }
+        sync_cache(ptr as usize, MAX_TRANSFER, 8, timer)?;
+        for i in 0..out.len() / 4 {
+            unsafe {
+                ptr.add(i).write_volatile(!salt);
+            }
+        }
+        unsafe {
+            core::arch::asm!("fence rw, rw", options(nostack));
+        }
+        let physical = unsafe { ((ptr as usize + 0x4000_0000) as *const u32).read_volatile() };
+        let dirty = physical != !salt;
+        self.read_sectors(lba, out, timer)?;
+        let mut tail_ok = true;
+        for i in out.len() / 4..MAX_TRANSFER / 4 {
+            tail_ok &= unsafe {
+                ((ptr as usize + 0x4000_0000) as *const u32)
+                    .add(i)
+                    .read_volatile()
+            } == salt;
+        }
+        Ok((tail_ok, dirty))
+    }
     /// Write a sector and wait for TRANSFER/READY. No filesystem allocation.
     pub fn write_sector(
         &mut self,

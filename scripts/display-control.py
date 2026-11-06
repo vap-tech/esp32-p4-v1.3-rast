@@ -28,10 +28,13 @@ parser.add_argument('--icache', choices=['on', 'off'], help='toggle core0 I-cach
 parser.add_argument('--dcache', choices=['on', 'off'], help='experimental D-cache toggle, L2=0 only')
 parser.add_argument('--l2', choices=['on', 'off'], help='experimental L2 toggle, separately linked 128KiB layout only')
 parser.add_argument('--l2-probe', action='store_true', help='read-only L2 positive control on initialized framebuffer')
+parser.add_argument('--sd-stress', action='store_true', help='read-only dirty RX DMA soak, active framebuffer required')
+parser.add_argument('--mixed-stress', action='store_true', help='muted PCM DMA + SD JPEG + LCD soak')
+parser.add_argument('--play-stall', nargs='?', const='SATIE.WAV', help='inject underrun; expects owner error and safe cleanup')
 args = parser.parse_args()
 if args.seconds is not None and (args.seconds <= 0 or args.play is None):
     parser.error('--seconds requires --play and a positive duration')
-for path in (args.image, args.play, args.jpeg_bench, args.jpeg_profile, args.jpeg_idct_bench):
+for path in (args.image, args.play, args.jpeg_bench, args.jpeg_profile, args.jpeg_idct_bench, args.play_stall):
     if path is not None and (not path or not path.isascii() or any(c.isspace() for c in path) or len(path) > 80):
         parser.error('media paths must be ASCII without whitespace, at most 80 characters (FAT32 8.3 components)')
 if any(len(c) != 1 or not c.isascii() for c in args.commands) or args.hold < 0:
@@ -97,6 +100,21 @@ try:
         line = receive(b'L2 PROBE DONE', timeout=10)
         if b'Err(' in line:
             raise SystemExit('L2 probe failed')
+    if args.mixed_stress:
+        os.write(fd, b':mixed-stress\n')
+        line = receive(b'MIXED DONE', timeout=180)
+        if b'Err(' in line or b'guards=false' in line or b'guard_ok: false' in line:
+            raise SystemExit('Mixed stress failed')
+    if args.play_stall:
+        os.write(fd, (':play-stall ' + args.play_stall + '\n').encode('ascii'))
+        line = receive(b'MEDIA PLAY DONE', timeout=10)
+        if b'Err(Audio(I2s(Dma(' not in line:
+            raise SystemExit('Expected underrun DMA owner error')
+    if args.sd_stress:
+        os.write(fd, b':sd-stress\n')
+        line = receive(b'SD STRESS DONE', timeout=180)
+        if b'Err(' in line or b'guards=false' in line or b'guard_ok: false' in line:
+            raise SystemExit('SD stress failed')
     if args.clock:
         os.write(fd, b':clock\n')
         receive(b'CLOCK DONE', timeout=10)

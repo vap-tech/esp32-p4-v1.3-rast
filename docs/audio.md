@@ -174,3 +174,11 @@ SHA256 `0da6374b8b3bb1dea81b2d2077c2f95683bfb39077086e162f5a1bc98749ca67`.
 Регистры цифрового loopback сверены с
 [ES8311 datasheet](https://files.waveshare.com/wiki/common/ES8311.DS.pdf)
 и [User Guide](https://files.waveshare.com/wiki/common/ES8311.user.Guide.pdf).
+
+## DMA streaming update
+
+The earlier two-block SD playback descriptor error is resolved with a four-block
+ring, owner check enabled, double cache maintenance and explicit OWN handoff.
+60 s SD WAV + LCD and generated PCM + JPEG/LCD mixed tests passed. Underrun
+stops DMA; a subsequent playback command reinitializes the channel. No automatic
+resume of the same file is implemented. [Current validation and commands](dma.md).

@@ -224,7 +224,39 @@ extern "C" fn rust_main() -> ! {
                         continue;
                     }
                 };
-                if line == "l2-probe" {
+                if line == "mixed-stress" {
+                    if camera_live || !scanout_active {
+                        let _ = writeln!(console, "MIXED DONE Err(state)");
+                        continue;
+                    }
+                    let result =
+                        mixed_stress(framebuffer.as_mut().unwrap(), &mut timer, &mut console);
+                    let _ = writeln!(
+                        console,
+                        "MIXED DONE {:?} guards={} stack={:?}",
+                        result,
+                        framebuffer.as_ref().unwrap().guards_ok(),
+                        hal::memory::stack_usage()
+                    );
+                } else if line == "sd-stress" {
+                    if camera_live || !scanout_active {
+                        let _ = writeln!(console, "SD STRESS DONE Err(state)");
+                        continue;
+                    }
+                    if internal_arena.stats().used != 0 {
+                        let _ = writeln!(console, "SD STRESS DONE Err(arena busy)");
+                        continue;
+                    }
+                    let result = sd_stress(&internal_arena, &mut timer, &mut console);
+                    internal_arena.reset();
+                    let _ = writeln!(
+                        console,
+                        "SD STRESS DONE {:?} guards={} stack={:?}",
+                        result,
+                        framebuffer.as_ref().unwrap().guards_ok(),
+                        hal::memory::stack_usage()
+                    );
+                } else if line == "l2-probe" {
                     if camera_live || framebuffer.is_none() {
                         let _ = writeln!(console, "L2 PROBE DONE Err(state)");
                         continue;
@@ -492,11 +524,20 @@ extern "C" fn rust_main() -> ! {
                         framebuffer.as_ref().unwrap().guards_ok(),
                         hal::memory::stack_usage()
                     );
-                } else if let Some(path) = line.strip_prefix("play ") {
-                    let result = sd_audio(path, &mut i2c, &mut timer, &mut console);
+                } else if let Some(path) = line
+                    .strip_prefix("play ")
+                    .or_else(|| line.strip_prefix("play-stall "))
+                {
+                    let result = sd_audio(
+                        path,
+                        &mut i2c,
+                        &mut timer,
+                        &mut console,
+                        line.starts_with("play-stall "),
+                    );
                     let _ = writeln!(console, "MEDIA PLAY DONE {:?}", result);
                 } else {
-                    let _ = writeln!(console, "MEDIA ERROR expected :memory, :memory-test, :memory-bench, :image PATH or :play PATH");
+                    let _ = writeln!(console, "MEDIA ERROR see docs/console.md");
                 }
             } else if command == 27 {
                 let _ = writeln!(console, "MEDIA PLAY DONE Ok(idle)");
@@ -938,7 +979,10 @@ extern "C" fn rust_main() -> ! {
 }
 
 fn display_help(console: &mut hal::usb_serial::Console) {
-    let _ = writeln!(console, "DISPLAY commands: :icache on/off; :memory / :memory-test / :memory-bench; :image PATH / :jpeg-bench PATH / :jpeg-profile PATH / :play PATH (ESC stops audio); +/- backlight5%; ]/[ digital gain; }}/{{ analogue gain; >/< exposure; = controls; p quiet 1kHz speaker tone 2s; ! FAT32 create/verify CONFIG.TXT; Z FAT32 list/read-only file check; Y SD capabilities (no speed switch); M SDMMC read-only probe; m SD multi-block read benchmark; # SD multi-write/verify/restore last 9 sectors; @ SD write/verify/restore last sector; Q panel RGB probe; E gray/RGB check; W full screenshot; H thumbnail; V camera-live; G camera-test-live; O camera-stop; F framebuffer; S fb-status; U patterns; P psram-test; a camera-info; A camera-test; o camera-scene; ? help; q status; B BIST-probe25s; L scanline-probe; e error-counter(clear); v/h/b patterns; i/I invert on/off; x/y/n mirror X/Y/none; c/C BGR/RGB; d/D display off/on; j/J idle on/off; k/f/N black/white/normal; s/w sleep/wake; t/u/T TE vblank/both/off; l TE line300; g idle-green; r/R soft/hard reset; 6/7 RGB565 at650/750; 8 RGB888 at750; z RGB565 at550");
+    let _ = writeln!(
+        console,
+        "DISPLAY commands: see docs/console.md; :image PATH; :play PATH; :sd-stress"
+    );
 }
 
 #[inline(never)]
@@ -1416,7 +1460,7 @@ fn sd_fat_probe(
             // Read at most 1 MiB twice with different chunk boundaries. This
             // exercises full batches, partial edges, rewind and EOF on small files.
             let bytes = file.len().min(1_048_576);
-            let buffer = unsafe { &mut *core::ptr::addr_of_mut!(SD_PROBE_BUFFER) };
+            let buffer = unsafe { sd_probe_buffer() };
             let mut reference = None;
             for chunk in [8192usize, 777] {
                 file.seek(0)?;
@@ -1593,7 +1637,15 @@ fn sdmmc_probe(
 }
 
 // Used only by synchronous console diagnostics, never by an interrupt.
-static mut SD_PROBE_BUFFER: [u8; hal::sdmmc::MAX_TRANSFER] = [0; hal::sdmmc::MAX_TRANSFER];
+// Reuse the retired 8 KiB boot stack, never concurrently with boot or audio.
+// Callers are synchronous console diagnostics and initialize every byte here.
+unsafe fn sd_probe_buffer() -> &'static mut [u8; hal::sdmmc::MAX_TRANSFER] {
+    let ptr = 0x4ff2_6000 as *mut [u8; hal::sdmmc::MAX_TRANSFER];
+    unsafe {
+        ptr.cast::<u8>().write_bytes(0, hal::sdmmc::MAX_TRANSFER);
+        &mut *ptr
+    }
+}
 
 #[inline(never)]
 fn sdmmc_multi_probe(
@@ -1603,7 +1655,7 @@ fn sdmmc_multi_probe(
     let mut card = unsafe { hal::sdmmc::Sdmmc::new(timer) }?;
     card.configure_bus(timer)?;
     let _ = writeln!(console, "SD_MULTI {:?}", card.info);
-    let buffer = unsafe { &mut *core::ptr::addr_of_mut!(SD_PROBE_BUFFER) };
+    let buffer = unsafe { sd_probe_buffer() };
     let mut single = [0u8; 512];
     // Exercise both descriptors and nonzero LBAs, including the card's last block.
     for lba in [0, 2048, (card.info.sectors - 16) as u32] {
@@ -1657,7 +1709,7 @@ fn sdmmc_multi_write_probe(
     let lba = (card.info.sectors - 9) as u32;
     let original = &mut [0u8; LEN];
     card.read_sectors(lba, original, timer)?;
-    let buffer = unsafe { &mut *core::ptr::addr_of_mut!(SD_PROBE_BUFFER) };
+    let buffer = unsafe { sd_probe_buffer() };
     let bytes = &mut buffer[..LEN];
     let pattern = |i: usize| (i as u8).wrapping_mul(73) ^ ((i >> 8) as u8) ^ 0xa5;
     for (i, byte) in bytes.iter_mut().enumerate() {
@@ -1780,6 +1832,8 @@ fn sdmmc_info(
     Ok(())
 }
 
+#[link_section = ".text.entry"]
+#[inline(never)]
 fn media_command_line<'a>(
     console: &mut hal::usb_serial::Console,
     timer: &mut hal::time::Timer,
@@ -1887,6 +1941,7 @@ fn sd_audio(
     bus: &mut hal::i2c::I2c,
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
+    stall: bool,
 ) -> Result<(), PlaybackError> {
     use esp32_p4::{
         devices::es8311::Es8311,
@@ -1954,6 +2009,9 @@ fn sd_audio(
         file.with_timer(|timer| codec.as_mut().unwrap().mute(bus, timer, false))
             .map_err(codec_error)?;
         pa.set_high();
+        if stall {
+            file.with_timer(|timer| timer.delay_us(200_000));
+        }
         let mut index = 0;
         let mut refill_count = 0u32;
         let mut max_read_us = 0;
@@ -2104,6 +2162,7 @@ fn jpeg_trial(
     profiling: bool,
     idct: esp32_p4::media::idct::Kind,
     timer: &mut hal::time::Timer,
+    mut background: Option<&mut AudioWork>,
 ) -> Result<JpegTrial, esp32_p4::media::Error<FsProbeError>> {
     use esp32_p4::{
         media::{jpeg, Error},
@@ -2113,6 +2172,9 @@ fn jpeg_trial(
             Partition,
         },
     };
+    if let Some(audio) = background.as_mut() {
+        audio.poll();
+    }
     let store_pixels = core::hint::black_box(store_pixels);
     let started = timer.now_us();
     let transport = |e| {
@@ -2147,6 +2209,9 @@ fn jpeg_trial(
             pixels_seen += pixels.len() as u32;
             if store_pixels {
                 fb.write_run(x, y, pixels);
+            }
+            if let Some(audio) = background.as_mut() {
+                audio.poll();
             }
         },
         &mut profile,
@@ -2195,6 +2260,7 @@ fn jpeg_bench(
             false,
             esp32_p4::media::idct::Kind::Matrix,
             timer,
+            None,
         )?;
         let after = fb.checksum();
         times[pass] = trial.decode_us;
@@ -2266,6 +2332,7 @@ fn jpeg_profile(
             enabled,
             esp32_p4::media::idct::Kind::Matrix,
             timer,
+            None,
         )?;
         times[pass] = trial.decode_us;
         let framebuffer_hash = fb.checksum();
@@ -2363,7 +2430,7 @@ fn jpeg_idct_bench(
         .enumerate()
     {
         hal::memory::instruction_counts_start();
-        let trial_result = jpeg_trial(path, fb, true, true, kind, timer);
+        let trial_result = jpeg_trial(path, fb, true, true, kind, timer, None);
         let instruction_counts = hal::memory::instruction_counts_stop();
         let trial = trial_result?;
         let _ = writeln!(
@@ -2389,5 +2456,199 @@ fn jpeg_idct_bench(
         let _=writeln!(console,"JPEG IDCT TRIAL pass={} kind={:?} decode_us={} total_us={} idct_us={} entropy_us={} color_us={} output_us={} sd_us={} blocks={} dc_only={} hash={:08x} fb_hash={:08x}",pass+1,kind,trial.decode_us,trial.total_us,idct_us,trial.profile.ticks[0]*1_000_000/hz,trial.profile.ticks[2]*1_000_000/hz,trial.profile.ticks[3]*1_000_000/hz,trial.sd_us,trial.profile.blocks,trial.profile.dc_only_blocks,trial.hash,framebuffer_hash);
     }
     let _=writeln!(console,"JPEG IDCT RESULT matrix_mean_us={} loeffler_mean_us={} matrix_idct_mean_us={} loeffler_idct_mean_us={} total_speedup_milli={} idct_speedup_milli={}",totals[0]/2,totals[1]/2,idct_totals[0]/2,idct_totals[1]/2,totals[0]*1000/totals[1].max(1),idct_totals[0]*1000/idct_totals[1].max(1));
+    Ok(())
+}
+
+#[link_section = ".text.entry"]
+#[inline(never)]
+fn sd_stress(
+    arena: &esp32_p4::memory::Arena<'_, esp32_p4::memory::Internal>,
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<(u32, u32), &'static str> {
+    use core::alloc::Layout;
+    let mut reference = arena
+        .allocate(Layout::from_size_align(3 * 8192, 64).unwrap())
+        .map_err(|_| "alloc")?;
+    let mut workspace = arena
+        .allocate(Layout::from_size_align(8192 + 256, 64).unwrap())
+        .map_err(|_| "alloc")?;
+    let reference = reference.as_mut_slice();
+    let workspace = workspace.as_mut_slice();
+    let mut card = unsafe { hal::sdmmc::Sdmmc::new(timer) }.map_err(|_| "init")?;
+    card.configure_bus(timer).map_err(|_| "bus")?;
+    let lbas = [0, 2048, (card.info.sectors - 16) as u32];
+    // Independent baseline: single-sector reads, normal (unpoisoned) path.
+    for (bank, lba) in lbas.into_iter().enumerate() {
+        for i in 0..16 {
+            let sector = &mut reference[bank * 8192 + i * 512..bank * 8192 + (i + 1) * 512];
+            card.read_sectors(lba + i as u32, sector, timer)
+                .map_err(|_| "reference")?;
+        }
+    }
+    let expect_dirty = hal::memory::cache_snapshot().l1_bypass & 16 == 0;
+    let mut cases = 0u32;
+    let mut dirty = 0u32;
+    let start = timer.now_us();
+    for round in 0..64u32 {
+        for (bank, lba) in lbas.into_iter().enumerate() {
+            for len in [512usize, 1024, 4096, 8192] {
+                for offset in [0usize, 1, 3, 31, 63, 65] {
+                    workspace.fill(0xa5);
+                    let begin = 64 + offset;
+                    let (tail, observed) = card
+                        .read_poisoned(
+                            lba,
+                            &mut workspace[begin..begin + len],
+                            0x9e3779b9u32.wrapping_mul(cases + 1),
+                            timer,
+                        )
+                        .map_err(|_| "read")?;
+                    if !tail
+                        || workspace[..begin]
+                            .iter()
+                            .chain(workspace[begin + len..].iter())
+                            .any(|b| *b != 0xa5)
+                    {
+                        return Err("guard");
+                    }
+                    if workspace[begin..begin + len] != reference[bank * 8192..bank * 8192 + len] {
+                        return Err("bytes");
+                    }
+                    if expect_dirty && !observed {
+                        return Err("not dirty");
+                    }
+                    cases += 1;
+                    dirty += u32::from(observed);
+                }
+            }
+        }
+        if round % 16 == 15 {
+            let _ = writeln!(
+                console,
+                "SD STRESS cases={} dirty={} us={}",
+                cases,
+                dirty,
+                timer.now_us() - start
+            );
+        }
+    }
+    Ok((cases, dirty))
+}
+
+// Owns the AHB DMA channel and all producer state; no global callback pointers.
+struct AudioWork {
+    tx: hal::i2s::Tx,
+    frames: [u32; 512],
+    index: usize,
+    refills: u32,
+    last: u64,
+    max_gap: u64,
+    failed: bool,
+}
+impl AudioWork {
+    fn poll(&mut self) {
+        let now = hal::time::cycle_count();
+        self.max_gap = self.max_gap.max(now.wrapping_sub(self.last));
+        self.last = now;
+        if self.failed {
+            return;
+        }
+        for _ in 0..hal::i2s::STREAM_BUFFERS {
+            match self.tx.stream_released(self.index) {
+                Ok(false) => break,
+                Ok(true) => {
+                    let sample = ((self.refills % 127) + 1) * 32;
+                    self.frames.fill(sample | (sample << 16));
+                    if self.tx.stream_refill_now(self.index, &self.frames).is_err() {
+                        self.failed = true;
+                        break;
+                    }
+                    self.index = (self.index + 1) % hal::i2s::STREAM_BUFFERS;
+                    self.refills += 1;
+                }
+                Err(_) => {
+                    self.failed = true;
+                    break;
+                }
+            }
+        }
+    }
+}
+#[inline(never)]
+fn mixed_stress(
+    fb: &mut esp32_p4::devices::framebuffer::Framebuffer,
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<(), &'static str> {
+    let mut pa = unsafe { hal::gpio::Output::<11>::new_low() };
+    pa.set_low(); // Digital PCM transport test; speaker intentionally disabled.
+    let mut audio = AudioWork {
+        tx: unsafe { hal::i2s::Tx::new_stream(timer) }.map_err(|_| "init")?,
+        frames: [0x01000100; 512],
+        index: 0,
+        refills: 0,
+        last: hal::time::cycle_count(),
+        max_gap: 0,
+        failed: false,
+    };
+    audio.poll();
+    if audio.failed || audio.tx.start(timer).is_err() {
+        let _ = audio.tx.stop(timer);
+        return Err("start");
+    }
+    let started = timer.now_us();
+    let cycles = hal::time::cycle_count();
+    audio.last = cycles;
+    let result = (|| {
+        for pass in 0..20 {
+            let trial = jpeg_trial(
+                "HOME.JPG",
+                fb,
+                true,
+                false,
+                esp32_p4::media::idct::Kind::Loeffler,
+                timer,
+                Some(&mut audio),
+            )
+            .map_err(|_| "jpeg")?;
+            if audio.failed {
+                return Err("audio");
+            }
+            if trial.hash != 0x534b3012 || !fb.guards_ok() {
+                return Err("pixels");
+            }
+            if pass % 5 == 4 {
+                let _ = writeln!(
+                    console,
+                    "MIXED frames={} refills={}",
+                    pass + 1,
+                    audio.refills
+                );
+            }
+        }
+        Ok(())
+    })();
+    let elapsed = timer.now_us() - started;
+    let elapsed_cycles = hal::time::cycle_count() - cycles;
+    let status = audio.tx.status();
+    let stop = audio.tx.stop(timer).map_err(|_| "stop");
+    let gap_us = audio.max_gap * elapsed / elapsed_cycles.max(1);
+    let _ = writeln!(
+        console,
+        "MIXED PCM refills={} us={} max_gap_us={} status={:?}",
+        audio.refills, elapsed, gap_us, status
+    );
+    result.and(stop)?;
+    let expected_bck = elapsed * 512_000 / 1_000_000;
+    let expected_blocks =
+        (elapsed * 16_000 / 512 / 1_000_000) as u32 + hal::i2s::STREAM_BUFFERS as u32;
+    if gap_us > 64_000
+        || status.dma & 0x34 != 0
+        || audio.refills.abs_diff(expected_blocks) > 2
+        || u64::from(status.bck).abs_diff(expected_bck) > expected_bck / 100
+    {
+        return Err("timing");
+    }
     Ok(())
 }

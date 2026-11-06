@@ -1,5 +1,34 @@
 # Состояние проекта — 2026-11-06
 
+## DMA validation after stable baseline
+
+SD dirty-RX / guard soak passed with I+D ON; LCD passed repeated JPEG updates.
+I2S now uses four 2048 B blocks, keeping owner check and auto writeback enabled.
+SD WAV played for 60 s with LCD active; deliberate producer stall stops DMA,
+and a subsequent playback starts normally. Mixed generated PCM + SD JPEG + LCD
+passed 20 frames with intact guards. Generic typed DMA and CSI/ISP remain pending.
+Current boot defaults remain all-bypass; runtime experiments are opt-in.
+[Commands, actual coverage, memory reuse and logs](dma.md).
+
+
+## Стабильная база памяти и JPEG
+
+Кодовая база зафиксирована коммитом **9afb4d1**. Экспериментальные переключатели
+включены в репозиторий, но не стали политикой запуска устройства:
+
+- После reset: L1 I/D и L2 bypass, L2=0; 496 KiB арена SRAM, 16 KiB stack,
+  32 MiB PSRAM через uncached alias (28 MiB отдельная арена).
+- Проверенный runtime I ON / D OFF сохраняет правила остальных DMA-клиентов.
+- I+D ON при L2=0 проверены для JPEG/SD/LCD: Loeffler **1.696 s**;
+  универсальная DMA-когерентность и длительные нагрузочные тесты ещё не завершены.
+- Обычный `--image` сохраняет матричный IDCT; Loeffler выбирается явно.
+- При Loeffler + I+D доли IDCT и entropy примерно **31% и 30%**. Старые 59%
+  относятся к матрице без кешей; их нельзя переносить на текущий быстрый режим.
+
+[Текущая матрица режимов, профиль и план DMA](cache-matrix.md).
+Разделы ниже сохраняют историю отдельных измерений и соответствующих им сборок.
+
+
 ## Работает
 
 - Bare-metal Rust на ESP32-P4 rev1.3: собственный HAL, без Cargo-зависимостей,
@@ -50,8 +79,9 @@
   Команда p: тихий тон 1 kHz / 16 kHz PCM16 на 2 s, mute и PA off после.
   Пользователь подтвердил приятный короткий тон после исправления PA20→PA11.
   Короткий RX / AHB DMA RX0 проверяет собственный PCM и цифровой DAC-референс
-  на GPIO48. WAV parser и экспериментальный SD playback добавлены, но звук с SD
-  пока не работает: DMA descriptor error. Аналоговый микрофон не захватывается.
+  на GPIO48. WAV playback с SD на четырёхблочном кольце прошёл 60 s без DMA errors;
+  underrun/restart проверены, аналоговое качество WAV пока не подтверждено слушателем.
+  Аналоговый микрофон не захватывается.
   [Аудио](audio.md).
 
 ## Текущие параметры
@@ -110,14 +140,16 @@
 [варианты рендера и USB](render-memory.md). Файлы логов/PNG в target и старые
 исходники в old остаются локальными и не входят в Git.
 
-## Медиа с SD — текущая пауза
+## Медиа с SD — историческая пауза до DMA-validation
 
 JPEG baseline 1024×600 из HOME.JPG декодирован CPU в RGB565 framebuffer,
 scanout active=true, guards=true; около 2.72 s вместе с инициализацией SD.
 Автопоказа картинки и автозапуска музыки нет: только команды скрипта.
 WAV PCM16 parser и кольцо AHB DMA из двух буферов добавлены, но при воспроизведении
 SATIE.WAV возникает descriptor error до первого refill; пользователь звука не слышит.
-Доработка остановлена по просьбе пользователя. Подробности: [media.md](media.md).
+На этом этапе доработка была остановлена по просьбе пользователя. После отдельного
+разрешения работа возобновлена и кольцо исправлено: [актуальные проверки](dma.md).
+Подробности прежнего состояния: [media.md](media.md).
 
 ## Эксперимент без кешей
 
