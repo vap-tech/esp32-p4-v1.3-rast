@@ -60,3 +60,26 @@ impl Timer {
         }
     }
 }
+
+/// Read this HP core's 64-bit machine cycle counter without changing its setup.
+/// High/low/high retry prevents a torn read at low-word rollover. Conversion to
+/// seconds requires calibration; no assumed CPU frequency is baked in.
+#[cfg(target_arch = "riscv32")]
+pub fn cycle_count() -> u64 {
+    loop {
+        let high: u32;
+        let low: u32;
+        let again: u32;
+        unsafe {
+            core::arch::asm!("csrr {high}, mcycleh", "csrr {low}, mcycle", "csrr {again}, mcycleh",high=out(reg)high,low=out(reg)low,again=out(reg)again,options(nostack));
+        }
+        if high == again {
+            return (u64::from(high) << 32) | u64::from(low);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "riscv32"))]
+pub fn cycle_count() -> u64 {
+    panic!("machine cycle counter requires ESP32-P4 hardware")
+}

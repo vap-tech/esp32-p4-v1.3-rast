@@ -72,3 +72,29 @@ Copyright 2023 Espressif Systems (Shanghai) CO LTD, Apache-2.0:
 [es8311.c](https://github.com/espressif/esp-adf/blob/68ce88ad4dcf2cadc3f2d45635de5d4305e51498/components/esp_codec_dev/device/es8311/es8311.c).
 The fixed buffer transport, test tone, bounded polling and PA cleanup are local.
 No ADF/IDF runtime or C objects are linked.
+
+Cache bootstrap and memory layout checks in src/main.rs / src/hal/memory.rs
+reference ESP-IDF v6.1 hw_ver1 register definitions, linker memory layout and
+components/esp_rom/patches/esp_rom_cache_writeback_esp32p4_esp32s31.c
+(double writeback and SYNC_DONE), Copyright 2026 Espressif Systems (Shanghai)
+CO LTD, Apache-2.0. Standalone region arenas and benchmark loops are local Rust.
+
+`src/media/loeffler.rs` is a modified Rust adaptation of the 8-bit 8x8
+`_jpeg_idct_islow` in libjpeg-turbo `src/jidctint.c`, pinned commit
+`29e4d9b0178f08158fc72c6068f086c5ba27b772`:
+https://github.com/libjpeg-turbo/libjpeg-turbo/blob/29e4d9b0178f08158fc72c6068f086c5ba27b772/src/jidctint.c
+Original copyright 1991–1998 Thomas G. Lane, modifications 2002–2018 Guido
+Vollbeding, libjpeg-turbo modifications 2015, 2020, 2022, 2026 D. R. Commander.
+Rust modifications: 2026 ESP32-P4 project contributors.
+Changes: already-dequantized i32 input, wide integer products/sums, explicit
+saturating output instead of IJG's masked range-limit table, standalone Rust
+without libjpeg data structures/runtime. Zero-row/column shortcuts retained.
+The local matrix reference and coefficient/host diagnostics remain separate.
+
+This software is based in part on the work of the Independent JPEG Group.
+The applicable IJG conditions and copyright/no-warranty notice are included
+unaltered in [libjpeg-turbo-README.ijg.txt](libjpeg-turbo-README.ijg.txt), with the
+upstream license overview in [libjpeg-turbo-LICENSE.md](libjpeg-turbo-LICENSE.md).
+No libjpeg Cargo/library dependency is linked. The host-only validation script
+extracts pinned C into ignored target/, preserving its header and applying the
+same documented input/range adaptations for an independent UBSan comparison.

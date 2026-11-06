@@ -203,12 +203,6 @@ impl Psram {
                                               // SPLL480 / 6 = 80 MHz, fixed ten-cycle read latency retained.
         write(0x5008e050, (5 << 16) | (2 << 8) | 5);
         write(0x5008f014, (5 << 16) | (2 << 8) | 5);
-        // Identity mapping for the first 4 MiB. MMU still participates in
-        // uncached alias accesses; L1/L2 caching is bypassed at 0x88000000.
-        for page in 0..64u32 {
-            write(0x5008_e380, page);
-            write(0x5008_e37c, page | (1 << 11) | (1 << 10));
-        }
         let density = mr23 as u8 & 7;
         let bytes = match density {
             1 => 4 << 20,
@@ -218,6 +212,12 @@ impl Psram {
             6 => 64 << 20,
             _ => return Err(Error::Identity([mr01, mr23, mr48, mr8])),
         };
+        // 64 KiB identity pages for the detected capacity (32 MiB on this board).
+        // MMU also participates in uncached accesses via 0x88000000.
+        for page in 0..(bytes / 65536) as u32 {
+            write(0x5008_e380, page);
+            write(0x5008_e37c, page | (1 << 11) | (1 << 10));
+        }
         Ok(Self {
             info: Info {
                 mr: [
@@ -233,6 +233,53 @@ impl Psram {
         })
     }
 
+    /// Permanently partition the first 4 MiB for display/screenshot, the rest
+    /// for CPU bulk allocations. Neither part can reinitialize MMU or the other part.
+    pub fn split(
+        self,
+    ) -> (
+        DisplayMemory,
+        crate::memory::Arena<'static, crate::memory::External>,
+    ) {
+        let arena = unsafe {
+            crate::memory::Arena::from_raw(
+                core::ptr::NonNull::new_unchecked((BASE + RESERVED) as *mut u8),
+                self.info.bytes - RESERVED,
+            )
+        };
+        (
+            DisplayMemory {
+                _exclusive: PhantomData,
+            },
+            arena,
+        )
+    }
+    /// Destructive full-capacity test before memory is split or used by display.
+    pub fn check_all(&mut self, mut progress: impl FnMut(usize, usize)) -> Result<(), Error> {
+        for (pass, salt) in [0x5a6b_7c8d, 0xa594_8372].into_iter().enumerate() {
+            for offset in (0..self.info.bytes).step_by(4) {
+                write(
+                    BASE + offset,
+                    (offset as u32).wrapping_mul(0x9e37_79b9) ^ salt,
+                );
+            }
+            for offset in (0..self.info.bytes).step_by(4) {
+                let expected = (offset as u32).wrapping_mul(0x9e37_79b9) ^ salt;
+                let actual = read(BASE + offset);
+                if actual != expected {
+                    return Err(Error::Memory {
+                        address: BASE + offset,
+                        expected,
+                        actual,
+                    });
+                }
+                if offset.is_multiple_of(1024 * 1024) {
+                    progress(pass, offset);
+                }
+            }
+        }
+        Ok(())
+    }
     /// Destructive read/write verification of our reserved first 4 MiB.
     pub fn check(&mut self) -> Result<(), Error> {
         for salt in [0x5a6b_7c8d, 0xa594_8372] {
@@ -256,4 +303,9 @@ impl Psram {
         }
         Ok(())
     }
+}
+
+/// Exclusive display/screenshot reservation: first 4 MiB of initialized PSRAM.
+pub struct DisplayMemory {
+    _exclusive: PhantomData<*mut ()>,
 }

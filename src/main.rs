@@ -26,7 +26,15 @@ global_asm!(
     "sw t1, 0(t0)",
     "fence rw, rw",
     "fence.i",
-    "la sp, _stack_top",
+    // Use an uncached boot stack while retiring ROM cache state. No Rust or
+    // SRAM-resident callee is entered until all bypasses are established.
+    "la sp, _boot_stack_top",
+    "li t0, 0x40000000",
+    "add sp, sp, t0",
+    "la t0, _trap",
+    "csrw mtvec, t0",
+    "call rust_cache_boot",
+    "la sp, _boot_stack_top",
     "la t0, _trap",
     "csrw mtvec, t0",
     "la t0, _bss_start",
@@ -37,6 +45,8 @@ global_asm!(
     "addi t0, t0, 4",
     "j 1b",
     "2:",
+    "call rust_memory_boot",
+    "la sp, _stack_top",
     "call rust_main",
     "3: j 3b",
     ".balign 4",
@@ -48,6 +58,89 @@ global_asm!(
     "4: j 4b",
     ".option pop",
 );
+
+// Filled before BSS is cleared, preserved in a dedicated 16-byte NOLOAD section.
+#[link_section = ".boot_audit"]
+static mut BOOT_CPU_HZ: [u64; 2] = [0; 2];
+
+// Runs from SPM on an uncached boot stack, before BSS initialization.
+#[no_mangle]
+#[link_section = ".text.entry"]
+extern "C" fn rust_cache_boot() {
+    unsafe {
+        hal::watchdog::disable();
+        let mut boot_timer = hal::time::Timer::new();
+        let mut boot_console = hal::usb_serial::Console::new();
+        let before_hz = clock_audit("before-cache-bypass", &mut boot_timer, &mut boot_console);
+        core::ptr::addr_of_mut!(BOOT_CPU_HZ)
+            .cast::<u64>()
+            .write_volatile(before_hz);
+        // Stop automatic preloads without disabling clocks shared with L2 SRAM.
+        for offset in [0xe4usize, 0xf8, 0x134, 0x2b4] {
+            let reg = (0x3ff1_0000 + offset) as *mut u32;
+            reg.write_volatile(reg.read_volatile() & !1);
+        }
+        // ESP-IDF v6.1's P4 ROM patch issues writeback twice and waits for DONE.
+        // Preserve ROM dirty data before bypassing either level.
+        for map in [16u32, 32] {
+            (0x3ff1_009c as *mut u32).write_volatile(map);
+            (0x3ff1_00a0 as *mut u32).write_volatile(0);
+            (0x3ff1_00a4 as *mut u32).write_volatile(0);
+            for _ in 0..2 {
+                (0x3ff1_0098 as *mut u32).write_volatile(4);
+                let mut spins = 0;
+                while (0x3ff1_0098 as *const u32).read_volatile() & 16 == 0 {
+                    spins += 1;
+                    if spins > 1_000_000 {
+                        (0x500d_2000 as *mut u32).write_volatile(b'!' as u32);
+                        (0x500d_2004 as *mut u32).write_volatile(1);
+                        loop {
+                            core::hint::spin_loop();
+                        }
+                    }
+                }
+            }
+        }
+        core::arch::asm!("fence rw, rw", options(nostack));
+        (0x3ff1_0008 as *mut u32).write_volatile(0x13);
+        (0x3ff1_0274 as *mut u32).write_volatile(0x20);
+        (0x3ff1_0278 as *mut u32).write_volatile(hal::memory::L2_SIZE_REGISTER);
+        (0x3ff1_027c as *mut u32).write_volatile(8);
+        core::arch::asm!("fence rw, rw", "fence.i", options(nostack));
+        let after_hz = clock_audit("after-cache-bypass", &mut boot_timer, &mut boot_console);
+        core::ptr::addr_of_mut!(BOOT_CPU_HZ)
+            .cast::<u64>()
+            .add(1)
+            .write_volatile(after_hz);
+    }
+}
+
+#[no_mangle]
+extern "C" fn rust_memory_boot() {
+    unsafe { hal::watchdog::disable() };
+    let mut console = unsafe { hal::usb_serial::Console::new() };
+    let _ = writeln!(
+        console,
+        "MEMORY BOOT CACHE {:x?}",
+        hal::memory::cache_snapshot()
+    );
+    match unsafe { hal::memory::init_upper_sram() } {
+        Ok(()) => {
+            let _ = writeln!(
+                console,
+                "MEMORY UPPER SRAM verified {}KiB; caches bypassed; stack=16KiB arena={}KiB",
+                (hal::memory::INTERNAL_END - hal::memory::INTERNAL_START) / 1024,
+                (hal::memory::STACK_START - hal::memory::INTERNAL_START) / 1024
+            );
+        }
+        Err(error) => {
+            let _ = writeln!(console, "MEMORY BOOT FAILED {:?}", error);
+            loop {
+                core::hint::spin_loop();
+            }
+        }
+    }
+}
 
 #[no_mangle]
 extern "C" fn rust_main() -> ! {
@@ -112,6 +205,10 @@ extern "C" fn rust_main() -> ! {
     display_help(&mut console);
     let mut csi: Option<hal::csi::Csi> = None;
     let mut psram = None;
+    let mut large_arena: Option<esp32_p4::memory::Arena<'static, esp32_p4::memory::External>> =
+        None;
+    // Boot proved and reserved this region; one owner for the entire run.
+    let mut internal_arena = unsafe { hal::memory::internal_arena() };
     let mut framebuffer: Option<esp32_p4::devices::framebuffer::Framebuffer> = None;
     let mut scanout_active = false;
     let mut camera_live = false;
@@ -127,7 +224,169 @@ extern "C" fn rust_main() -> ! {
                         continue;
                     }
                 };
-                if let Some(path) = line.strip_prefix("image ") {
+                if line == "l2-probe" {
+                    if camera_live || framebuffer.is_none() {
+                        let _ = writeln!(console, "L2 PROBE DONE Err(state)");
+                        continue;
+                    }
+                    let result = unsafe { hal::memory::probe_l2() };
+                    let _ = writeln!(console, "L2 PROBE DONE {:?}", result);
+                } else if line == "dcache on"
+                    || line == "dcache off"
+                    || line == "l2 on"
+                    || line == "l2 off"
+                {
+                    if camera_live {
+                        let _ = writeln!(console, "CACHE DONE Err(camera active)");
+                        continue;
+                    }
+                    let result = unsafe {
+                        if line.starts_with("dcache") {
+                            hal::memory::set_data_cache(line == "dcache on")
+                        } else {
+                            hal::memory::set_l2_cache(line == "l2 on")
+                        }
+                    };
+                    let _ = writeln!(
+                        console,
+                        "CACHE DONE {:?} {:?}",
+                        result,
+                        hal::memory::cache_snapshot()
+                    );
+                } else if line == "icache on" || line == "icache off" {
+                    let result = unsafe { hal::memory::set_instruction_cache(line == "icache on") };
+                    let _ = writeln!(
+                        console,
+                        "ICACHE DONE {:?} {:?}",
+                        result,
+                        hal::memory::cache_snapshot()
+                    );
+                } else if line == "clock" {
+                    clock_audit("runtime", &mut timer, &mut console);
+                    let before = unsafe {
+                        core::ptr::addr_of!(BOOT_CPU_HZ)
+                            .cast::<u64>()
+                            .read_volatile()
+                    };
+                    let after = unsafe {
+                        core::ptr::addr_of!(BOOT_CPU_HZ)
+                            .cast::<u64>()
+                            .add(1)
+                            .read_volatile()
+                    };
+                    let _ = writeln!(
+                        console,
+                        "CLOCK BOOT before_hz={} after_hz={}",
+                        before, after
+                    );
+                    let _ = writeln!(console, "CLOCK DONE Ok(())");
+                } else if line == "memory" {
+                    let _ = writeln!(console, "MEMORY CACHE {:x?}", hal::memory::cache_snapshot());
+                    let _ = writeln!(console, "MEMORY STACK {:?}", hal::memory::stack_usage());
+                    let _ = writeln!(console, "MEMORY INTERNAL {:?}", internal_arena.stats());
+                    if let Some(arena) = large_arena.as_ref() {
+                        let _ = writeln!(console, "MEMORY EXTERNAL {:?}", arena.stats());
+                    }
+                    let _ = writeln!(console, "MEMORY DONE Ok(())");
+                } else if line == "memory-bench" {
+                    // Initialize/split PSRAM without enabling display scanout.
+                    if large_arena.is_none() {
+                        let memory = match psram.take() {
+                            Some(memory) => Ok(memory),
+                            None => unsafe { hal::psram::Psram::new(&mut timer) },
+                        };
+                        match memory {
+                            Ok(memory) => {
+                                let (display_memory, arena) = memory.split();
+                                large_arena = Some(arena);
+                                framebuffer =
+                                    Some(esp32_p4::devices::framebuffer::Framebuffer::new(
+                                        display_memory,
+                                    ));
+                            }
+                            Err(error) => {
+                                let _ = writeln!(console, "MEMORY DONE Err({:?})", error);
+                                continue;
+                            }
+                        }
+                    }
+                    let before_hash = framebuffer.as_ref().unwrap().checksum();
+                    let result = memory_bench(
+                        &internal_arena,
+                        large_arena.as_ref().unwrap(),
+                        &mut timer,
+                        &mut console,
+                    );
+                    // No outstanding allocations: reclaim both scratch arenas.
+                    internal_arena.reset();
+                    large_arena.as_mut().unwrap().reset();
+                    let after_hash = framebuffer.as_ref().unwrap().checksum();
+                    let result = result.and(
+                        if before_hash == after_hash && framebuffer.as_ref().unwrap().guards_ok() {
+                            Ok(())
+                        } else {
+                            Err(hal::memory::Error::Mismatch {
+                                address: esp32_p4::devices::framebuffer::CPU_ADDRESS,
+                                expected: before_hash,
+                                actual: after_hash,
+                            })
+                        },
+                    );
+                    let _ = writeln!(
+                        console,
+                        "MEMORY FRAMEBUFFER hash_before={:08x} hash_after={:08x} unchanged={}",
+                        before_hash,
+                        after_hash,
+                        before_hash == after_hash
+                    );
+                    let _ = writeln!(
+                        console,
+                        "MEMORY DONE {:?} display_active={} guards={} stack={:?}",
+                        result,
+                        scanout_active,
+                        framebuffer.as_ref().unwrap().guards_ok(),
+                        hal::memory::stack_usage()
+                    );
+                } else if line == "memory-test" {
+                    if framebuffer.is_some() {
+                        let _ = writeln!(
+                            console,
+                            "MEMORY DONE Err(display owns PSRAM; reset before full test)"
+                        );
+                        continue;
+                    }
+                    if psram.is_none() {
+                        match unsafe { hal::psram::Psram::new(&mut timer) } {
+                            Ok(memory) => psram = Some(memory),
+                            Err(error) => {
+                                let _ = writeln!(console, "MEMORY DONE Err({:?})", error);
+                                continue;
+                            }
+                        }
+                    }
+                    let memory = psram.as_mut().unwrap();
+                    let _ = writeln!(
+                        console,
+                        "MEMORY PSRAM full test bytes={} {:?}",
+                        memory.info.bytes, memory.info
+                    );
+                    let start = timer.now_us();
+                    let result = memory.check_all(|pass, offset| {
+                        let _ = writeln!(
+                            console,
+                            "MEMORY TEST pass={} checked_MiB={}",
+                            pass + 1,
+                            offset / (1024 * 1024)
+                        );
+                    });
+                    let _ = writeln!(
+                        console,
+                        "MEMORY DONE {:?} elapsed_us={} stack={:?}",
+                        result,
+                        timer.now_us().wrapping_sub(start) & ((1 << 48) - 1),
+                        hal::memory::stack_usage()
+                    );
+                } else if let Some(path) = line.strip_prefix("image ") {
                     if camera_live {
                         let _ = writeln!(console, "MEDIA IMAGE DONE Err(camera active; use O)");
                         continue;
@@ -147,8 +406,12 @@ extern "C" fn rust_main() -> ! {
                                     let _ = writeln!(console, "MEDIA IMAGE DONE Err({:?})", error);
                                     continue;
                                 }
+                                let (display_memory, arena) = memory.split();
+                                large_arena = Some(arena);
                                 framebuffer =
-                                    Some(esp32_p4::devices::framebuffer::Framebuffer::new(memory));
+                                    Some(esp32_p4::devices::framebuffer::Framebuffer::new(
+                                        display_memory,
+                                    ));
                             }
                             Err(error) => {
                                 let _ = writeln!(console, "MEDIA IMAGE DONE Err({:?})", error);
@@ -175,11 +438,65 @@ extern "C" fn rust_main() -> ! {
                         scanout_active,
                         fb.guards_ok()
                     );
+                } else if let Some(path) = line.strip_prefix("jpeg-idct-bench ") {
+                    if camera_live || !scanout_active || framebuffer.is_none() {
+                        let _=writeln!(console,"JPEG IDCT DONE Err(requires active framebuffer, camera off; use --image first)");
+                        continue;
+                    }
+                    let result = jpeg_idct_bench(
+                        path,
+                        framebuffer.as_mut().unwrap(),
+                        &mut timer,
+                        &mut console,
+                    );
+                    let _ = writeln!(
+                        console,
+                        "JPEG IDCT DONE {:?} guards={} stack={:?}",
+                        result,
+                        framebuffer.as_ref().unwrap().guards_ok(),
+                        hal::memory::stack_usage()
+                    );
+                } else if let Some(path) = line.strip_prefix("jpeg-profile ") {
+                    if camera_live || !scanout_active || framebuffer.is_none() {
+                        let _=writeln!(console,"JPEG PROFILE DONE Err(requires active framebuffer, camera off; use --image first)");
+                        continue;
+                    }
+                    let result = jpeg_profile(
+                        path,
+                        framebuffer.as_mut().unwrap(),
+                        &mut timer,
+                        &mut console,
+                    );
+                    let _ = writeln!(
+                        console,
+                        "JPEG PROFILE DONE {:?} guards={} stack={:?}",
+                        result,
+                        framebuffer.as_ref().unwrap().guards_ok(),
+                        hal::memory::stack_usage()
+                    );
+                } else if let Some(path) = line.strip_prefix("jpeg-bench ") {
+                    if camera_live || !scanout_active || framebuffer.is_none() {
+                        let _=writeln!(console,"JPEG BENCH DONE Err(requires active framebuffer, camera off; use --image first)");
+                        continue;
+                    }
+                    let result = jpeg_bench(
+                        path,
+                        framebuffer.as_mut().unwrap(),
+                        &mut timer,
+                        &mut console,
+                    );
+                    let _ = writeln!(
+                        console,
+                        "JPEG BENCH DONE {:?} guards={} stack={:?}",
+                        result,
+                        framebuffer.as_ref().unwrap().guards_ok(),
+                        hal::memory::stack_usage()
+                    );
                 } else if let Some(path) = line.strip_prefix("play ") {
                     let result = sd_audio(path, &mut i2c, &mut timer, &mut console);
                     let _ = writeln!(console, "MEDIA PLAY DONE {:?}", result);
                 } else {
-                    let _ = writeln!(console, "MEDIA ERROR expected :image PATH or :play PATH");
+                    let _ = writeln!(console, "MEDIA ERROR expected :memory, :memory-test, :memory-bench, :image PATH or :play PATH");
                 }
             } else if command == 27 {
                 let _ = writeln!(console, "MEDIA PLAY DONE Ok(idle)");
@@ -394,7 +711,11 @@ extern "C" fn rust_main() -> ! {
                         let _ = writeln!(console, "CMD F memory {:?}", error);
                         continue;
                     }
-                    framebuffer = Some(esp32_p4::devices::framebuffer::Framebuffer::new(memory));
+                    let (display_memory, arena) = memory.split();
+                    large_arena = Some(arena);
+                    framebuffer = Some(esp32_p4::devices::framebuffer::Framebuffer::new(
+                        display_memory,
+                    ));
                 }
                 if !scanout_active {
                     if let Some(panel) = display.as_mut() {
@@ -617,7 +938,7 @@ extern "C" fn rust_main() -> ! {
 }
 
 fn display_help(console: &mut hal::usb_serial::Console) {
-    let _ = writeln!(console, "DISPLAY commands: :image PATH / :play PATH (ESC stops audio); +/- backlight5%; ]/[ digital gain; }}/{{ analogue gain; >/< exposure; = controls; p quiet 1kHz speaker tone 2s; ! FAT32 create/verify CONFIG.TXT; Z FAT32 list/read-only file check; Y SD capabilities (no speed switch); M SDMMC read-only probe; m SD multi-block read benchmark; # SD multi-write/verify/restore last 9 sectors; @ SD write/verify/restore last sector; Q panel RGB probe; E gray/RGB check; W full screenshot; H thumbnail; V camera-live; G camera-test-live; O camera-stop; F framebuffer; S fb-status; U patterns; P psram-test; a camera-info; A camera-test; o camera-scene; ? help; q status; B BIST-probe25s; L scanline-probe; e error-counter(clear); v/h/b patterns; i/I invert on/off; x/y/n mirror X/Y/none; c/C BGR/RGB; d/D display off/on; j/J idle on/off; k/f/N black/white/normal; s/w sleep/wake; t/u/T TE vblank/both/off; l TE line300; g idle-green; r/R soft/hard reset; 6/7 RGB565 at650/750; 8 RGB888 at750; z RGB565 at550");
+    let _ = writeln!(console, "DISPLAY commands: :icache on/off; :memory / :memory-test / :memory-bench; :image PATH / :jpeg-bench PATH / :jpeg-profile PATH / :play PATH (ESC stops audio); +/- backlight5%; ]/[ digital gain; }}/{{ analogue gain; >/< exposure; = controls; p quiet 1kHz speaker tone 2s; ! FAT32 create/verify CONFIG.TXT; Z FAT32 list/read-only file check; Y SD capabilities (no speed switch); M SDMMC read-only probe; m SD multi-block read benchmark; # SD multi-write/verify/restore last 9 sectors; @ SD write/verify/restore last sector; Q panel RGB probe; E gray/RGB check; W full screenshot; H thumbnail; V camera-live; G camera-test-live; O camera-stop; F framebuffer; S fb-status; U patterns; P psram-test; a camera-info; A camera-test; o camera-scene; ? help; q status; B BIST-probe25s; L scanline-probe; e error-counter(clear); v/h/b patterns; i/I invert on/off; x/y/n mirror X/Y/none; c/C BGR/RGB; d/D display off/on; j/J idle on/off; k/f/N black/white/normal; s/w sleep/wake; t/u/T TE vblank/both/off; l TE line300; g idle-green; r/R soft/hard reset; 6/7 RGB565 at650/750; 8 RGB888 at750; z RGB565 at550");
 }
 
 #[inline(never)]
@@ -1716,4 +2037,357 @@ fn sd_audio(
         tx.status()
     );
     result.and(mute).and(stop)
+}
+
+#[inline(never)]
+fn memory_bench(
+    internal: &esp32_p4::memory::Arena<'_, esp32_p4::memory::Internal>,
+    external: &esp32_p4::memory::Arena<'_, esp32_p4::memory::External>,
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<(), hal::memory::Error> {
+    use core::alloc::Layout;
+    let mut fast = internal
+        .allocate(Layout::from_size_align(128 * 1024, 64).unwrap())
+        .map_err(|_| hal::memory::Error::CacheLayout(0))?;
+    let mut large = external
+        .allocate(Layout::from_size_align(1024 * 1024, 64).unwrap())
+        .map_err(|_| hal::memory::Error::CacheLayout(0))?;
+    for (name, slice) in [
+        ("SRAM", fast.as_mut_slice()),
+        ("PSRAM", large.as_mut_slice()),
+    ] {
+        let _ = writeln!(
+            console,
+            "MEMORY BENCH {} address={:08x} bytes={}",
+            name,
+            slice.as_ptr() as usize,
+            slice.len()
+        );
+        unsafe {
+            hal::memory::benchmark(slice.as_mut_ptr() as usize, slice.len(), timer, |b| {
+                let bytes = (b.size * b.passes) as u64;
+                let _ = writeln!(
+                    console,
+                    "MEMORY BENCH {} {:?} write_KiB_s={} read_KiB_s={} dependent_ns={}",
+                    name,
+                    b,
+                    bytes * 1_000_000 / 1024 / b.write_us.max(1),
+                    bytes * 1_000_000 / 1024 / b.read_us.max(1),
+                    b.dependent_us * 1000 / b.dependent_steps as u64
+                );
+            })
+        }?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct JpegTrial {
+    decode_us: u64,
+    total_us: u64,
+    sd_us: u64,
+    sd_calls: u32,
+    sd_bytes: u64,
+    pixels: u32,
+    hash: u32,
+    profile: esp32_p4::media::jpeg::Profile,
+}
+
+// A and B enter the same decoder instantiation and callback, selected by a
+// runtime flag. Both consume/hash every RGB565 pixel. Timed code never logs.
+#[inline(never)]
+fn jpeg_trial(
+    path: &str,
+    fb: &mut esp32_p4::devices::framebuffer::Framebuffer,
+    store_pixels: bool,
+    profiling: bool,
+    idct: esp32_p4::media::idct::Kind,
+    timer: &mut hal::time::Timer,
+) -> Result<JpegTrial, esp32_p4::media::Error<FsProbeError>> {
+    use esp32_p4::{
+        media::{jpeg, Error},
+        storage::{
+            fat32::Fat32,
+            sd::{Error as SdError, SdDevice},
+            Partition,
+        },
+    };
+    let store_pixels = core::hint::black_box(store_pixels);
+    let started = timer.now_us();
+    let transport = |e| {
+        Error::Io(esp32_p4::storage::Error::Device(
+            esp32_p4::storage::Error::Device(SdError::Card(e)),
+        ))
+    };
+    let mut card = unsafe { hal::sdmmc::Sdmmc::new(timer) }.map_err(transport)?;
+    card.configure_bus(timer).map_err(transport)?;
+    let partition = Partition::mbr(SdDevice::new(card, timer), 0)
+        .map_err(|e| Error::Io(esp32_p4::storage::Error::Device(e)))?;
+    let mut fs = Fat32::mount(partition).map_err(Error::Io)?;
+    let mut file = fs.open(path).map_err(Error::Io)?;
+    let io_before = file.read_stats();
+    let decode_started = file.with_timer(|t| t.now_us());
+    let mut hash = 0x811c9dc5u32;
+    let mut pixels_seen = 0u32;
+    let mut profile = (if core::hint::black_box(profiling) {
+        jpeg::Profile::new(hal::time::cycle_count)
+    } else {
+        jpeg::Profile::disabled()
+    })
+    .with_idct(core::hint::black_box(idct));
+    jpeg::decode_profiled(
+        &mut file,
+        1024,
+        600,
+        |x, y, pixels| {
+            for &pixel in pixels {
+                hash = (hash ^ u32::from(pixel)).wrapping_mul(0x01000193);
+            }
+            pixels_seen += pixels.len() as u32;
+            if store_pixels {
+                fb.write_run(x, y, pixels);
+            }
+        },
+        &mut profile,
+    )?;
+    fb.finish_writes();
+    let ended = file.with_timer(|t| t.now_us());
+    let io_after = file.read_stats();
+    if pixels_seen != 1024 * 600 {
+        return Err(Error::Invalid("JPEG benchmark pixel count"));
+    }
+    Ok(JpegTrial {
+        decode_us: ended.wrapping_sub(decode_started) & ((1 << 48) - 1),
+        total_us: ended.wrapping_sub(started) & ((1 << 48) - 1),
+        sd_us: io_after.io_us - io_before.io_us,
+        sd_calls: io_after.calls - io_before.calls,
+        sd_bytes: io_after.bytes - io_before.bytes,
+        pixels: pixels_seen,
+        hash,
+        profile,
+    })
+}
+
+#[inline(never)]
+#[link_section = ".text.entry"]
+fn jpeg_bench(
+    path: &str,
+    fb: &mut esp32_p4::devices::framebuffer::Framebuffer,
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<(), esp32_p4::media::Error<FsProbeError>> {
+    use esp32_p4::media::Error;
+    let _ = writeln!(
+        console,
+        "JPEG BENCH START path={} order=ABBA A=u16+hash B=hash-only LCD=active caches={:x?}",
+        path,
+        hal::memory::cache_snapshot()
+    );
+    let mut reference = None;
+    let mut times = [0u64; 4];
+    for (pass, store) in [true, false, false, true].into_iter().enumerate() {
+        let before = fb.checksum();
+        let trial = jpeg_trial(
+            path,
+            fb,
+            store,
+            false,
+            esp32_p4::media::idct::Kind::Matrix,
+            timer,
+        )?;
+        let after = fb.checksum();
+        times[pass] = trial.decode_us;
+        let _=writeln!(console,"JPEG BENCH TRIAL pass={} mode={} decode_us={} total_us={} sd_us={} sd_calls={} sd_bytes={} pixels={} hash={:08x} fb_before={:08x} fb_after={:08x}",pass+1,if store {'A'}else{'B'},trial.decode_us,trial.total_us,trial.sd_us,trial.sd_calls,trial.sd_bytes,trial.pixels,trial.hash,before,after);
+        if !fb.guards_ok() {
+            return Err(Error::Invalid("JPEG benchmark framebuffer guard"));
+        }
+        if !store && before != after {
+            return Err(Error::Invalid("JPEG checksum-only changed framebuffer"));
+        }
+        if reference.is_some_and(|value| value != (trial.hash, trial.pixels, trial.sd_bytes, after))
+        {
+            return Err(Error::Invalid("JPEG benchmark trials disagree"));
+        }
+        reference = Some((trial.hash, trial.pixels, trial.sd_bytes, after));
+    }
+    let a = (times[0] + times[3]) / 2;
+    let b = (times[1] + times[2]) / 2;
+    let delta = a as i64 - b as i64;
+    let _ = writeln!(
+        console,
+        "JPEG BENCH RESULT A_mean_us={} B_mean_us={} delta_us={} delta_basis_points={} hash={:08x}",
+        a,
+        b,
+        delta,
+        delta * 10000 / a.max(1) as i64,
+        reference.unwrap().0
+    );
+    Ok(())
+}
+
+#[inline(never)]
+fn cycle_calibration(timer: &mut hal::time::Timer) -> (u64, u64) {
+    let start = timer.now_us();
+    let cycles = hal::time::cycle_count();
+    timer.delay_us(20_000);
+    let elapsed_cycles = hal::time::cycle_count().wrapping_sub(cycles);
+    let elapsed_us = timer.now_us().wrapping_sub(start) & ((1 << 48) - 1);
+    (elapsed_cycles, elapsed_us)
+}
+
+#[inline(never)]
+#[link_section = ".text.entry"]
+fn jpeg_profile(
+    path: &str,
+    fb: &mut esp32_p4::devices::framebuffer::Framebuffer,
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<(), esp32_p4::media::Error<FsProbeError>> {
+    use esp32_p4::media::Error;
+    let (cycles, us) = cycle_calibration(timer);
+    if cycles == 0 {
+        return Err(Error::Unsupported("machine cycle counter is stopped"));
+    }
+    let hz = cycles * 1_000_000 / us.max(1);
+    let mut minimum_pair = u64::MAX;
+    for _ in 0..64 {
+        let start = hal::time::cycle_count();
+        minimum_pair = minimum_pair.min(hal::time::cycle_count().wrapping_sub(start));
+    }
+    let _=writeln!(console,"JPEG PROFILE START path={} order=PUUP P=profile U=uninstrumented write=u16+hash clock_hz={} calibration_cycles={} calibration_us={} minimum_clock_pair_cycles={} caches={:x?}",path,hz,cycles,us,minimum_pair,hal::memory::cache_snapshot());
+    let mut reference = None;
+    let mut times = [0u64; 4];
+    for (pass, enabled) in [true, false, false, true].into_iter().enumerate() {
+        let trial = jpeg_trial(
+            path,
+            fb,
+            true,
+            enabled,
+            esp32_p4::media::idct::Kind::Matrix,
+            timer,
+        )?;
+        times[pass] = trial.decode_us;
+        let framebuffer_hash = fb.checksum();
+        let _=writeln!(console,"JPEG PROFILE TRIAL pass={} enabled={} decode_us={} total_us={} sd_us={} hash={:08x} pixels={} fb_hash={:08x}",pass+1,enabled,trial.decode_us,trial.total_us,trial.sd_us,trial.hash,trial.pixels,framebuffer_hash);
+        if !fb.guards_ok()
+            || reference.is_some_and(|r| r != (trial.hash, trial.pixels, framebuffer_hash))
+        {
+            return Err(Error::Invalid("JPEG profile trials disagree/guard"));
+        }
+        reference = Some((trial.hash, trial.pixels, framebuffer_hash));
+        if enabled {
+            if trial.profile.mcus != 2432
+                || trial.profile.pixels != 614400
+                || trial.profile.calls != [14592, 14592, 2432, 2432, 1]
+            {
+                return Err(Error::Invalid("JPEG profile stage counts"));
+            }
+            let names = [
+                "entropy+dequant",
+                "idct",
+                "color",
+                "output+checksum",
+                "header",
+            ];
+            let mut accounted = 0u64;
+            for (i, name) in names.into_iter().enumerate() {
+                let ticks = trial.profile.ticks[i];
+                let stage_us = ticks * 1_000_000 / hz;
+                accounted += stage_us;
+                let _=writeln!(console,"JPEG PROFILE STAGE pass={} stage={} cycles={} us={} calls={} cycles_per_call={}",pass+1,name,ticks,stage_us,trial.profile.calls[i],ticks/u64::from(trial.profile.calls[i]).max(1));
+            }
+            let _ = writeln!(
+                console,
+                "JPEG PROFILE ACCOUNTED pass={} stages_us={} residual_us={} mcus={} pixels={}",
+                pass + 1,
+                accounted,
+                trial.decode_us as i64 - accounted as i64,
+                trial.profile.mcus,
+                trial.profile.pixels
+            );
+        }
+    }
+    let profiled = (times[0] + times[3]) / 2;
+    let plain = (times[1] + times[2]) / 2;
+    let (end_cycles, end_us) = cycle_calibration(timer);
+    let end_hz = end_cycles * 1_000_000 / end_us.max(1);
+    let _=writeln!(console,"JPEG PROFILE RESULT P_mean_us={} U_mean_us={} overhead_us={} overhead_basis_points={} clock_hz_before={} clock_hz_after={}",profiled,plain,profiled as i64-plain as i64,(profiled as i64-plain as i64)*10000/plain.max(1)as i64,hz,end_hz);
+    Ok(())
+}
+
+// Read-only clock audit. The ROM-selected CPU root/dividers are never written.
+#[inline(never)]
+#[link_section = ".text.entry"]
+fn clock_audit(
+    label: &str,
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> u64 {
+    let raw = |a: usize| unsafe { (a as *const u32).read_volatile() };
+    let hp = raw(0x5011_1040);
+    let div0 = raw(0x500e_6004);
+    let div1 = raw(0x500e_6008);
+    let div2 = raw(0x500e_600c);
+    let (cycles, us) = cycle_calibration(timer);
+    let _=writeln!(console,"CLOCK AUDIT {} hp_root={:08x} div0={:08x} div1={:08x} div2={:08x} source={} cpu_integer={} numerator={} denominator={} cycles={} us={} measured_hz={} cache_l1={:x} cache_l2={:x} l2_size={:x}",label,hp,div0,div1,div2,hp&3,((div0>>5)&255)+1,(div0>>13)&255,(div0>>21)&255,cycles,us,cycles*1_000_000/us.max(1),raw(0x3ff1_0008),raw(0x3ff1_0274),raw(0x3ff1_0278));
+    cycles * 1_000_000 / us.max(1)
+}
+
+#[inline(never)]
+#[link_section = ".text.entry"]
+fn jpeg_idct_bench(
+    path: &str,
+    fb: &mut esp32_p4::devices::framebuffer::Framebuffer,
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<(), esp32_p4::media::Error<FsProbeError>> {
+    use esp32_p4::media::{idct::Kind, Error};
+    let (cycles, us) = cycle_calibration(timer);
+    if cycles == 0 {
+        return Err(Error::Unsupported("machine cycle counter stopped"));
+    }
+    let hz = cycles * 1_000_000 / us.max(1);
+    let _ = writeln!(
+        console,
+        "JPEG IDCT START path={} order=LMML clock_hz={} LCD=active caches={:x?}",
+        path,
+        hz,
+        hal::memory::cache_snapshot()
+    );
+    let mut references = [None; 2];
+    let mut totals = [0u64; 2];
+    let mut idct_totals = [0u64; 2];
+    for (pass, kind) in [Kind::Loeffler, Kind::Matrix, Kind::Matrix, Kind::Loeffler]
+        .into_iter()
+        .enumerate()
+    {
+        hal::memory::instruction_counts_start();
+        let trial_result = jpeg_trial(path, fb, true, true, kind, timer);
+        let instruction_counts = hal::memory::instruction_counts_stop();
+        let trial = trial_result?;
+        let _ = writeln!(
+            console,
+            "JPEG ICACHE counts={:?} extra_d_l2i_l2d={:?}",
+            instruction_counts,
+            hal::memory::extra_cache_counts()
+        );
+        let slot = usize::from(kind == Kind::Loeffler);
+        let framebuffer_hash = fb.checksum();
+        let reference = (trial.hash, framebuffer_hash, trial.pixels, trial.sd_bytes);
+        if !fb.guards_ok()
+            || references[slot].is_some_and(|r| r != reference)
+            || trial.profile.blocks != 14592
+            || trial.profile.pixels != 614400
+        {
+            return Err(Error::Invalid("IDCT benchmark repeat/guard/count"));
+        }
+        references[slot] = Some(reference);
+        let idct_us = trial.profile.ticks[1] * 1_000_000 / hz;
+        totals[slot] += trial.decode_us;
+        idct_totals[slot] += idct_us;
+        let _=writeln!(console,"JPEG IDCT TRIAL pass={} kind={:?} decode_us={} total_us={} idct_us={} entropy_us={} color_us={} output_us={} sd_us={} blocks={} dc_only={} hash={:08x} fb_hash={:08x}",pass+1,kind,trial.decode_us,trial.total_us,idct_us,trial.profile.ticks[0]*1_000_000/hz,trial.profile.ticks[2]*1_000_000/hz,trial.profile.ticks[3]*1_000_000/hz,trial.sd_us,trial.profile.blocks,trial.profile.dc_only_blocks,trial.hash,framebuffer_hash);
+    }
+    let _=writeln!(console,"JPEG IDCT RESULT matrix_mean_us={} loeffler_mean_us={} matrix_idct_mean_us={} loeffler_idct_mean_us={} total_speedup_milli={} idct_speedup_milli={}",totals[0]/2,totals[1]/2,idct_totals[0]/2,idct_totals[1]/2,totals[0]*1000/totals[1].max(1),idct_totals[0]*1000/idct_totals[1].max(1));
+    Ok(())
 }

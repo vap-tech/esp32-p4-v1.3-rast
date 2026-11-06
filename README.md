@@ -38,7 +38,7 @@ python scripts/monitor.py /dev/ttyACM0
 
 Необходимы Rust с target из `rust-toolchain.toml` и `espflash` (4.7.0). Для доступа к порту пользователь должен входить в `uucp`; после добавления группы выполните `newgrp uucp` в терминале.
 
-`_start` в TCM включает clock SRAM, выключает machine interrupts, устанавливает стек, обнуляет BSS и вызывает Rust-код в SRAM. Код/константы занимают область с `0x4FF00000`, data/stack — с `0x4FF20000`, initial SP `0x4FF28000`. ROM загружает сегменты напрямую; Второе ядро не запускается; по команде `F` HAL настраивает PSRAM/MMU и один полный framebuffer. L1 DCache для SRAM остаётся в состоянии ROM; при CSI DMA выполняется явная синхронизация кэша.
+`_start` в SPM включает clock SRAM, запрещает interrupts, сохраняет dirty cache data и переводит L1/L2 в bypass. L2 capacity=0 освобождает все 768 KiB L2MEM под SRAM. Код/константы — с `0x4FF00000`, data/BSS — с `0x4FF20000`; отдельная арена 496 KiB — с `0x4FF40000`, runtime stack 16 KiB — `0x4FFBC000…0x4FFC0000`. ROM-область сохраняется. Верхние 512 KiB проверяются до переключения стека. PSRAM 32 MiB отображается по команде и используется только uncached; первые 4 MiB отделены для дисплея/снимка, остальные 28 MiB — большая арена. Подробности, команды и измерения: [docs/memory.md](docs/memory.md).
 
 HAL доступен через `esp32_p4::hal`; драйверы внешних устройств — через `esp32_p4::devices`. Текущая прошивка опрашивает GT911 на GPIO7/8, I²C1, 100 кГц, выдаёт `down / move / up` в USB и heartbeat со счётчиками кадров/ошибок. Дисплей запускается через собственный DSI HAL: аппаратные вертикальные цветные полосы 1024×600 остаётся включённым постоянно, GPIO23 управляет подсветкой через LEDC PWM 20 кГц, 10 бит; яркость установлена на 25%, без стартового перебора уровней. Объект `devices::jd9165::Display` объединяет DSI, RESET и PWM; через USB доступны команды проверки функций панели (`python scripts/display-control.py '?'`). По команде `F` включается один RGB565 framebuffer 1024×600 в PSRAM; `V` направляет камеру через ISP прямо в него. Подробности: [docs/framebuffer.md](docs/framebuffer.md). CSI принимает одиночный RAW10 crop 64×32 в SRAM через DW-GDMA; команды `a/A/o` и ограничения — в [docs/csi.md](docs/csi.md). Протокол, API и ограничения описаны в [docs/gt911.md](docs/gt911.md).
 
@@ -57,7 +57,7 @@ HAL доступен через `esp32_p4::hal`; драйверы внешних
 
 Монитор использует только стандартную библиотеку Python (Linux). Он освобождает DTR/RTS и переподключается после USB reset. Во время прошивки монитор нужно остановить. В этой сессии обычный монитор espflash оставлял плату в download mode; для проверки запуска используется `scripts/monitor.py`.
 
-Текущий образ — **114976 байт**. Read-only RTC выводится с heartbeat; VLF/VDET установлены, календарь некорректен, время не менялось. На плате подтверждены GT911 1024×600, поток касаний и подтверждение кадров. Результаты предыдущих проверок I²C, таймера и GPIO сохранены в документации. Минимальный исходный образ 368 байт и особенности запуска описаны в [docs/boot.md](docs/boot.md).
+Текущий образ — **137520 байт**. Read-only RTC выводится с heartbeat; VLF/VDET установлены, календарь некорректен, время не менялось. На плате подтверждены GT911 1024×600, поток касаний и подтверждение кадров. Результаты предыдущих проверок I²C, таймера и GPIO сохранены в документации. Минимальный исходный образ 368 байт и особенности запуска описаны в [docs/boot.md](docs/boot.md).
 
 Локальный справочник по регистрам: `~/esp-idf`, tag `v6.1`. SDK не устанавливается и в сборку не подключается.
 
@@ -90,3 +90,33 @@ python3 scripts/display-control.py --stop
 
 JPEG 1024×600 с SD проверен на плате. Форматы, API, результаты и точка
 остановки аудиоэксперимента: [docs/media.md](docs/media.md).
+
+Проверка стоимости JPEG вывода без переключения кешей:
+`python3 scripts/display-control.py --image HOME.JPG --jpeg-bench HOME.JPG`.
+Проходы A–B–B–A сравнивают volatile u16 framebuffer writes и checksum-only.
+Методика и результаты — [docs/media.md](docs/media.md).
+
+Профиль JPEG по стадиям с контрольными проходами:
+`python3 scripts/display-control.py --image HOME.JPG --jpeg-profile HOME.JPG`.
+На текущем режиме без кешей IDCT занимает около 4.44 s / 59% wall time;
+инструментирование добавляет около 31 ms / 0.42%. [Подробности](docs/media.md).
+
+Read-only аудит CPU clock: `python3 scripts/display-control.py --clock`.
+В текущем uncached режиме и повторении прежней cached версии подтверждены
+около 160 MHz, CPLL / 2; отключение кешей частоту CPU не меняет.
+IDCT integer i32/i64, без floating-point и runtime sin/cos. [Аудит](docs/media.md).
+
+Отдельный Loeffler IDCT и сравнение с сохранённой матрицей:
+`python3 scripts/display-control.py --image HOME.JPG --jpeg-idct-bench HOME.JPG`.
+При 160 MHz без кешей полный decode **7.355 → 4.845 s**, IDCT **4.246 → 1.738 s**.
+Матрица остаётся default; новый вариант выбирается явно. [Проверки и API](docs/idct.md).
+This software is based in part on the work of the Independent JPEG Group.
+
+L1 I-cache при нулевом L2 проверен на плате: `--icache on` возвращает примерно
+двукратную скорость JPEG без потери SRAM, D-cache остаётся bypass. После reset
+кеши выключены. [Методика, счётчики и ограничения](docs/icache.md).
+
+Контроль L2=128KiB и L1 D-cache выполнен: для SRAM JPEG L2 не используется,
+а оба L1 при L2=0 дают **2.628 s Matrix / 1.696 s Loeffler** с полной SRAM-ареной.
+`--dcache on/off` — экспериментальный режим для JPEG/SD/LCD; default boot не менялся.
+[Карта 128KiB L2, проверка DMA и результаты](docs/cache-matrix.md).

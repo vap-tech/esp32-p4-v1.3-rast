@@ -1,5 +1,5 @@
 //! One full RGB565 display framebuffer, owned PSRAM, uncached CPU accesses.
-use crate::hal::psram::{Psram, BASE};
+use crate::hal::psram::{DisplayMemory, BASE};
 
 pub const WIDTH: usize = 1024;
 pub const HEIGHT: usize = 600;
@@ -8,10 +8,10 @@ pub const DMA_ADDRESS: usize = 0x4800_0080;
 pub const CPU_ADDRESS: usize = BASE + 128;
 
 pub struct Framebuffer {
-    _memory: Psram,
+    _memory: DisplayMemory,
 }
 impl Framebuffer {
-    pub fn new(memory: Psram) -> Self {
+    pub fn new(memory: DisplayMemory) -> Self {
         let mut this = Self { _memory: memory };
         unsafe {
             for i in 0..32 {
@@ -148,6 +148,15 @@ impl Framebuffer {
             (BASE as *const u32).add(i).read_volatile() == 0x5aa5_5aa5
                 && ((CPU_ADDRESS + BYTES) as *const u32).add(i).read_volatile() == 0x5aa5_5aa5
         })
+    }
+    /// Read-only FNV-1a over RGB565 words, for memory-isolation diagnostics.
+    pub fn checksum(&self) -> u32 {
+        let mut hash = 0x811c9dc5u32;
+        for i in 0..BYTES / 4 {
+            let word = unsafe { (CPU_ADDRESS as *const u32).add(i).read_volatile() };
+            hash = (hash ^ word).wrapping_mul(0x01000193);
+        }
+        hash
     }
     pub fn sample(&self) -> [u16; 8] {
         core::array::from_fn(|i| unsafe {

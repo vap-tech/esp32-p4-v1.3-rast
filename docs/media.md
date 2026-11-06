@@ -95,7 +95,10 @@ uncached SRAM alias +0x40000000 для опроса/публикации descrip
 with_timer: кратковременное эксклюзивное заимствование timer транспорта, без
 одновременного файлового I/O. Дополнительные аппаратные Timer не создаются.
 
-## Память и проверка
+## Память и проверка на этапе bring-up медиа
+
+После этого этапа карта памяти расширена, кеши отключены, стек вынесен отдельно:
+актуальные данные — [memory.md](memory.md). Числа ниже описывают предыдущую пробу.
 
 Новые крупные обработчики и старые диагностики помечены inline(never), чтобы
 компилятор не складывал их временные буферы в постоянный stack frame rust_main.
@@ -104,6 +107,257 @@ BSS текущего образа — 0x5c80 B в 32 KiB DATA, остаётся 
 Карта памяти не расширялась, ROM-области не затрагивались. Полного runtime
 измерения максимальной глубины стека пока нет.
 
-Последний прошитый образ: **114976 B**. 31 обычный host-тест прошёл,
+Образ этой пробы: **114976 B**. 31 обычный host-тест прошёл,
 проверка полного HOME.JPG через отдельный ignored test тоже прошла.
 Файлы медиа, дампы и аппаратные логи остаются в ignored target/ и на карте.
+
+
+## JPEG A/B: стоимость записи framebuffer
+
+Явная команда, кеши остаются выключенными:
+
+```sh
+python3 scripts/display-control.py --image HOME.JPG --jpeg-bench HOME.JPG
+# Когда framebuffer уже активен:
+python3 scripts/display-control.py --jpeg-bench HOME.JPG
+```
+
+USB `:jpeg-bench PATH` с newline; требуется активный framebuffer и выключенная
+камера. По умолчанию ничего не запускается. Отсутствующий файл/ошибка декодера,
+разные hashes/числа пикселей или повреждение guards дают Err и ненулевой exit
+скрипта. Файлы SD не изменяются.
+
+Порядок **A–B–B–A**. Каждый проход заново инициализирует SD, монтирует FAT32 и
+открывает тот же файл; кэши файловой системы тоже новые. Decode timer начинается
+после open и охватывает одинаковые SD reads, JPEG header/Huffman/IDCT/YCbCr,
+контрольную сумму всех RGB565 samples и callback вывода. total_us дополнительно
+включает подготовку SD/mount/open. USB logging, framebuffer checksum и проверки
+guards находятся за пределами timed decode.
+
+A пишет исходным Framebuffer::write_run (volatile u16); B только считает checksum.
+Оба проходят **одну instantiation JPEG decoder и один callback**, флаг записи
+выбирается во время выполнения, без отдельной специализированной B-версии.
+Checksum FNV по u16 считается в обоих режимах в одинаковом порядке MCU rows;
+в конце выводится, поэтому RGB/IDCT вычисления не могут быть выброшены.
+Полный checksum framebuffer до/после каждого прохода проверяет, что B не
+изменяет картинку, а повторные A дают тот же результат.
+
+sd_us — время внутри read операций SdDevice во время decode; файловая логика,
+копирование из FAT caches и вызовы декодера в него не включены. sd_bytes считает
+физическое sector I/O, поэтому немного больше размера JPEG, включает FAT/edges.
+Это диагностика реального SD вклада, не отдельный storage benchmark.
+
+Разность средних A и B оценивает стоимость существующего вывода на этом файле
+при непрерывном LCD scanout; она не является гарантированным выигрышем GDMA.
+B тоже тратит время на checksum и ветвление. Полосы SRAM, u32 stores и GDMA в этом
+эксперименте не реализуются; формат JPEG и кеши не переключаются.
+
+
+Проверка на ESP32-P4 rev1.3 с HOME.JPG (114892 B), LCD active, L1/L2 bypass:
+
+| Проход | Режим | Decode, us | Total, us | SD I/O, us |
+| --- | --- | ---: | ---: | ---: |
+| 1 | A, u16 + hash | 7435106 | 7465099 | 48207 |
+| 2 | B, hash only | 7260751 | 7290704 | 48273 |
+| 3 | B, hash only | 7260675 | 7290631 | 48210 |
+| 4 | A, u16 + hash | 7435182 | 7465137 | 48226 |
+
+Средние decode: **A=7435144 us, B=7260713 us**. Разность **174431 us,
+2.346% от A**. Физическое чтение во всех проходах: 114 calls, 115712 B;
+SD I/O около 48.23 ms (0.65% A). Блоки чтения и полный decoder одинаковы.
+Checksum pixel stream **c3d5b982**, 614400 pixels, совпали во всех проходах.
+Framebuffer hash **e5cb9e80** до/после, guards=true; B ничего не изменил.
+Оба hashes независимо совпали с ранее полученным host decode HOME.JPG:
+первый в MCU-row order, второй по raster u32 words. Это не один и тот же hash format.
+Стек high_water=10076/16384 B, guard цела. Камера не включалась.
+
+На этом изображении текущие мелкие записи PSRAM дают лишь небольшую часть общего
+времени. Основной остаток приходится на CPU processing/файловую логику, включая
+выполнение decoder без I/D caches. Этот A/B **не разделяет** Huffman, IDCT,
+цветовую конверсию и общий checksum; для выбора оптимизации нужен следующий
+профиль по стадиям. 174 ms нельзя обещать как выигрыш конкретного CPU/DMA copy.
+
+Лог: target/jpeg-abba-no-cache.log; проверка состояния target/jpeg-abba-status.log.
+Отсутствующий MISSING.JPG корректно возвращает Err(Io(NotFound)), script exit!=0,
+никакой подмены/записи изображения не происходит. Образ 125376 B прошит;
+33 host tests, fmt, clippy и Python syntax check проходят. Логи не входят в Git.
+
+## Профиль стадий JPEG без изменения кешей
+
+```sh
+python3 scripts/display-control.py --image HOME.JPG --jpeg-profile HOME.JPG
+# Если framebuffer уже активен:
+python3 scripts/display-control.py --jpeg-profile HOME.JPG
+```
+
+USB `:jpeg-profile PATH` + newline. Аппаратная команда сейчас проверяет ожидаемые
+счётчики для 1024×600 / 4:2:0, как у HOME.JPG; для другого sampling проверку
+счётчиков нужно обобщить. LCD scanout остаётся активным, камера выключена;
+L1/L2 bypass и L2 capacity=0 сохраняются. Никакого автоматического запуска профиля
+нет. Формулы Huffman/IDCT/color, SD reader и способ u16-записи не оптимизировались.
+
+Profile опционален; P и U используют ту же decoder instantiation/callback,
+включение счётчика выбирается runtime. Последовательность **P–U–U–P**:
+P — измерения стадий, U — контроль без чтений stage clock. В обоих режимах
+считаются checksum и выполняются framebuffer writes. Готовые RGB565 rows одного
+MCU временно собираются в **512 B SRAM на стеке**, затем выдаются прежними короткими
+строками: так color/output измеряются раз за MCU, а не за pixel/row. Это одинаково
+для P и U. Из-за staging, дополнительных проверок и изменения машинного кода
+контроль этой сборки нельзя смешивать с предыдущими 7.435144 s как с идентичным
+бинарником. Ни полосовых DMA-буферов, ни новой внешней памяти не добавлялось.
+
+Стадии:
+
+- Entropy + dequant: bitreader, Huffman, DC/AC, zigzag и умножение на quantizers,
+  одним интервалом за block 8×8. Dequant оставлен внутри распаковки, как раньше.
+- IDCT: прежняя integer 8×8 функция, один интервал за block, включая DC-only shortcut.
+- Color: nearest chroma sampling и RGB565, один интервал за MCU.
+- Output + checksum: общий checksum всех RGB565 и прежние u16 stores, интервал за MCU.
+- Header: разбор заголовка и таблиц, один интервал на изображение.
+
+Копирование 8×8 block samples в component planes, restart/MCU setup, loop control,
+часть bookkeeping/clock overhead находятся в **residual**, не приписываются IDCT
+или цвету. SD I/O входит в header/entropy intervals и отдельно показано через
+SdDevice stats; повторно прибавлять его к decode wall time нельзя.
+
+Clock — 64-bit HP mcycle, coherent high/low/high read. Он калибруется по SYSTIMER
+в окне 20 ms до/после профиля: **159993100 / 159985602 Hz**. Это измеренная частота
+счётчика около 160 MHz, а не предположение о максимальной частоте SoC. Minimum
+back-to-back clock-pair delta=16 cycles. Коэффициент переводит cycles в us;
+индивидуальные интервалы не корректируются вычитанием overhead. Во всём изображении
+14592 blocks, 2432 MCU; stage clock не читается для каждого coefficient/pixel.
+
+Результат HOME.JPG, 1024×600:
+
+| Проход | Режим | Decode us | Total us | SD I/O us |
+| --- | --- | ---: | ---: | ---: |
+| 1 | P | 7561674 | 7591628 | 48338 |
+| 2 | U | 7530255 | 7560208 | 48298 |
+| 3 | U | 7530352 | 7560307 | 48262 |
+| 4 | P | 7561683 | 7591650 | 48327 |
+
+P mean=**7561678 us**, U mean=**7530303 us**. Измеренная добавка
+инструментирования **31375 us / 0.417%**. Средние двух P-проходов:
+
+| Стадия | Время us | Доля P | Вызовов | Примерно cycles/call |
+| --- | ---: | ---: | ---: | ---: |
+| Entropy + dequant | 1436205 | 18.99% | 14592 | 15747 |
+| IDCT | **4440107** | **58.72%** | 14592 | 48683 |
+| Color | 995984 | 13.17% | 2432 | 65522 |
+| Output + checksum | 331688 | 4.39% | 2432 | 21820 |
+| Header | 1402 | 0.02% | 1 | ~224285 |
+| Residual/control/assembly | 356294 | 4.71% | — | — |
+
+Таким образом IDCT — крупнейший измеренный участок текущего software decoder.
+Это ещё не сравнение кешей и не доказательство единственной причины замедления:
+у всех этих инструкций/данных доступ к SRAM без L1. Нужен отдельный эксперимент,
+если решим менять IDCT или cache policy. Output включает checksum, поэтому 332 ms
+не заменяет A/B-оценку 174 ms собственно добавки framebuffer stores.
+
+Проверки: во всех проходах 614400 output pixels, stream hash **c3d5b982**,
+framebuffer hash **e5cb9e80**, guards=true. Счётчики P точно [14592,14592,2432,2432,1];
+host-test также проверяет профилированные/обычные pixels, counts и фальшивый clock
+на небольшом JPEG. Стек high_water=**10988 / 16384 B**, нижняя зона цела.
+34 обычных host tests, fmt/clippy/Python syntax проходят; образ **129872 B** прошит.
+
+### Откуда исполняется код
+
+Проверены ELF symbol table и disassembly образа профиля 129872 B:
+
+- Decoder::block, включающий inlined IDCT: **4FF00164**, size=1320 B.
+- Reader::symbol (Huffman): **4FF0949A**, size=244 B.
+- decode_profiled для измерительных проходов, включая inlined color: **4FF01496**.
+- decode_profiled обычного image command: **4FF01BFE**.
+- BASIS matrix, по адресу из LUI/ADDI в IDCT: **4FF1F09C**.
+- cycle_count: **4FF18F6C**, три CSR reads и rollover retry, без вызовов ROM.
+
+Весь hot decoder и его таблицы находятся во **внутренней SRAM**, не в mapped flash
+или PSRAM. В IDCT видны MUL/MULH, прямого ROM decoder/IDCT вызова нет. Вспомогательные
+memcpy/memset тоже из нашего SRAM image. Три ROM MSPI helper по-прежнему нужны
+только при PSRAM initialization, вне timed JPEG decode.
+
+Логи: target/jpeg-stages-no-cache.log, target/jpeg-stages-status.log,
+target/jpeg-profile-symbols.txt, target/jpeg-profile-disassembly.txt,
+target/jpeg-profile-host-tests.log. Они остаются локальными, ignored.
+
+## Аудит CPU clock и арифметики IDCT
+
+Проверка 2026-11-06: частота/PLL/делители не изменялись. Добавлена команда
+`python3 scripts/display-control.py --clock`, USB `:clock` + newline. Она читает
+LP_CLKRST_HP_CLK_CTRL, HP_SYS_CLKRST_ROOT_CLK_CTRL0/1/2 и калибрует mcycle по
+SYSTIMER за 20 ms. До/после cache bypass измерения дополнительно делаются в
+startup; два результата сохранены в отдельной **16 B NOLOAD .boot_audit**,
+которая не обнуляется вместе с BSS. --clock печатает их даже если ранний USB
+boot log не попал к хосту. Нового heap, изменения CPU PLL или делителей нет.
+Boot SYSTIMER используется только для измерения, runtime затем создаёт свою эпоху.
+
+Readback в обеих конфигурациях идентичен:
+
+- HP root register **1FFFFFFDh**, source bits=1: **CPLL**.
+- ROOT_CLK_CTRL0=**00000020h**: integer CPU divider=**2**, numerator=0,
+  denominator=0 (дробная часть не используется).
+- ROOT_CLK_CTRL1=**00000000h**, ROOT_CLK_CTRL2=**00010000h**.
+- mcycle около **160 MHz**, следовательно upstream CPLL около **320 MHz**
+  (вывод из измерения и делителя, не отдельное чтение аналоговых PLL-регистров).
+
+| Измерение | mcycle Hz | L1 bypass | L2 bypass | L2 capacity |
+| --- | ---: | --- | --- | --- |
+| Текущий startup до bypass | 159995000 | исходное ROM cache state | исходное ROM cache state | 256 KiB |
+| Тот же startup после bypass | 159997150 | 13h | 20h | 0 |
+| Текущий runtime | 159995100 | 13h | 20h | 0 |
+| Кешируемый reference, до JPEG 1 | 159987101 | 0 | 0 | 256 KiB |
+| Кешируемый reference, до JPEG 2 | 159991750 | 0 | 0 | 256 KiB |
+| Кешируемый reference, после JPEG | 159991550 | 0 | 0 | 256 KiB |
+
+Для независимого повторения взят **git archive 9288004** в ignored
+`target/clock-reference/`: исходная кешируемая версия, прежний linker/stack,
+без новых арен, bypass startup и stage profiling. Добавлены только read-only
+clock audit и cycle counter. Диагностическая сборка **115760 B** временно прошита
+и запущена на той же плате/карте. HOME.JPG: **2521673 / 2615403 us**, обычный
+software decoder, sample pixels совпали, framebuffer guards=true. Первый decode
+до включения PSRAM scanout, второй при активном LCD. Исторический результат
+2.722232 s не имел записи CPU clock; его точную прошлую частоту невозможно
+извлечь из старого лога. Но повторение сохранённого исходного кода и прямой
+before/after bypass audit подтверждают **160 MHz в обеих проверенных конфигурациях**.
+Изменение кода/раскладки из-за диагностики влияет на cache performance, поэтому
+2.52–2.62 s не выдаются за побитовое воспроизведение прежнего бинарника.
+Оснований объяснять разницу 2.72/7.43 переходом 360→160 MHz не найдено.
+
+После проверки **возвращена текущая прошивка без кешей**, 130800 B. Проверены
+cache flags, нулевой L2 capacity, --clock, JPEG (7442169 us) и LCD/guards;
+камера/аудио не запускались. В рабочем дереве историческая версия ничего не
+заменила; временные reference sources и firmware остались только в target/.
+
+### Что реально делает IDCT
+
+Арифметика целиком **integer fixed point**:
+
+- coefficients и промежуточный массив — i32; произведения/суммы — i64;
+- BASIS 8×8 — заранее вычисленные целые Q14, в rodata SRAM;
+- два разделяемых прохода 8×8, каждый с суммированием по 8 коэффициентам;
+- **1024 multiply-accumulate terms на полный блок** (2×8×8×8), не прямой
+  четырёхцикловый 2D IDCT, но и не факторизованный AAN/Loeffler;
+- DC-only shortcut уже есть: если 63 AC=0, заполнение константой;
+- частичных row/column-zero shortcuts пока нет;
+- округления/деления — shifts, runtime sin/cos и вычисления BASIS отсутствуют.
+
+Повторно проверен Decoder::block, куда inlined IDCT встроен компилятором:
+**4FF00164**, size=1320 B, SRAM. В циклах видны **MUL + MULH**, ADD и SLTU
+для 64-bit sums/carries, сдвиги. Внутри блока **нет floating-point инструкций,
+вызовов __muldf3/__adddf3/__divdf3, __muldi3, sin/cos**. Вспомогательные
+memcpy/memset вызываются из SRAM. Таким образом f32/f64/software floating point
+не являются причиной этих 4.44 s. Но широкие integer MAC на 32-bit CPU и
+матричный алгоритм дают много инструкций, исполняемых сейчас без I-cache.
+Это основание исследовать факторизацию/нулевые строки, не обещание конкретного
+ускорения и не разрешение просто сузить суммы до i32 без доказательства границ.
+IDCT в этом заходе не оптимизировался, округление/пиксели не менялись.
+
+Логи: target/clock-cached-reference-{first,second,after}.log,
+target/clock-audit-restored.log, target/clock-audit-restored-after.log,
+target/idct-arithmetic-audit.txt, target/clock-audit-disassembly.txt.
+34 host tests, fmt/clippy/Python syntax и git diff --check проходят.
+
+
+Следующий эксперимент: [отдельный Loeffler IDCT](idct.md), матрица сохранена,
+ошибки до цвета/в RGB565 измерены, сравнение L–M–M–L на плате выполнено.
+Матрица остаётся обычным default; --jpeg-idct-bench выбирает новый вариант явно.

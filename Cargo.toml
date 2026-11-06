@@ -3,6 +3,10 @@ name = "esp32-p4"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Experimental rev1.x layout; not a runtime memory-size toggle.
+l2-128 = []
+
 [dependencies]
 
 [[bin]]

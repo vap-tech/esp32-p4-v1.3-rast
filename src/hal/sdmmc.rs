@@ -545,11 +545,14 @@ fn sync_cache(address: usize, len: usize, operation: u32, timer: &mut Timer) -> 
         write_at(CACHE + 0x9c, 1 << 4); // L1 DCache, internal SRAM.
         write_at(CACHE + 0xa0, address as u32);
         write_at(CACHE + 0xa4, len as u32);
-        write_at(CACHE + 0x98, operation);
-        let start = timer.now_us();
-        while read_at(CACHE + 0x98) & operation != 0 {
-            if expired(timer, start, 200_000) {
-                return Err(error(0xfc));
+        // P4 ROM patch repeats writeback/invalidate; ranges are 64B isolated.
+        for _ in 0..if operation == 8 { 2 } else { 1 } {
+            write_at(CACHE + 0x98, operation);
+            let start = timer.now_us();
+            while read_at(CACHE + 0x98) & 16 == 0 {
+                if expired(timer, start, 200_000) {
+                    return Err(error(0xfc));
+                }
             }
         }
         core::arch::asm!("fence rw, rw", options(nostack));

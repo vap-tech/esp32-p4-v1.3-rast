@@ -24,8 +24,9 @@ PSRAM отдельно опознана: AP Memory, MR1 vendor `0x0D`, MR2 `0xDF
   `esp_rom_spi_set_op_mode`, `esp_rom_spi_cmd_config`, `esp_rom_spi_cmd_start`,
   адреса ROM ABI eco0…4 `0x4FC00110/108/10C`. Это не SDK/runtime в образе.
   У внутреннего ожидания ROM нет нашего timeout; питание PHY включается до вызова.
-- Identity mapping первых **4 MiB**, 64 страницы по 64 KiB. Остальные 28 MiB
-  пока не отображаются и не используются. L2 cache для PSRAM не включается.
+- Теперь отображены **все 32 MiB**, 512 страниц по 64 KiB; полный объём проверен.
+  Первые 4 MiB зарезервированы дисплею/снимку, хвост 28 MiB — отдельная арена.
+  Все кеши обходятся; актуальная политика — [memory.md](memory.md).
 - CPU пишет/читает **uncached alias `0x88000000`**. DMA использует отображённый
   адрес `0x48000000`. Смешивать CPU cached alias с uncached сейчас нельзя.
 - Первые 4 MiB проверяются двумя адресными шаблонами с записью и чтением;
@@ -33,7 +34,8 @@ PSRAM отдельно опознана: AP Memory, MR1 vendor `0x0D`, MR2 `0xDF
 
 Framebuffer DMA address **`0x48000080`**, CPU address **`0x88000080`**.
 До и после него — защитные области по 128 B, заполненные `0x5AA55AA5`.
-`devices::framebuffer::Framebuffer` забирает `Psram` во владение, heap не нужен.
+`Psram::split` выдаёт `DisplayMemory` и отдельную большую арену.
+`devices::framebuffer::Framebuffer` забирает только `DisplayMemory`; heap не нужен.
 Старый маленький RAW-буфер 64×32 в SRAM сохранён только для команд `A/o`.
 
 ## Вывод дисплея

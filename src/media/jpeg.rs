@@ -48,6 +48,67 @@ pub struct Info {
     pub h_sampling: usize,
     pub v_sampling: usize,
 }
+/// Optional coarse profiler. Clock ticks may be cycles or another monotonic
+/// wrapping u64 counter. No clock call is made in disabled mode.
+#[derive(Debug, Clone, Copy)]
+pub struct Profile {
+    clock: Option<fn() -> u64>,
+    pub ticks: [u64; 5],
+    pub calls: [u32; 5],
+    pub mcus: u32,
+    pub pixels: u32,
+    pub blocks: u32,
+    pub dc_only_blocks: u32,
+    pub idct: super::idct::Kind,
+    #[cfg(test)]
+    pub block_observer: Option<fn(&[i32; 64])>,
+}
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub enum Stage {
+    EntropyDequant,
+    Idct,
+    Color,
+    Output,
+    Header,
+}
+impl Profile {
+    pub const fn disabled() -> Self {
+        Self {
+            clock: None,
+            ticks: [0; 5],
+            calls: [0; 5],
+            mcus: 0,
+            pixels: 0,
+            blocks: 0,
+            dc_only_blocks: 0,
+            idct: super::idct::Kind::Matrix,
+            #[cfg(test)]
+            block_observer: None,
+        }
+    }
+    pub fn new(clock: fn() -> u64) -> Self {
+        Self {
+            clock: Some(clock),
+            ..Self::disabled()
+        }
+    }
+    pub fn with_idct(mut self, kind: super::idct::Kind) -> Self {
+        self.idct = kind;
+        self
+    }
+    fn begin(&self) -> u64 {
+        self.clock.map_or(0, |clock| clock())
+    }
+    fn end(&mut self, stage: Stage, start: u64) {
+        if let Some(clock) = self.clock {
+            self.ticks[stage as usize] =
+                self.ticks[stage as usize].wrapping_add(clock().wrapping_sub(start));
+            self.calls[stage as usize] += 1;
+        }
+    }
+}
+
 struct Reader<'a, R> {
     input: &'a mut R,
     buffer: [u8; 1024],
@@ -318,7 +379,9 @@ impl Decoder {
         &mut self,
         r: &mut Reader<'_, R>,
         index: usize,
+        profile: &mut Profile,
     ) -> Result<[u8; 64], Error<R::Error>> {
+        let entropy_started = profile.begin();
         let c = &mut self.components[index];
         let mut coefficients = [0i32; 64];
         let n = r.symbol(&self.huff[0][c.dc])?;
@@ -349,48 +412,24 @@ impl Decoder {
             coefficients[ZIG[k]] = r.signed(n)? * i32::from(self.quant[c.q][ZIG[k]]);
             k += 1;
         }
-        Ok(idct(&coefficients))
+        core::hint::black_box(&coefficients);
+        profile.end(Stage::EntropyDequant, entropy_started);
+        #[cfg(test)]
+        if let Some(observer) = profile.block_observer {
+            observer(&coefficients);
+        }
+        let idct_started = profile.begin();
+        let (block, dc_only) = super::idct::transform(&coefficients, profile.idct);
+        core::hint::black_box(&block);
+        profile.end(Stage::Idct, idct_started);
+        if profile.clock.is_some() {
+            profile.blocks += 1;
+            profile.dc_only_blocks += u32::from(dc_only);
+        }
+        Ok(block)
     }
 }
 
-// C(u)*cos((2x+1)*u*pi/16), fixed point 14 bits.
-const BASIS: [[i32; 8]; 8] = [
-    [11585, 16069, 15137, 13623, 11585, 9102, 6270, 3196],
-    [11585, 13623, 6270, -3196, -11585, -16069, -15137, -9102],
-    [11585, 9102, -6270, -16069, -11585, 3196, 15137, 13623],
-    [11585, 3196, -15137, -9102, 11585, 13623, -6270, -16069],
-    [11585, -3196, -15137, 9102, 11585, -13623, -6270, 16069],
-    [11585, -9102, -6270, 16069, -11585, -3196, 15137, -13623],
-    [11585, -13623, 6270, 3196, -11585, 16069, -15137, 9102],
-    [11585, -16069, 15137, -13623, 11585, -9102, 6270, -3196],
-];
-fn idct(c: &[i32; 64]) -> [u8; 64] {
-    let mut out = [0u8; 64];
-    if c[1..].iter().all(|&v| v == 0) {
-        out.fill((((c[0] + 4) >> 3) + 128).clamp(0, 255) as u8);
-        return out;
-    }
-    let mut temp = [0i32; 64];
-    for v in 0..8 {
-        for x in 0..8 {
-            let mut sum = 0i64;
-            for u in 0..8 {
-                sum += i64::from(c[v * 8 + u]) * i64::from(BASIS[x][u]);
-            }
-            temp[v * 8 + x] = ((sum + 8192) >> 14) as i32;
-        }
-    }
-    for y in 0..8 {
-        for x in 0..8 {
-            let mut sum = 0i64;
-            for v in 0..8 {
-                sum += i64::from(temp[v * 8 + x]) * i64::from(BASIS[y][v]);
-            }
-            out[y * 8 + x] = (((sum + 32768) >> 16) + 128).clamp(0, 255) as u8;
-        }
-    }
-    out
-}
 fn rgb565(y: u8, cb: u8, cr: u8) -> u16 {
     let y = i32::from(y);
     let cb = i32::from(cb) - 128;
@@ -408,12 +447,27 @@ pub fn decode<R: Input>(
     input: &mut R,
     width: usize,
     height: usize,
-    mut pixels: impl FnMut(usize, usize, &[u16]),
+    pixels: impl FnMut(usize, usize, &[u16]),
 ) -> Result<Info, Error<R::Error>> {
+    decode_profiled(input, width, height, pixels, &mut Profile::disabled())
+}
+/// Same decoder and arithmetic with optional stage instrumentation. MCU RGB565
+/// rows are assembled in 512 B of stack scratch before invoking output callbacks,
+/// allowing one color/output measurement per MCU instead of per row/pixel.
+#[inline(never)]
+pub fn decode_profiled<R: Input>(
+    input: &mut R,
+    width: usize,
+    height: usize,
+    mut pixels: impl FnMut(usize, usize, &[u16]),
+    profile: &mut Profile,
+) -> Result<Info, Error<R::Error>> {
+    let header_started = profile.begin();
     input.seek(0).map_err(Error::Io)?;
     let mut r = Reader::new(input);
     let mut decoder = Decoder::new();
     decoder.header(&mut r)?;
+    profile.end(Stage::Header, header_started);
     let info = decoder.info;
     if (info.width, info.height) != (width, height) {
         return Err(Error::Unsupported("JPEG dimensions must match framebuffer"));
@@ -439,7 +493,7 @@ pub fn decode<R: Input>(
                 let c = decoder.components[i];
                 for by in 0..c.v {
                     for bx in 0..c.h {
-                        let block = decoder.block(&mut r, i)?;
+                        let block = decoder.block(&mut r, i, profile)?;
                         for y in 0..8 {
                             plane[(by * 8 + y) * c.h * 8 + bx * 8
                                 ..(by * 8 + y) * c.h * 8 + bx * 8 + 8]
@@ -448,14 +502,26 @@ pub fn decode<R: Input>(
                     }
                 }
             }
-            for y in 0..mh.min(height - my * mh) {
-                let mut row = [0u16; 16];
-                let n = mw.min(width - mx * mw);
+            let color_started = profile.begin();
+            let lines = mh.min(height - my * mh);
+            let n = mw.min(width - mx * mw);
+            let mut rgb = [[0u16; 16]; 16];
+            for (y, row) in rgb[..lines].iter_mut().enumerate() {
                 for (x, pixel) in row[..n].iter_mut().enumerate() {
                     let chroma = (y / info.v_sampling) * 8 + x / info.h_sampling;
                     *pixel = rgb565(planes[0][y * mw + x], planes[1][chroma], planes[2][chroma]);
                 }
+            }
+            core::hint::black_box(&rgb);
+            profile.end(Stage::Color, color_started);
+            let output_started = profile.begin();
+            for (y, row) in rgb[..lines].iter().enumerate() {
                 pixels(mx * mw, my * mh + y, &row[..n]);
+            }
+            profile.end(Stage::Output, output_started);
+            if profile.clock.is_some() {
+                profile.mcus += 1;
+                profile.pixels += (n * lines) as u32;
             }
             count += 1;
         }
@@ -473,9 +539,9 @@ mod tests {
     #[test]
     fn idct_dc_and_primary_colors() {
         let mut c = [0; 64];
-        assert_eq!(idct(&c), [128; 64]);
+        assert_eq!(super::super::idct::matrix(&c), [128; 64]);
         c[0] = 80;
-        assert_eq!(idct(&c), [138; 64]);
+        assert_eq!(super::super::idct::matrix(&c), [138; 64]);
         assert_eq!(rgb565(0, 128, 128), 0);
         assert_eq!(rgb565(255, 128, 128), 0xffff);
         assert_eq!(rgb565(76, 85, 255), 0xf800);
@@ -536,6 +602,209 @@ mod tests {
                     |_, _, _| {}
                 )
                 .is_err());
+            }
+        }
+    }
+    #[test]
+    fn profiling_preserves_pixels_and_counts_blocks_mcus_and_outputs() {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static TICKS: AtomicU64 = AtomicU64::new(0);
+        fn clock() -> u64 {
+            TICKS.fetch_add(10, Ordering::Relaxed)
+        }
+        let data = include_bytes!("../../tests/data/gradient420.jpg");
+        let mut plain = [0u16; 17 * 19];
+        decode(&mut Bytes { data, pos: 0 }, 17, 19, |x, y, p| {
+            plain[y * 17 + x..y * 17 + x + p.len()].copy_from_slice(p)
+        })
+        .unwrap();
+        let mut measured = [0u16; 17 * 19];
+        let mut profile = Profile::new(clock);
+        decode_profiled(
+            &mut Bytes { data, pos: 0 },
+            17,
+            19,
+            |x, y, p| measured[y * 17 + x..y * 17 + x + p.len()].copy_from_slice(p),
+            &mut profile,
+        )
+        .unwrap();
+        assert_eq!(plain, measured);
+        assert_eq!(profile.calls, [24, 24, 4, 4, 1]);
+        assert_eq!((profile.mcus, profile.pixels), (4, 323));
+        assert_eq!(profile.ticks, [240, 240, 40, 40, 10]);
+    }
+    #[test]
+    #[ignore = "set P4_JPEG_CHECK_FILE; writes host comparison artifacts under target/idct-reference"]
+    fn compare_idct_external_file() {
+        extern crate std;
+        use std::{cell::RefCell, vec::Vec};
+        std::thread_local! {static BLOCKS:RefCell<Vec<[i32;64]>>=const {RefCell::new(Vec::new())};}
+        fn observe(c: &[i32; 64]) {
+            BLOCKS.with(|blocks| blocks.borrow_mut().push(*c));
+        }
+        let data = std::fs::read(std::env::var("P4_JPEG_CHECK_FILE").unwrap()).unwrap();
+        let out_dir = std::path::PathBuf::from(
+            std::env::var("P4_IDCT_OUT_DIR").unwrap_or_else(|_| "target/idct-reference".into()),
+        );
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let mut matrix_pixels = std::vec![0u16;1024*600];
+        let mut profile = Profile::disabled();
+        profile.block_observer = Some(observe);
+        decode_profiled(
+            &mut Bytes {
+                data: &data,
+                pos: 0,
+            },
+            1024,
+            600,
+            |x, y, p| matrix_pixels[y * 1024 + x..y * 1024 + x + p.len()].copy_from_slice(p),
+            &mut profile,
+        )
+        .unwrap();
+        let blocks = BLOCKS.with(|b| core::mem::take(&mut *b.borrow_mut()));
+        let mut coefficients = Vec::new();
+        let mut matrix_blocks = Vec::new();
+        let mut candidate_blocks = Vec::new();
+        let (mut dc_only, mut changed, mut changed_blocks, mut max_error, mut sum_error) =
+            (0usize, 0usize, 0usize, 0u8, 0u64);
+        for c in &blocks {
+            let (a, dc) = super::super::idct::transform(c, super::super::idct::Kind::Matrix);
+            let b = super::super::idct::transform(c, super::super::idct::Kind::Loeffler).0;
+            dc_only += usize::from(dc);
+            changed_blocks += usize::from(a != b);
+            for (&a, &b) in a.iter().zip(&b) {
+                let error = a.abs_diff(b);
+                changed += usize::from(error != 0);
+                max_error = max_error.max(error);
+                sum_error += u64::from(error);
+            }
+            for value in c {
+                coefficients.extend_from_slice(&value.to_le_bytes());
+            }
+            matrix_blocks.extend_from_slice(&a);
+            candidate_blocks.extend_from_slice(&b);
+        }
+        std::fs::write(out_dir.join("coefficients.i32le"), coefficients).unwrap();
+        std::fs::write(out_dir.join("matrix-blocks.u8"), matrix_blocks).unwrap();
+        std::fs::write(out_dir.join("loeffler-blocks.u8"), candidate_blocks).unwrap();
+        let mut candidate_pixels = std::vec![0u16;1024*600];
+        let mut profile = Profile::disabled().with_idct(super::super::idct::Kind::Loeffler);
+        decode_profiled(
+            &mut Bytes {
+                data: &data,
+                pos: 0,
+            },
+            1024,
+            600,
+            |x, y, p| candidate_pixels[y * 1024 + x..y * 1024 + x + p.len()].copy_from_slice(p),
+            &mut profile,
+        )
+        .unwrap();
+        let (mut rgb_changed, mut rgb_max) = (0usize, [0u8; 3]);
+        for (&a, &b) in matrix_pixels.iter().zip(&candidate_pixels) {
+            rgb_changed += usize::from(a != b);
+            for (i, shift, mask) in [(0, 11, 31), (1, 5, 63), (2, 0, 31)] {
+                rgb_max[i] = rgb_max[i]
+                    .max((((a >> shift) & mask) as u8).abs_diff(((b >> shift) & mask) as u8));
+            }
+        }
+        for (name, pixels) in [
+            ("matrix.rgb565", matrix_pixels),
+            ("loeffler.rgb565", candidate_pixels),
+        ] {
+            let bytes: Vec<_> = pixels.iter().flat_map(|p| p.to_le_bytes()).collect();
+            std::fs::write(out_dir.join(name), bytes).unwrap();
+        }
+        std::println!("IDCT HOST blocks={} dc_only={} changed_blocks={} sample_count={} changed_samples={} max_error={} sum_abs_error={}",blocks.len(),dc_only,changed_blocks,blocks.len()*64,changed,max_error,sum_error);
+        std::println!(
+            "IDCT HOST rgb565_changed_pixels={} rgb565_max_channel_steps={:?}",
+            rgb_changed,
+            rgb_max
+        );
+        // Independent C/UBSan oracle also receives boundary and adversarial
+        // vectors. These are overflow tests, not a <=1-error promise for arbitrary
+        // non-photographic coefficient arrays.
+        let mut stress = Vec::new();
+        for sign in [-1, 1] {
+            for index in 0..64 {
+                let mut c = [0; 64];
+                c[index] = sign * 522240;
+                stress.push(c);
+            }
+            stress.push([sign * 522240; 64]);
+            stress.push(core::array::from_fn(|i| {
+                if i % 2 == 0 {
+                    522240
+                } else {
+                    -522240
+                }
+            }));
+        }
+        let mut seed = 0x13579bdfu32;
+        for _ in 0..1024 {
+            stress.push(core::array::from_fn(|i| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let limit = if i == 0 { 522240 } else { 260865 };
+                (seed % (limit * 2 + 1)) as i32 - limit as i32
+            }));
+        }
+        let mut raw = Vec::new();
+        let mut expected = Vec::new();
+        for c in &stress {
+            for v in c {
+                raw.extend_from_slice(&v.to_le_bytes());
+            }
+            expected.extend_from_slice(
+                &super::super::idct::transform(c, super::super::idct::Kind::Loeffler).0,
+            );
+        }
+        std::fs::write(out_dir.join("stress-coefficients.i32le"), raw).unwrap();
+        std::fs::write(out_dir.join("stress-loeffler.u8"), expected).unwrap();
+        std::println!("IDCT HOST overflow stress blocks={}", stress.len());
+        assert_eq!(blocks.len(), 14592);
+        assert!(max_error <= 1);
+        assert!(rgb_max.iter().all(|&v| v <= 1));
+    }
+    #[test]
+    fn loeffler_sampling_and_color_match_independent_small_fixtures() {
+        for (data, reference) in [
+            (
+                include_bytes!("../../tests/data/gradient420.jpg").as_slice(),
+                include_bytes!("../../tests/data/gradient420.rgb").as_slice(),
+            ),
+            (
+                include_bytes!("../../tests/data/gradient422.jpg").as_slice(),
+                include_bytes!("../../tests/data/gradient422.rgb").as_slice(),
+            ),
+            (
+                include_bytes!("../../tests/data/gradient444.jpg").as_slice(),
+                include_bytes!("../../tests/data/gradient444.rgb").as_slice(),
+            ),
+        ] {
+            let mut actual = [0u16; 17 * 19];
+            let mut profile = Profile::disabled().with_idct(super::super::idct::Kind::Loeffler);
+            decode_profiled(
+                &mut Bytes { data, pos: 0 },
+                17,
+                19,
+                |x, y, p| actual[y * 17 + x..y * 17 + x + p.len()].copy_from_slice(p),
+                &mut profile,
+            )
+            .unwrap();
+            for (i, &pixel) in actual.iter().enumerate() {
+                let expected = [
+                    reference[i * 3] >> 3,
+                    reference[i * 3 + 1] >> 2,
+                    reference[i * 3 + 2] >> 3,
+                ];
+                let got = [
+                    (pixel >> 11) as u8,
+                    ((pixel >> 5) & 63) as u8,
+                    (pixel & 31) as u8,
+                ];
+                for c in 0..3 {
+                    assert!(got[c].abs_diff(expected[c]) <= 1);
+                }
             }
         }
     }

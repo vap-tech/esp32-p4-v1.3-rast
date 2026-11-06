@@ -74,3 +74,6 @@ pub(crate) mod tests {
         }
     }
 }
+
+pub mod idct;
+mod loeffler;

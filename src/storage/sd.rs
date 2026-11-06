@@ -73,6 +73,10 @@ impl BlockDevice for SdDevice<'_> {
 impl super::fat32::File<'_, super::Partition<SdDevice<'_>>> {
     /// Temporarily reborrow the SD transport's timer for another polled device.
     /// The file cannot perform I/O inside this closure, so timer access stays exclusive.
+    /// Read-only counters, useful for separating storage I/O from media processing.
+    pub fn read_stats(&mut self) -> ReadStats {
+        self.device_mut().device_mut().stats()
+    }
     pub fn with_timer<R>(&mut self, operation: impl FnOnce(&mut Timer) -> R) -> R {
         operation(self.device_mut().device_mut().timer)
     }
