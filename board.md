@@ -139,6 +139,8 @@ voice реально содержит вызовы `esp_hosted_init()` и `esp_h
 
 На плате проверен собственный native SDMMC slot 0, **4-bit/25 MHz**, затем High Speed **50 MHz** по CMD6 от SDIO PLL200:
 SDHC 8.01 GB, FAT32 WEBRADIO, чтение и запись секторов через внутренний IDMAC.
+Также проверено чтение SDSC 998 MB, FAT32 SK1_TFT, на 4-bit/25/50 MHz;
+CSD v1, CMD16(512) и байтовая адресация поддержаны.
 Питание pad domain VDDPST_5 — LDO4 в bypass на 3.3 V; без его включения
 CMD8 завершался timeout. Подробности, результаты и ограничения:
 [docs/sdmmc.md](docs/sdmmc.md). Файловый слой пока не реализован.

@@ -1,5 +1,5 @@
 //! Native SDMMC slot 0, P4 rev1.x. Polling internal IDMAC, no interrupts or SDK runtime.
-//! GPIO39..42 D0..3, GPIO43 CLK, GPIO44 CMD. SD v2/SDHC only for initial bring-up.
+//! GPIO39..42 D0..3, GPIO43 CLK, GPIO44 CMD. SDSC (CSD v1), SDHC/SDXC (CSD v2).
 //! Register sequences adapted from ESP-IDF v6.1 SDMMC LL (Apache-2.0).
 use super::time::Timer;
 use core::marker::PhantomData;
@@ -26,6 +26,7 @@ pub struct Error {
     pub control: u32,
     pub dma: u32,
     pub pll_state: u32,
+    pub response: u32,
 }
 #[derive(Debug)]
 pub struct Info {
@@ -72,6 +73,7 @@ fn error(command: u8) -> Error {
         control: read(0x2c),
         dma: read(0x8c),
         pll_state: unsafe { read_at(0x500e_60bc) },
+        response: read(0x30),
     }
 }
 fn expired(timer: &mut Timer, start: u64, timeout: u64) -> bool {
@@ -156,14 +158,23 @@ impl Sdmmc {
         this.set_clock(125, timer)?;
         timer.delay_us(2_000);
         this.command(0, 0, 1 << 15, timer)?;
-        let r7 = this.command(8, 0x1aa, RESPONSE, timer)?[0];
-        if r7 & 0xfff != 0x1aa {
-            return Err(error(8));
-        }
+        let version2 = match this.command(8, 0x1aa, RESPONSE, timer) {
+            Ok(r7) if r7[0] & 0xfff == 0x1aa => true,
+            Ok(_) => return Err(error(8)),
+            // Legacy SD v1 cards do not answer CMD8. Only a response timeout
+            // permits fallback; CRC and other transport failures remain errors.
+            Err(e) if e.interrupts & ERRORS == 1 << 8 => false,
+            Err(e) => return Err(e),
+        };
         let start = timer.now_us();
         loop {
             this.command(55, 0, RESPONSE, timer)?;
-            let ocr = this.command(41, 0x40ff_8000, 1 << 6, timer)?[0];
+            let ocr = this.command(
+                41,
+                0x00ff_8000 | if version2 { 1 << 30 } else { 0 },
+                1 << 6,
+                timer,
+            )?[0];
             if ocr & (1 << 31) != 0 {
                 this.info.ocr = ocr;
                 break;
@@ -173,16 +184,23 @@ impl Sdmmc {
             }
             timer.delay_us(10_000);
         }
-        if this.info.ocr & (1 << 30) == 0 {
-            return Err(error(41));
-        }
         this.info.cid = this.command(2, 0, RESPONSE | (1 << 7), timer)?;
         this.info.rca = (this.command(3, 0, RESPONSE, timer)?[0] >> 16) as u16;
         let rca = u32::from(this.info.rca) << 16;
         this.info.csd = this.command(9, rca, RESPONSE | (1 << 7), timer)?;
+        let block_addressed = this.info.ocr & (1 << 30) != 0;
+        if this.info.csd[3] >> 30 != u32::from(block_addressed) {
+            return Err(error(9));
+        }
         this.info.sectors = decode_capacity(this.info.csd).ok_or_else(|| error(9))?;
         this.command(7, rca, RESPONSE, timer)?;
         wait_clear(0x48, 1 << 9, timer, 7)?;
+        if !block_addressed {
+            let r1 = this.command(16, 512, RESPONSE, timer)?[0];
+            if r1 & 0xfdff_e008 != 0 {
+                return Err(error(16));
+            }
+        }
         // Verify one-bit transport first before negotiating four data lines.
         Ok(this)
     }
@@ -307,7 +325,8 @@ impl Sdmmc {
         if u64::from(lba) >= self.info.sectors {
             return Err(error(17));
         }
-        self.data_command(17, lba, out, false, timer)
+        let address = sector_argument(lba, self.info.ocr).ok_or_else(|| error(17))?;
+        self.data_command(17, address, out, false, timer)
     }
     /// Write one logical sector and wait until the card returns to TRANSFER/READY.
     /// No filesystem mapping or allocation is performed.
@@ -321,7 +340,8 @@ impl Sdmmc {
         if u64::from(lba) >= self.info.sectors {
             return Err(error(24));
         }
-        self.data_command(24, lba, &mut copy, true, timer)
+        let address = sector_argument(lba, self.info.ocr).ok_or_else(|| error(24))?;
+        self.data_command(24, address, &mut copy, true, timer)
     }
     fn data_command(
         &mut self,
@@ -481,16 +501,54 @@ fn sync_cache(address: usize, len: usize, operation: u32, timer: &mut Timer) -> 
     Ok(())
 }
 
-fn decode_capacity(csd: [u32; 4]) -> Option<u64> {
-    if csd[3] >> 30 != 1 {
-        return None;
+fn sector_argument(lba: u32, ocr: u32) -> Option<u32> {
+    if ocr & (1 << 30) != 0 {
+        Some(lba)
+    } else {
+        lba.checked_mul(512)
     }
-    let c_size = ((csd[2] & 0x3f) << 16) | (csd[1] >> 16);
-    Some((u64::from(c_size) + 1) * 1024)
+}
+
+fn decode_capacity(csd: [u32; 4]) -> Option<u64> {
+    match csd[3] >> 30 {
+        0 => {
+            let read_bl_len = (csd[2] >> 16) & 15; // bits 83:80
+            if !(9..=11).contains(&read_bl_len) {
+                return None;
+            }
+            let c_size = ((csd[2] & 0x3ff) << 2) | (csd[1] >> 30); // 73:62
+            let mult = (csd[1] >> 15) & 7; // 49:47
+            Some((u64::from(c_size) + 1) << (mult + 2 + read_bl_len - 9))
+        }
+        1 => {
+            let c_size = ((csd[2] & 0x3f) << 16) | (csd[1] >> 16);
+            Some((u64::from(c_size) + 1) * 1024)
+        }
+        _ => None,
+    }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sdsc_capacity_and_byte_address_boundaries() {
+        // CSD v1: C_SIZE=4095, MULT=7, READ_BL_LEN=10 => 2 GiB.
+        let csd = [0, (3 << 30) | (7 << 15), (10 << 16) | 1023, 0];
+        assert_eq!(decode_capacity(csd), Some(4_194_304));
+        assert_eq!(sector_argument(1, 0x80ff8000), Some(512));
+        assert_eq!(sector_argument(4_194_303, 0x80ff8000), Some(0x7ffffe00));
+        assert_eq!(sector_argument(8_388_607, 0), Some(0xfffffe00));
+        assert_eq!(sector_argument(8_388_608, 0), None);
+        assert_eq!(sector_argument(u32::MAX, 1 << 30), Some(u32::MAX));
+        // Actual SDSC capture: 998244352 bytes, independently readable FAT32.
+        assert_eq!(
+            decode_capacity([373293211, 4005298079, 1398375351, 8323122]),
+            Some(1_949_696)
+        );
+        // Small CSD v1: 1024 native 512B blocks.
+        assert_eq!(decode_capacity([0, 3 << 30, (9 << 16) | 63, 0]), Some(1024));
+        assert_eq!(decode_capacity([0, 0, 0, 2 << 30]), None);
+    }
     #[test]
     fn dedicated_source_covers_probing_default_and_high_speed_exactly() {
         assert_eq!(card_clock_hz(125), 400_000);
@@ -521,7 +579,7 @@ mod tests {
         let csd = [171966509, 1001357184, 1532559360, 1074659378];
         assert_eq!(decode_capacity(csd), Some(15_646_720));
         assert_eq!(decode_capacity(csd).unwrap() * 512, 8_011_120_640);
-        assert_eq!(decode_capacity([0; 4]), None); // CSD v1 unsupported.
+        assert_eq!(decode_capacity([0; 4]), None); // Invalid READ_BL_LEN.
         assert_eq!(
             decode_capacity([0, 0xffff0000, 0x3f, 1 << 30]),
             Some(4_294_967_296)
