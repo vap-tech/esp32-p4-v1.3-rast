@@ -69,7 +69,7 @@ cargo test --lib --target x86_64-unknown-linux-gnu
 
 Native microSD SDMMC slot 0, SDIO PLL200, 4-bit/25 MHz и High Speed 50 MHz,
 многоблочные CMD18/CMD25 до 8 KiB (чтение 8 GB карты около 7.9 MiB/s): чтение/запись секторов и результаты
-тестов на ноутбуке/плате — [docs/sdmmc.md](docs/sdmmc.md). Собственный FAT32 с каталогами, open/read/seek, create_new, двумя кешами и
+тестов на ноутбуке/плате — [docs/sdmmc.md](docs/sdmmc.md). Собственный FAT32 с каталогами, open/read/seek, create_new, потоковым create_stream/write/finish/abort, двумя кешами и
 пакетным чтением файлов: [docs/filesystem.md](docs/filesystem.md). Команда Z
 проверяет реальные файлы на карте; команда ! создаёт тестовый CONFIG.TXT и
 проверяет его после повторного mount. Изменение существующих файлов и длинные

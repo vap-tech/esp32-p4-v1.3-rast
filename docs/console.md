@@ -64,6 +64,17 @@ See [DMA validation](dma.md) for setup and limits.
 
 Cache controls: `:icache on/off`, `:dcache on/off`, `:l2 on/off` (l2-128 build), `:l2-probe`.
 
+SD formatter (`sd-format` build): `:format-sd` / `--sd-format-info` only previews
+geometry. `:format-sd FAT32 ERASE` / `--format-sd` destroys the entire SD partition
+table and quick-formats FAT32, then creates/remounts/verifies `CONFIG.TXT`.
+Never automatic at boot. This build omits `:mixed-stress` and `:sd-stress` to
+fit the existing code region; normal image/play and legacy SD probes remain.
+
 Live WAV diagnostic (audio-lab build): `:wav-lab`, `:wav-lab-control`,
 `:wav-lab-repeat`, `:wav-lab-stall` with matching script flags.
 [Setup and unavailable legacy commands in this build](wav-lab.md).
+
+Ethernet bring-up (`eth-lab`): `:eth-probe` / `--eth-probe`,
+`:eth-run N` / `--eth-run N` for 1..600 seconds. D-cache OFF / L2=0 required;
+DHCP, ARP and ping only. ESC/Ctrl-C stops DMA and returns to the console.
+[Setup, excluded diagnostic commands and limits](ethernet.md).

@@ -1,4 +1,4 @@
-//! Small FAT32 reader and synchronous create-new writer. Metadata cache and partial-sector data cache
+//! Small FAT32 reader and create-new streaming writer. Metadata cache and partial-sector data cache
 //! are separate; aligned file data bypasses both and uses multi-sector I/O.
 use super::{BlockDevice, Error};
 use core::fmt;
@@ -354,10 +354,18 @@ impl<D: BlockDevice> Fat32<D> {
     /// An I/O failure leaves the volume dirty and disables further creates until
     /// recovery/remount; this is ordered creation, not a journaled transaction.
     pub fn create_new(&mut self, path: &str, contents: &[u8]) -> Result<(), Error<D::Error>> {
+        u32::try_from(contents.len()).map_err(|_| Error::Unsupported("file size"))?;
+        let mut writer = self.create_stream(path)?;
+        writer.write(contents)?;
+        writer.finish()
+    }
+    /// Start a create-new stream. Only finish publishes the directory entry.
+    /// Drop performs no I/O and leaves the volume dirty; call abort explicitly
+    /// on a clean cancellation. Device errors require recovery, not rollback.
+    pub fn create_stream(&mut self, path: &str) -> Result<FileWriter<'_, D>, Error<D::Error>> {
         if self.write_failed {
             return Err(Error::NeedsRecovery);
         }
-        let size = u32::try_from(contents.len()).map_err(|_| Error::Unsupported("file size"))?;
         let (parent, name) = path.rsplit_once('/').unwrap_or(("/", path));
         let name = ShortName::parse(name)?;
         let directory = self.resolve(parent)?;
@@ -370,26 +378,31 @@ impl<D: BlockDevice> Fat32<D> {
             Err(error) => return Err(error),
         }
         let slot = self.free_slot(directory.cluster)?;
-        // FAT32 entry 1: clean shutdown and no-hard-error bits. Never write a
-        // volume requiring repair, even though read-only access remains possible.
         let status = self.write_status()?;
         self.write_failed = true;
         self.set_fat(1, status & !(1 << 27))?;
         self.invalidate_fsinfo()?;
-        let mut first = 0;
-        let mut previous = None;
-        let mut done = 0;
-        while done < contents.len() {
-            let cluster = self.allocate(previous)?;
-            if first == 0 {
-                first = cluster;
-            }
-            let bytes =
-                (contents.len() - done).min(usize::from(self.geometry.sectors_per_cluster) * 512);
-            self.write_cluster(cluster, &contents[done..done + bytes])?;
-            previous = Some(cluster);
-            done += bytes;
-        }
+        Ok(FileWriter {
+            fs: self,
+            slot,
+            name,
+            status,
+            first: 0,
+            current: 0,
+            offset: 0,
+            size: 0,
+            tail: [0; 512],
+            used: 0,
+            failed: false,
+        })
+    }
+    fn publish_file(
+        &mut self,
+        slot: &DirectorySlot,
+        name: ShortName,
+        first: u32,
+        size: u32,
+    ) -> Result<(), Error<D::Error>> {
         // Preserve the end marker when replacing the first unused directory slot.
         if slot.was_end {
             if let Some((sector, offset)) = slot.following {
@@ -411,8 +424,6 @@ impl<D: BlockDevice> Fat32<D> {
         raw[26..28].copy_from_slice(&(first as u16).to_le_bytes());
         raw[28..32].copy_from_slice(&size.to_le_bytes());
         self.write_metadata(slot.sector)?;
-        self.set_fat(1, status)?;
-        self.write_failed = false;
         Ok(())
     }
     fn write_status(&mut self) -> Result<u32, Error<D::Error>> {
@@ -511,31 +522,6 @@ impl<D: BlockDevice> Fat32<D> {
         }
         Err(Error::NoSpace)
     }
-    fn write_cluster(&mut self, cluster: u32, contents: &[u8]) -> Result<(), Error<D::Error>> {
-        self.edge.sector = None;
-        let mut sector = self.geometry.cluster_sector(cluster);
-        let mut done = 0;
-        while contents.len() - done >= 512 {
-            let bytes = (contents.len() - done).min(self.device.max_transfer_bytes()) / 512 * 512;
-            self.device
-                .write(u64::from(sector), &contents[done..done + bytes])
-                .map_err(Error::Device)?;
-            sector += (bytes / 512) as u32;
-            done += bytes;
-        }
-        let end =
-            self.geometry.cluster_sector(cluster) + u32::from(self.geometry.sectors_per_cluster);
-        let mut tail = [0; 512];
-        tail[..contents.len() - done].copy_from_slice(&contents[done..]);
-        while sector < end {
-            self.device
-                .write(u64::from(sector), &tail)
-                .map_err(Error::Device)?;
-            tail.fill(0);
-            sector += 1;
-        }
-        Ok(())
-    }
     fn free_slot(&mut self, mut cluster: u32) -> Result<DirectorySlot, Error<D::Error>> {
         for _ in 0..self.geometry.clusters {
             if !self.geometry.valid_cluster(cluster) {
@@ -604,6 +590,141 @@ struct DirectorySlot {
     offset: usize,
     was_end: bool,
     following: Option<(u32, usize)>,
+}
+
+/// Fixed 512-byte edge buffer, independent of file size. No heap or Drop I/O.
+/// Complete sectors bypass it and are sent in device-sized multi-sector writes.
+#[must_use = "finish publishes the file; abort cancels; dropping leaves the volume dirty"]
+pub struct FileWriter<'a, D> {
+    fs: &'a mut Fat32<D>,
+    slot: DirectorySlot,
+    name: ShortName,
+    status: u32,
+    first: u32,
+    current: u32,
+    offset: u32,
+    size: u32,
+    tail: [u8; 512],
+    used: usize,
+    failed: bool,
+}
+impl<D: BlockDevice> FileWriter<'_, D> {
+    pub fn len(&self) -> u32 {
+        self.size
+    }
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+    /// Accept arbitrary chunk boundaries. On any error the stream is poisoned:
+    /// do not retry that chunk or finish; the volume remains dirty for recovery.
+    pub fn write(&mut self, bytes: &[u8]) -> Result<(), Error<D::Error>> {
+        if self.failed {
+            return Err(Error::NeedsRecovery);
+        }
+        let result = self.write_inner(bytes);
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+    fn write_inner(&mut self, mut bytes: &[u8]) -> Result<(), Error<D::Error>> {
+        if bytes.len() as u64 + u64::from(self.size) > u64::from(u32::MAX) {
+            return Err(Error::Unsupported("file size"));
+        }
+        let cluster_bytes = u32::from(self.fs.geometry.sectors_per_cluster) * 512;
+        while !bytes.is_empty() {
+            if self.current == 0 || self.offset == cluster_bytes {
+                self.current = self
+                    .fs
+                    .allocate((self.current != 0).then_some(self.current))?;
+                if self.first == 0 {
+                    self.first = self.current;
+                }
+                self.offset = 0;
+            }
+            let sector = self.fs.geometry.cluster_sector(self.current) + self.offset / 512;
+            self.fs.edge.sector = None;
+            if self.used != 0 || bytes.len() < 512 {
+                let n = (512 - self.used).min(bytes.len());
+                self.tail[self.used..self.used + n].copy_from_slice(&bytes[..n]);
+                self.used += n;
+                self.size += n as u32;
+                bytes = &bytes[n..];
+                if self.used == 512 {
+                    self.fs
+                        .device
+                        .write(u64::from(sector), &self.tail)
+                        .map_err(Error::Device)?;
+                    self.offset += 512;
+                    self.used = 0;
+                    self.tail.fill(0);
+                }
+            } else {
+                let n = bytes
+                    .len()
+                    .min((cluster_bytes - self.offset) as usize)
+                    .min(self.fs.device.max_transfer_bytes())
+                    / 512
+                    * 512;
+                self.fs
+                    .device
+                    .write(u64::from(sector), &bytes[..n])
+                    .map_err(Error::Device)?;
+                self.offset += n as u32;
+                self.size += n as u32;
+                bytes = &bytes[n..];
+            }
+        }
+        Ok(())
+    }
+    /// Flush the last edge, clear cluster slack and publish only after all data.
+    /// A publication/clean-flag failure leaves the volume dirty, as create_new did.
+    pub fn finish(mut self) -> Result<(), Error<D::Error>> {
+        if self.failed {
+            return Err(Error::NeedsRecovery);
+        }
+        if self.current != 0 {
+            self.tail[self.used..].fill(0);
+            let end = u32::from(self.fs.geometry.sectors_per_cluster) * 512;
+            while self.offset < end {
+                let sector = self.fs.geometry.cluster_sector(self.current) + self.offset / 512;
+                self.fs
+                    .device
+                    .write(u64::from(sector), &self.tail)
+                    .map_err(Error::Device)?;
+                self.offset += 512;
+                self.tail.fill(0);
+            }
+        }
+        self.fs
+            .publish_file(&self.slot, self.name, self.first, self.size)?;
+        self.fs.set_fat(1, self.status)?;
+        self.fs.write_failed = false;
+        Ok(())
+    }
+    /// Cancel a healthy, unpublished stream and free its cluster chain. A failed
+    /// stream cannot be rolled back because a device write may have partially
+    /// changed metadata. Abort itself can fail and then leaves the volume dirty.
+    pub fn abort(self) -> Result<(), Error<D::Error>> {
+        if self.failed {
+            return Err(Error::NeedsRecovery);
+        }
+        let mut cluster = self.first;
+        for _ in 0..self.fs.geometry.clusters {
+            if cluster == 0 {
+                break;
+            }
+            let next = self.fs.next_cluster(cluster)?;
+            self.fs.set_fat(cluster, 0)?;
+            cluster = next.unwrap_or(0);
+        }
+        if cluster != 0 {
+            return Err(Error::Invalid("abort chain too long"));
+        }
+        self.fs.set_fat(1, self.status)?;
+        self.fs.write_failed = false;
+        Ok(())
+    }
 }
 
 pub struct File<'a, D> {
@@ -1147,6 +1268,112 @@ mod tests {
                 .unwrap(),
             (cluster % 128) as usize * 4,
         )
+    }
+    #[test]
+    fn stream_arbitrary_chunks_publish_at_finish_and_remount() {
+        assert!(core::mem::size_of::<FileWriter<'_, Partition<Disk>>>() < 768);
+        let mut fs = Fat32::mount(Partition::mbr(writable_disk(), 0).unwrap()).unwrap();
+        let data: Vec<u8> = (0..91_123).map(pattern).collect();
+        let mut writer = fs.create_stream("STREAM.BIN").unwrap();
+        writer.write(&[]).unwrap();
+        let sizes = [1, 511, 3, 513, 8192, 17, 4096];
+        let mut done = 0;
+        let mut step = 0;
+        while done < data.len() {
+            let n = sizes[step % sizes.len()].min(data.len() - done);
+            writer.write(&data[done..done + n]).unwrap();
+            done += n;
+            step += 1;
+            assert_eq!(writer.len() as usize, done);
+            assert!(matches!(
+                writer.fs.resolve("STREAM.BIN"),
+                Err(Error::NotFound)
+            ));
+            assert_eq!(raw_fat(&writer.fs.device.device, 0, 1) & (1 << 27), 0);
+        }
+        writer.finish().unwrap();
+        assert!(fs
+            .device
+            .device
+            .writes
+            .iter()
+            .any(|(_, bytes)| *bytes >= 4096));
+        let mut fs = Fat32::mount(fs.into_inner()).unwrap();
+        let mut actual = vec![0; data.len() + 1];
+        let mut file = fs.open("STREAM.BIN").unwrap();
+        assert_eq!(file.read(&mut actual).unwrap(), data.len());
+        assert_eq!(&actual[..data.len()], &data);
+        let mut old = fs.open("FAST.BIN").unwrap();
+        let mut bytes = [0; 1024];
+        old.read(&mut bytes).unwrap();
+        check(&bytes, 0);
+    }
+    #[test]
+    fn stream_abort_frees_chain_and_keeps_volume_writable() {
+        let mut fs = Fat32::mount(Partition::mbr(writable_disk(), 0).unwrap()).unwrap();
+        let mut writer = fs.create_stream("CANCEL.BIN").unwrap();
+        writer.write(&vec![0x73; 9001]).unwrap();
+        let mut allocated = Vec::new();
+        let mut cluster = Some(writer.first);
+        while let Some(current) = cluster {
+            allocated.push(current);
+            cluster = writer.fs.next_cluster(current).unwrap();
+        }
+        assert_eq!(allocated.len(), 3);
+        writer.abort().unwrap();
+        assert!(matches!(fs.open("CANCEL.BIN"), Err(Error::NotFound)));
+        for copy in 0..2 {
+            for &cluster in &allocated {
+                assert_eq!(raw_fat(&fs.device.device, copy, cluster) & 0x0fff_ffff, 0);
+            }
+            assert_ne!(raw_fat(&fs.device.device, copy, 1) & (1 << 27), 0);
+        }
+        fs.create_stream("VOID.TXT").unwrap().abort().unwrap();
+        fs.create_new("AFTER.TXT", b"healthy").unwrap();
+    }
+    #[test]
+    fn abandoned_or_failed_stream_does_not_publish_and_requires_recovery() {
+        let mut fs = Fat32::mount(Partition::mbr(writable_disk(), 0).unwrap()).unwrap();
+        {
+            let mut writer = fs.create_stream("DROP.BIN").unwrap();
+            writer.write(b"pending edge").unwrap();
+        }
+        assert!(matches!(fs.open("DROP.BIN"), Err(Error::NotFound)));
+        assert!(matches!(
+            fs.create_stream("NEW.TXT"),
+            Err(Error::NeedsRecovery)
+        ));
+        let mut fs = Fat32::mount(fs.into_inner()).unwrap();
+        assert!(matches!(
+            fs.create_stream("NEW.TXT"),
+            Err(Error::NeedsRecovery)
+        ));
+
+        let mut disk = writable_disk();
+        disk.fail_write = Some(cluster_lba(4) + 1);
+        let mut fs = Fat32::mount(Partition::mbr(disk, 0).unwrap()).unwrap();
+        let mut writer = fs.create_stream("FAIL.BIN").unwrap();
+        writer.write(&[3; 512]).unwrap();
+        assert!(writer.write(&[4; 512]).is_err());
+        assert!(matches!(writer.write(&[5]), Err(Error::NeedsRecovery)));
+        assert!(matches!(writer.abort(), Err(Error::NeedsRecovery)));
+        assert!(matches!(fs.open("FAIL.BIN"), Err(Error::NotFound)));
+    }
+    #[test]
+    fn stream_clean_flag_failure_between_fat_copies_blocks_new_writes() {
+        let mut fs = Fat32::mount(Partition::mbr(writable_disk(), 0).unwrap()).unwrap();
+        let mut writer = fs.create_stream("DONE.TXT").unwrap();
+        writer.write(b"complete data").unwrap();
+        writer.fs.device.device.fail_write = Some(START + 32 + 513);
+        assert!(writer.finish().is_err());
+        let mut fs = Fat32::mount(fs.into_inner()).unwrap();
+        let mut out = [0; 13];
+        assert_eq!(fs.open("DONE.TXT").unwrap().read(&mut out).unwrap(), 13);
+        assert_eq!(&out, b"complete data");
+        assert!(matches!(
+            fs.create_stream("NEXT.TXT"),
+            Err(Error::NeedsRecovery)
+        ));
     }
     #[test]
     fn create_fragmented_file_remount_preserves_existing_and_both_fats() {

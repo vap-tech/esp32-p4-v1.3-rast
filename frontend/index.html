@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flashbox — файлы</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb; --surface: #fff; --ink: #152238; --muted: #718096;
+      --line: #e7ebf1; --accent: #425fd7; --accent-light: #eef2ff;
+      --shadow: 0 15px 50px rgba(20, 34, 61, .055);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink);
+      font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { opacity: .55; cursor: wait; }
+    :focus-visible { outline: 3px solid #9eb0ff; outline-offset: 3px; }
+    .shell { width: min(100% - 36px, 1050px); margin-inline: auto; }
+    .topbar { background: var(--surface); border-bottom: 1px solid var(--line); }
+    .topbar-inner { min-height: 76px; display: flex; align-items: center;
+      justify-content: space-between; gap: 16px; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-mark { display: grid; place-items: center; width: 40px; height: 40px;
+      border-radius: 12px; color: #fff; background: var(--accent);
+      font-size: 20px; font-weight: 750; letter-spacing: -.05em; }
+    .brand strong, .brand small { display: block; }
+    .brand strong { font-size: 15px; letter-spacing: -.02em; }
+    .brand small { color: var(--muted); font-size: 11px; }
+    .protocol { display: inline-flex; align-items: center; gap: 8px;
+      padding: 7px 11px; border: 1px solid var(--line); border-radius: 99px;
+      color: #526078; background: var(--surface); font-size: 11px; font-weight: 700;
+      letter-spacing: .04em; }
+    .protocol::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #3bb98a; }
+    .intro { padding: 49px 0 25px; }
+    .eyebrow { color: var(--accent); font-size: 11px; font-weight: 800; letter-spacing: .13em; }
+    h1 { margin: 7px 0 5px; font-size: clamp(27px, 5vw, 36px); line-height: 1.2;
+      font-weight: 750; letter-spacing: -.045em; }
+    .intro p { margin: 0; color: var(--muted); font-size: 14px; }
+    .panel { overflow: hidden; border: 1px solid var(--line); border-radius: 18px;
+      background: var(--surface); box-shadow: var(--shadow); }
+    .panel.dragover { outline: 3px dashed var(--accent); outline-offset: -7px; }
+    .toolbar { display: flex; align-items: center; justify-content: space-between;
+      gap: 18px; padding: 23px 25px; }
+    .location { min-width: 0; }
+    .hint-label { display: block; margin-bottom: 6px; font-size: 11px; color: var(--muted); }
+    .crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+    .crumbs button { padding: 0; border: 0; background: transparent; color: #65738c;
+      font-weight: 600; }
+    .crumbs button:last-child { color: var(--ink); }
+    .crumbs .separator { color: #b1b9c7; }
+    .actions { display: flex; gap: 9px; flex-shrink: 0; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+      min-height: 39px; padding: 9px 14px; border: 1px solid var(--line);
+      border-radius: 10px; background: var(--surface); color: #3f4b61;
+      text-decoration: none; font-weight: 650; white-space: nowrap; cursor: pointer; }
+    .btn:hover { background: #f8f9fd; }
+    .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .btn.primary:hover { background: #334fc6; }
+    .btn:disabled { opacity: .55; cursor: wait; }
+    #picker { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
+    .status { min-height: 0; padding: 0 25px 14px; color: var(--muted); font-size: 12px; }
+    .status:empty { display: none; }
+    .status.error { color: #c13f4a; }
+    .columns, .file-row { display: grid;
+      grid-template-columns: minmax(0, 1fr) 112px 170px 94px; align-items: center; column-gap: 14px; }
+    .columns { padding: 12px 25px; background: #f9fafd; border-block: 1px solid var(--line);
+      color: #8b97aa; font-size: 10px; font-weight: 800; letter-spacing: .09em; }
+    .file-row { min-height: 69px; padding: 12px 25px; border-bottom: 1px solid var(--line); }
+    .file-row:last-child { border-bottom: 0; }
+    .file-row:hover { background: #fafbff; }
+    .file-main { display: flex; align-items: center; min-width: 0; gap: 13px; }
+    .file-icon { display: grid; place-items: center; flex: 0 0 39px; width: 39px; height: 39px;
+      border-radius: 11px; color: #5c6b82; background: #f0f3f8; font-size: 19px; }
+    .file-icon.folder { color: #516cce; background: var(--accent-light); }
+    .file-icon.folder::before { content: "▱"; }
+    .file-icon:not(.folder)::before { content: "▤"; }
+    .file-stack { min-width: 0; }
+    .file-name { display: block; overflow: hidden; max-width: 100%; padding: 0;
+      border: 0; background: none; color: var(--ink); font-weight: 650;
+      text-align: left; white-space: nowrap; text-overflow: ellipsis; }
+    button.file-name:hover { color: var(--accent); }
+    .file-sub { display: none; }
+    .meta { color: #738097; font-size: 12px; white-space: nowrap; }
+    .file-action { justify-self: end; padding: 6px 0; border: 0;
+      background: none; color: var(--accent); font-weight: 650;
+      text-decoration: none; }
+    .file-action:hover { text-decoration: underline; }
+    .empty { padding: 58px 20px; text-align: center; color: var(--muted); }
+    .empty strong { display: block; margin-bottom: 4px; color: var(--ink); font-size: 16px; }
+    .panel-foot { display: flex; justify-content: space-between; gap: 15px;
+      padding: 15px 25px; border-top: 1px solid var(--line); color: #8a96a9; font-size: 11px; }
+    .footnote { margin: 20px 0 50px; color: #9aa4b3; text-align: center; font-size: 11px; }
+    @media (max-width: 650px) {
+      .shell { width: min(100% - 24px, 1050px); }
+      .topbar-inner { min-height: 65px; }
+      .intro { padding: 30px 0 19px; }
+      .toolbar { align-items: stretch; flex-direction: column; gap: 17px; padding: 19px 17px; }
+      .actions .btn { flex: 1; }
+      .columns { display: none; }
+      .file-row { grid-template-columns: minmax(0, 1fr) auto; padding: 12px 17px; }
+      .file-row > .meta { display: none; }
+      .file-sub { display: block; color: var(--muted); font-size: 11px; }
+      .file-icon { flex-basis: 36px; width: 36px; height: 36px; }
+      .status { padding-inline: 17px; }
+      .panel-foot { padding-inline: 17px; }
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { color-scheme: dark; --bg: #0e1420; --surface: #172032;
+        --ink: #edf1f9; --muted: #9aa9c0; --line: #2a3649;
+        --accent: #8ea3ff; --accent-light: #26365e;
+        --shadow: 0 15px 50px rgba(0,0,0,.14); }
+      .brand-mark, .btn.primary { background: #536dd9; border-color: #536dd9; color: #fff; }
+      .btn.primary:hover { background: #6b82e9; }
+      .protocol { color: #bac5d5; }
+      .crumbs button { color: #a5b1c5; }
+      .btn { color: #d3dbeb; }
+      .btn:hover, .file-row:hover { background: #1d2a40; }
+      .columns { background: #1b273a; color: #a9b4c5; }
+      .file-icon { background: #273349; color: #b4c1d5; }
+      .file-icon.folder { color: #a9bbff; }
+      .meta, .panel-foot { color: #a3afc0; }
+      .status.error { color: #ff9099; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">F</span>
+        <div><strong>Flashbox</strong><small>ESP32-P4 · file storage</small></div>
+      </div>
+      <span class="protocol">LAN / HTTP</span>
+    </div>
+  </header>
+  <main class="shell">
+    <div class="intro">
+      <div class="eyebrow">ФАЙЛОВЫЙ МЕНЕДЖЕР</div>
+      <h1>Мои файлы</h1>
+      <p>Просмотр, загрузка и скачивание файлов в локальной сети.</p>
+    </div>
+    <section class="panel" id="panel" aria-label="Файлы">
+      <div class="toolbar">
+        <div class="location"><span class="hint-label">Текущая папка</span>
+          <nav class="crumbs" id="crumbs" aria-label="Путь"></nav>
+        </div>
+        <div class="actions">
+          <button class="btn" id="refresh" type="button">↻ &nbsp;Обновить</button>
+          <label class="btn primary" for="picker">＋ &nbsp;Загрузить</label>
+          <input id="picker" type="file" multiple aria-label="Выбрать файлы">
+        </div>
+      </div>
+      <div class="status" id="status" role="status" aria-live="polite"></div>
+      <div class="columns" aria-hidden="true"><span>ИМЯ</span><span>РАЗМЕР</span><span>ИЗМЕНЁН</span><span></span></div>
+      <div id="files" role="list"></div>
+      <div class="panel-foot"><span id="counter">0 элементов</span><span>HTTP · без внешних зависимостей</span></div>
+    </section>
+    <p class="footnote">Минимальный интерфейс · HTML + CSS + JavaScript</p>
+  </main>
+  <script>
+    'use strict';
+    const $ = id => document.getElementById(id);
+    const normalize = p => '/' + p.split('/').filter(s => s && s !== '.' && s !== '..').join('/');
+    const join = (dir, name) => (dir === '/' ? '' : dir) + '/' + name;
+    const fileURL = p => '/fs' + p.split('/').map(encodeURIComponent).join('/');
+    let current = normalize(new URLSearchParams(location.search).get('path') || '/');
+    let requestId = 0;
+
+    function status(message = '', error = false) {
+      $('status').textContent = message;
+      $('status').classList.toggle('error', error);
+    }
+    function size(bytes) {
+      if (bytes == null) return '—';
+      if (bytes < 1024) return bytes + ' Б';
+      const units = ['КБ', 'МБ', 'ГБ', 'ТБ'];
+      let i = -1;
+      do { bytes /= 1024; i++; } while (bytes >= 1024 && i < units.length - 1);
+      return bytes.toFixed(bytes < 10 ? 1 : 0) + ' ' + units[i];
+    }
+    function date(value) {
+      if (!value) return '—';
+      const d = new Date(value);
+      return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('ru-RU');
+    }
+    function go(path) {
+      current = normalize(path);
+      history.pushState(null, '', location.pathname + '?path=' + encodeURIComponent(current));
+      load();
+    }
+    function breadcrumbs() {
+      const nav = $('crumbs');
+      nav.replaceChildren();
+      const parts = current.split('/').filter(Boolean);
+      const items = [{name: 'Флешка', path: '/'}];
+      parts.forEach((name, i) => items.push({name, path: '/' + parts.slice(0, i + 1).join('/')}));
+      items.forEach((item, i) => {
+        if (i) {
+          const sep = document.createElement('span');
+          sep.className = 'separator'; sep.textContent = '/'; nav.append(sep);
+        }
+        const b = document.createElement('button');
+        b.type = 'button'; b.textContent = item.name;
+        b.onclick = () => go(item.path);
+        if (i === items.length - 1) b.setAttribute('aria-current', 'page');
+        nav.append(b);
+      });
+    }
+    function render(entries) {
+      const list = $('files');
+      list.replaceChildren();
+      $('counter').textContent = entries.length + ' элементов';
+      if (!entries.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty';
+        const title = document.createElement('strong'); title.textContent = 'Папка пуста';
+        const text = document.createElement('span'); text.textContent = 'Загрузите сюда первый файл.';
+        empty.append(title, text); list.append(empty); return;
+      }
+      const frag = document.createDocumentFragment();
+      for (const entry of entries) {
+        const dir = entry.dir === true;
+        const path = join(current, entry.name);
+        const row = document.createElement('div'); row.className = 'file-row'; row.setAttribute('role', 'listitem');
+        const main = document.createElement('div'); main.className = 'file-main';
+        const icon = document.createElement('span'); icon.className = 'file-icon' + (dir ? ' folder' : '');
+        icon.setAttribute('aria-hidden', 'true');
+        const stack = document.createElement('div'); stack.className = 'file-stack';
+        const name = document.createElement(dir ? 'button' : 'span');
+        name.className = 'file-name'; name.textContent = entry.name; name.title = entry.name;
+        if (dir) { name.type = 'button'; name.onclick = () => go(path); }
+        const sub = document.createElement('span'); sub.className = 'file-sub';
+        sub.textContent = dir ? 'Папка' : size(entry.size);
+        stack.append(name, sub); main.append(icon, stack);
+        const bytes = document.createElement('span'); bytes.className = 'meta';
+        bytes.textContent = dir ? '—' : size(entry.size);
+        const modified = document.createElement('span'); modified.className = 'meta';
+        modified.textContent = date(entry.modified);
+        const action = document.createElement(dir ? 'button' : 'a');
+        action.className = 'file-action'; action.textContent = dir ? 'Открыть' : 'Скачать';
+        if (dir) { action.type = 'button'; action.onclick = () => go(path); }
+        else { action.href = fileURL(path); action.download = entry.name; }
+        row.append(main, bytes, modified, action); frag.append(row);
+      }
+      list.append(frag);
+    }
+    async function load(silent = false) {
+      breadcrumbs();
+      const seq = ++requestId;
+      if (!silent) status('Читаю каталог…');
+      try {
+        const res = await fetch('/api/list?path=' + encodeURIComponent(current), {cache: 'no-store'});
+        if (!res.ok) throw Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (!Array.isArray(data.entries)) throw Error('Неверный формат списка');
+        if (seq !== requestId) return;
+        render(data.entries);
+        if (!silent) status();
+      } catch (e) {
+        if (seq !== requestId) return;
+        render([]);
+        status('Не удалось получить список: ' + e.message, true);
+      }
+    }
+    const uploadQueue = [];
+    let uploadRunning = false;
+    function shortName(name) {
+      const parts = name.split('.');
+      return parts.length <= 2 && parts[0].length >= 1 && parts[0].length <= 8
+        && (parts.length === 1 || (parts[1].length >= 1 && parts[1].length <= 3))
+        && Array.from(name).every(c => c === '.' || (c.charCodeAt(0) >= 33 && c.charCodeAt(0) <= 126
+          && !'"*+,/:;<=>?[\\]|'.includes(c)));
+    }
+    function upload(files) {
+      // Capture the destination now; navigation must not redirect queued files.
+      for (const file of Array.from(files)) uploadQueue.push({file, dir: current});
+      $('picker').value = '';
+      if (!uploadRunning && uploadQueue.length) return drainUploads();
+    }
+    async function drainUploads() {
+      uploadRunning = true;
+      $('refresh').disabled = true;
+      let done = 0, failed = 0, lastError = '';
+      try {
+        do {
+          while (uploadQueue.length) {
+            const {file, dir} = uploadQueue.shift();
+            status('Загрузка: ' + join(dir, file.name) + ' · в очереди: ' + uploadQueue.length);
+            try {
+              if (!shortName(file.name)) throw Error(file.name + ' — нужно короткое имя: 1–8 ASCII-символов и расширение до 3 символов, без пробелов');
+              if (file.size > 0xffffffff) throw Error(file.name + ' — размер превышает предел FAT32 (4 ГиБ − 1 байт)');
+              const res = await fetch(fileURL(join(dir, file.name)), {
+                method: 'PUT', headers: {'Content-Type': 'application/octet-stream'}, body: file
+              });
+              if (!res.ok) throw Error(file.name + ' — HTTP ' + res.status);
+              done++;
+            } catch (e) {
+              failed++; lastError = e.message;
+            }
+          }
+          await load(true);
+          // Files dropped during the catalog refresh belong to the same drain.
+        } while (uploadQueue.length);
+        status('Загружено файлов: ' + done + (failed ? '. Ошибок: ' + failed + '. ' + lastError : ''), failed > 0);
+      } finally {
+        uploadRunning = false;
+        $('refresh').disabled = false;
+      }
+    }
+    $('refresh').onclick = () => load();
+    $('picker').onchange = e => upload(e.target.files);
+    const panel = $('panel');
+    panel.addEventListener('dragover', e => { e.preventDefault(); panel.classList.add('dragover'); });
+    panel.addEventListener('dragleave', e => {
+      if (!panel.contains(e.relatedTarget)) panel.classList.remove('dragover');
+    });
+    panel.addEventListener('drop', e => {
+      e.preventDefault(); panel.classList.remove('dragover'); upload(e.dataTransfer.files);
+    });
+    window.addEventListener('popstate', () => {
+      current = normalize(new URLSearchParams(location.search).get('path') || '/'); load();
+    });
+    load();
+  </script>
+</body>
+</html>

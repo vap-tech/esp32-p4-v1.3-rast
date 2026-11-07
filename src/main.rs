@@ -227,7 +227,62 @@ extern "C" fn rust_main() -> ! {
                         continue;
                     }
                 };
-                if line == "wav-lab"
+                if let Some(seconds) = line.strip_prefix("eth-run ") {
+                    #[cfg(feature = "eth-lab")]
+                    {
+                        let seconds = seconds
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|s| (1..=600).contains(s));
+                        if camera_live || internal_arena.stats().used != 0 || seconds.is_none() {
+                            let _ = writeln!(console, "ETH RUN DONE Err(state/seconds)");
+                            continue;
+                        }
+                        let result = ethernet_run(
+                            seconds.unwrap(),
+                            &internal_arena,
+                            &mut timer,
+                            &mut console,
+                        );
+                        internal_arena.reset();
+                        let _ = writeln!(
+                            console,
+                            "ETH RUN DONE {:?} stack={:?}",
+                            result,
+                            hal::memory::stack_usage()
+                        );
+                    }
+                    #[cfg(not(feature = "eth-lab"))]
+                    {
+                        let _ = seconds;
+                        let _ = writeln!(console, "ETH RUN DONE Err(build eth-lab)");
+                    }
+                } else if line == "eth-probe" {
+                    #[cfg(feature = "eth-lab")]
+                    {
+                        let result = ethernet_probe(&mut timer, &mut console);
+                        let _ = writeln!(console, "ETH PROBE DONE {:?}", result);
+                    }
+                    #[cfg(not(feature = "eth-lab"))]
+                    let _ = writeln!(console, "ETH PROBE DONE Err(build eth-lab)");
+                } else if line.starts_with("format-sd") {
+                    if !cfg!(feature = "sd-format") || cfg!(feature = "audio-lab") || camera_live {
+                        let _ = writeln!(console, "SD FORMAT DONE Err(state/build)");
+                        continue;
+                    }
+                    if line != "format-sd" && line != "format-sd FAT32 ERASE" {
+                        let _ = writeln!(console, "SD FORMAT DONE Err(use format-sd FAT32 ERASE)");
+                        continue;
+                    }
+                    let erase = line == "format-sd FAT32 ERASE";
+                    let result = sd_format(erase, &mut timer, &mut console);
+                    let _ = writeln!(
+                        console,
+                        "SD FORMAT DONE {:?} stack={:?}",
+                        result,
+                        hal::memory::stack_usage()
+                    );
+                } else if line == "wav-lab"
                     || line == "wav-lab-stall"
                     || line == "wav-lab-control"
                     || line == "wav-lab-repeat"
@@ -259,7 +314,10 @@ extern "C" fn rust_main() -> ! {
                     {
                         let _ = writeln!(console, "WAV LAB DONE Err(build audio-lab)");
                     }
-                } else if !cfg!(feature = "audio-lab") && line == "mixed-stress" {
+                } else if !cfg!(feature = "audio-lab")
+                    && !cfg!(any(feature = "sd-format", feature = "eth-lab"))
+                    && line == "mixed-stress"
+                {
                     if camera_live || !scanout_active {
                         let _ = writeln!(console, "MIXED DONE Err(state)");
                         continue;
@@ -273,7 +331,10 @@ extern "C" fn rust_main() -> ! {
                         framebuffer.as_ref().unwrap().guards_ok(),
                         hal::memory::stack_usage()
                     );
-                } else if !cfg!(feature = "audio-lab") && line == "sd-stress" {
+                } else if !cfg!(feature = "audio-lab")
+                    && !cfg!(any(feature = "sd-format", feature = "eth-lab"))
+                    && line == "sd-stress"
+                {
                     if camera_live || !scanout_active {
                         let _ = writeln!(console, "SD STRESS DONE Err(state)");
                         continue;
@@ -507,7 +568,7 @@ extern "C" fn rust_main() -> ! {
                     );
                 } else if let Some(path) = line
                     .strip_prefix("jpeg-idct-bench ")
-                    .filter(|_| !cfg!(feature = "audio-lab"))
+                    .filter(|_| !cfg!(any(feature = "audio-lab", feature = "eth-lab")))
                 {
                     if camera_live || !scanout_active || framebuffer.is_none() {
                         let _=writeln!(console,"JPEG IDCT DONE Err(requires active framebuffer, camera off; use --image first)");
@@ -528,7 +589,7 @@ extern "C" fn rust_main() -> ! {
                     );
                 } else if let Some(path) = line
                     .strip_prefix("jpeg-profile ")
-                    .filter(|_| !cfg!(feature = "audio-lab"))
+                    .filter(|_| !cfg!(any(feature = "audio-lab", feature = "eth-lab")))
                 {
                     if camera_live || !scanout_active || framebuffer.is_none() {
                         let _=writeln!(console,"JPEG PROFILE DONE Err(requires active framebuffer, camera off; use --image first)");
@@ -549,7 +610,7 @@ extern "C" fn rust_main() -> ! {
                     );
                 } else if let Some(path) = line
                     .strip_prefix("jpeg-bench ")
-                    .filter(|_| !cfg!(feature = "audio-lab"))
+                    .filter(|_| !cfg!(any(feature = "audio-lab", feature = "eth-lab")))
                 {
                     if camera_live || !scanout_active || framebuffer.is_none() {
                         let _=writeln!(console,"JPEG BENCH DONE Err(requires active framebuffer, camera off; use --image first)");
@@ -698,7 +759,7 @@ extern "C" fn rust_main() -> ! {
                 let _ = esp32_p4::devices::ov02c10::stream(&mut i2c, &mut timer, false);
                 camera_live = false;
                 let _ = writeln!(console, "CMD O camera stopped");
-            } else if !cfg!(feature = "audio-lab") && command == b'p' {
+            } else if !cfg!(any(feature = "audio-lab", feature = "eth-lab")) && command == b'p' {
                 let result = audio_tone(&mut i2c, &mut timer, &mut console);
                 let _ = writeln!(console, "CMD p {:?}", result);
             } else if !cfg!(feature = "audio-lab") && command == b'!' {
@@ -710,16 +771,16 @@ extern "C" fn rust_main() -> ! {
             } else if !cfg!(feature = "audio-lab") && command == b'Y' {
                 let result = sdmmc_info(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD Y {:?}", result);
-            } else if !cfg!(feature = "audio-lab") && command == b'#' {
+            } else if !cfg!(any(feature = "audio-lab", feature = "eth-lab")) && command == b'#' {
                 let result = sdmmc_multi_write_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD # {:?}", result);
-            } else if !cfg!(feature = "audio-lab") && command == b'@' {
+            } else if !cfg!(any(feature = "audio-lab", feature = "eth-lab")) && command == b'@' {
                 let result = sdmmc_write_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD @ {:?}", result);
-            } else if !cfg!(feature = "audio-lab") && command == b'm' {
+            } else if !cfg!(any(feature = "audio-lab", feature = "eth-lab")) && command == b'm' {
                 let result = sdmmc_multi_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD m {:?}", result);
-            } else if !cfg!(feature = "audio-lab") && command == b'M' {
+            } else if !cfg!(any(feature = "audio-lab", feature = "eth-lab")) && command == b'M' {
                 let result = sdmmc_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD M {:?}", result);
             } else if command == b'Q' {
@@ -1381,6 +1442,77 @@ type FsProbeError =
     esp32_p4::storage::Error<esp32_p4::storage::Error<esp32_p4::storage::sd::Error>>;
 
 const BOARD_CONFIG: &[u8] = b"# ESP32-P4 board configuration\n[display]\nbrightness_percent=25\n[camera]\nenabled=false\n[storage]\nbus_width=4\nclock_hz=50000000\n";
+
+#[inline(never)]
+fn sd_format(
+    erase: bool,
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<(), FsProbeError> {
+    use esp32_p4::storage::{
+        fat32::Fat32,
+        format,
+        sd::{Error as SdError, SdDevice},
+        Error, Partition,
+    };
+    let transport_error = |error| Error::Device(Error::Device(SdError::Card(error)));
+    let mut card = unsafe { hal::sdmmc::Sdmmc::new(timer) }.map_err(transport_error)?;
+    card.configure_bus(timer).map_err(transport_error)?;
+    let plan = format::Plan::new(card.info.sectors).map_err(Error::Unsupported)?;
+    let _ = writeln!(
+        console,
+        "SD FORMAT PLAN sectors={} start={} cluster_bytes={} FAT_sectors={}",
+        plan.sectors,
+        plan.start,
+        u32::from(plan.sectors_per_cluster) * 512,
+        plan.fat_sectors
+    );
+    if !erase {
+        let _ = writeln!(
+            console,
+            "SD FORMAT PREVIEW; erase SD: :format-sd FAT32 ERASE"
+        );
+        return Ok(());
+    }
+    let volume_id = timer.now_us() as u32;
+    let started = timer.now_us();
+    {
+        let mut device = SdDevice::new(card, timer);
+        let scratch = unsafe { sd_probe_buffer() };
+        let mut next_report = 0;
+        format::quick_format(&mut device, scratch, volume_id, |done, total| {
+            if done >= next_report || done == total {
+                let _ = writeln!(console, "SD FORMAT metadata_sectors={}/{}", done, total);
+                next_report = done.saturating_add(8192);
+            }
+        })
+        .map_err(Error::Device)?;
+        let partition = Partition::mbr(device, 0).map_err(Error::Device)?;
+        let mut fs = Fat32::mount(partition)?;
+        let _ = writeln!(
+            console,
+            "SD FORMAT MOUNT clusters={}",
+            fs.geometry().clusters
+        );
+        let mut entries = 0;
+        fs.read_dir("/", |_| {
+            entries += 1;
+            true
+        })?;
+        if entries != 0 {
+            return Err(Error::Invalid("root not empty"));
+        }
+    }
+    let _ = writeln!(
+        console,
+        "SD FORMAT metadata_us={}",
+        timer.now_us() - started
+    );
+    if !sd_config_probe(timer, console)? {
+        return Err(Error::Invalid("formatted CONFIG.TXT verification"));
+    }
+    Ok(())
+}
 
 #[inline(never)]
 fn sd_config_probe(
@@ -2695,5 +2827,167 @@ fn mixed_stress(
     {
         return Err("timing");
     }
+    Ok(())
+}
+
+#[cfg(feature = "eth-lab")]
+fn ethernet_probe(
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<(), hal::ethernet::Error> {
+    let mut mdio = unsafe { hal::ethernet::Mdio::new() };
+    let _ = writeln!(console, "ETH MAC version={:08x}", mdio.version());
+    let mut found = 0;
+    for addr in 0..32 {
+        let id1 = mdio.read(addr, 2, timer)?;
+        let id2 = mdio.read(addr, 3, timer)?;
+        if id1 == 0xffff || (id1 == 0 && id2 == 0) {
+            continue;
+        }
+        found += 1;
+        let control = mdio.read(addr, 0, timer)?;
+        let _ = mdio.read(addr, 1, timer)?; // BMSR link is latch-low.
+        let status = mdio.read(addr, 1, timer)?;
+        let advertise = mdio.read(addr, 4, timer)?;
+        let partner = mdio.read(addr, 5, timer)?;
+        let _=writeln!(console,"ETH PHY addr={} ID={:04x}:{:04x} BMCR={:04x} BMSR={:04x} ANAR={:04x} ANLPAR={:04x} link={} autoneg_done={}",addr,id1,id2,control,status,advertise,partner,status&4!=0,status&32!=0);
+    }
+    let _ = writeln!(console, "ETH PHY found={}", found);
+    Ok(())
+}
+
+#[cfg(feature = "eth-lab")]
+fn ethernet_run(
+    seconds: u32,
+    arena: &esp32_p4::memory::Arena<'_, esp32_p4::memory::Internal>,
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+) -> Result<(), hal::ethernet::Error> {
+    use esp32_p4::net;
+    let mut mdio = unsafe { hal::ethernet::Mdio::new() };
+    let _ = mdio.read(1, 1, timer)?;
+    let status = mdio.read(1, 1, timer)?;
+    let common = mdio.read(1, 4, timer)? & mdio.read(1, 5, timer)?;
+    if status & 0x24 != 0x24 || common & 0x100 == 0 {
+        return Err(hal::ethernet::Error::Address);
+    }
+    let xid = timer.now_us() as u32;
+    let mut emac = unsafe { hal::ethernet::Emac::start(arena, timer, net::MAC) }?;
+    let _ = writeln!(
+        console,
+        "ETH START MAC={:02x?} status={:08x?} seconds={} ESC=stop",
+        net::MAC,
+        emac.status(),
+        seconds
+    );
+    let mut rx = [0u8; net::FRAME];
+    let mut tx = [0u8; net::FRAME];
+    let mut offer = None;
+    let mut lease: Option<net::Lease> = None;
+    let mut received = 0u32;
+    let mut sent = 0u32;
+    let mut rx_errors = 0u32;
+    let mut arp = 0u32;
+    let mut echo = 0u32;
+    let mut attempts = 0;
+    let started = emac.now_us();
+    let mut next = started;
+    let mut expires = u64::MAX;
+    while emac.now_us() - started < u64::from(seconds) * 1_000_000 {
+        if console.read_byte() == Some(0x1b) {
+            break;
+        }
+        let now = emac.now_us();
+        if now >= expires {
+            let _ = writeln!(
+                console,
+                "ETH DHCP lease expired; stop (renewal not implemented)"
+            );
+            break;
+        }
+        if lease.is_none() && now >= next && attempts < 10 {
+            let n = net::dhcp(&mut tx, xid, offer);
+            emac.transmit(&tx[..n])?;
+            sent += 1;
+            attempts += 1;
+            next = now + 3_000_000;
+            let _ = writeln!(
+                console,
+                "ETH DHCP {} attempt={}",
+                if offer.is_some() {
+                    "REQUEST"
+                } else {
+                    "DISCOVER"
+                },
+                attempts
+            );
+        }
+        let n = match emac.receive(&mut rx) {
+            Ok(Some(n)) => n,
+            Ok(None) => continue,
+            Err(hal::ethernet::Error::Frame(_)) => {
+                rx_errors += 1;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        received += 1;
+        if received <= 10 {
+            let _ = writeln!(
+                console,
+                "ETH RX n={} type={:02x}{:02x} src={:02x?}",
+                n,
+                rx[12],
+                rx[13],
+                &rx[6..12]
+            );
+        }
+        if let Some((kind, reply)) = net::dhcp_reply(&rx[..n], xid) {
+            if kind == 2
+                && lease.is_none()
+                && offer.is_none()
+                && reply.address != [0; 4]
+                && reply.server != [0; 4]
+            {
+                offer = Some(reply);
+                next = now;
+                attempts = 0;
+                let _ = writeln!(console, "ETH DHCP OFFER {:?}", reply);
+            } else if kind == 5
+                && lease.is_none()
+                && reply.seconds != 0
+                && offer
+                    .is_some_and(|old| old.address == reply.address && old.server == reply.server)
+            {
+                lease = Some(reply);
+                expires = now + u64::from(reply.seconds) * 1_000_000;
+                let a = reply.address;
+                let _ = writeln!(
+                    console,
+                    "ETH DHCP BOUND IP={}.{}.{}.{} {:?}",
+                    a[0], a[1], a[2], a[3], reply
+                );
+            } else if kind == 6
+                && lease.is_none()
+                && offer.is_some_and(|old| old.server == reply.server)
+            {
+                offer = None;
+                next = now + 3_000_000;
+            }
+        }
+        if let Some(lease) = lease {
+            if let Some(n) = net::reply(&rx[..n], lease.address, &mut tx) {
+                emac.transmit(&tx[..n])?;
+                sent += 1;
+                if tx[12..14] == [8, 6] {
+                    arp += 1;
+                } else {
+                    echo += 1;
+                }
+            }
+        }
+    }
+    let _=writeln!(console,"ETH SUMMARY rx={} tx={} rx_errors={} arp_replies={} echo_replies={} lease={:?} status={:08x?}",received,sent,rx_errors,arp,echo,lease,emac.status());
+    drop(emac); // Confirm DMA stop before caller resets the arena.
     Ok(())
 }

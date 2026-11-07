@@ -60,6 +60,16 @@ Current boot defaults remain all-bypass; runtime experiments are opt-in.
   PSRAM, возобновление потока, передача копии по USB. Передача всех пикселей
   проверена на эталонных RGB-полосах.
 
+- Ethernet: IP101 family addr1 ID0243:0c54, RMII external 50MHz, 100/full;
+  собственный MAC DMA, DHCP/ARP/ICMP проверены. Финальный образ выдержал 1000 ping
+  и отдельный повтор со 100 MTU + 100 разных payload без потерь/DUP/RX errors.
+  D-cache OFF/L2=0; только явный timed `eth-lab` run, не фоновая служба,
+  TCP/HTTP/fileserver ещё нет. [Команды и ограничения](ethernet.md).
+- SDXC 250.20 GB проверена на борде: 4-bit/50 MHz, read-only сравнения начала,
+  середины и конца совпали. Собственный quick formatter (`sd-format` build)
+  создал MBR/FAT32 за 19.075 s, 32 KiB clusters, две FAT, backup VBR/FSInfo;
+  CONFIG.TXT создан и проверен после remount и аппаратного reset.
+  [Команды и ограничения форматирования](filesystem.md#явное-форматирование-sd).
 - Native SDMMC slot 0: SDHC 8.01 GB, SDIO PLL200, 4-bit/25 MHz и согласованный High Speed 50 MHz. Чтение и запись секторов
   через собственный IDMAC SDMMC с cache sync, проверены MBR/FAT32 WEBRADIO,
   повторное чтение и write/read/restore последнего сектора. Чтение около
@@ -110,11 +120,14 @@ Current boot defaults remain all-bypass; runtime experiments are opt-in.
 
 ## Известные проблемы и незавершённое
 
-- SDMMC/FAT32: нужны изменение существующих файлов, потоковая запись/append,
+- SDMMC/FAT32: потоковое создание готово (`create_stream/write/finish/abort`,
+  512 B edge buffer), frontend serializes PUT and rejects unsupported names.
+  TCP/HTTP PUT пока не подключён. Нужны изменение существующих файлов и append,
   удаление, расширение каталогов, длинные имена, несколько открытых файлов,
   полноценный файловый бенчмарк и обработка извлечения карты.
-  В текущем API один File эксклюзивно заимствует том; create_new принимает
-  содержимое целиком. Журналирования/автоматического восстановления нет.
+  File/FileWriter эксклюзивно заимствуют том; readonly SharedFile cursors уже
+  реализованы. create_new — обёртка над stream writer.
+  Журналирования/автоматического восстановления нет.
 
 
 **Камера пока даёт очень тёмное изображение даже при ярком освещении комнаты.**

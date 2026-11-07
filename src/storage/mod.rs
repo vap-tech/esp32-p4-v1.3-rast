@@ -1,5 +1,6 @@
 //! Filesystems over bounded sector I/O. No allocator, hardware or runtime required.
 pub mod fat32;
+pub mod format;
 pub mod sd;
 
 pub const SECTOR_SIZE: usize = 512;

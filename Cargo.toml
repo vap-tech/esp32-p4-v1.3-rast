@@ -8,6 +8,10 @@ edition = "2021"
 l2-128 = []
 # Long WAV/JPEG capture diagnostics; omit legacy bench commands to bound code size.
 audio-lab = []
+# Explicit formatting tool image; excludes mixed/SD soak commands to bound code size.
+sd-format = []
+# Ethernet bring-up image; excludes legacy mixed/SD soak commands.
+eth-lab = []
 
 [dependencies]
 

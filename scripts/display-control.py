@@ -18,6 +18,10 @@ parser.add_argument('--play', nargs='?', const='SATIE.WAV', metavar='PATH', help
 parser.add_argument('--seconds', type=float, help='stop playback after this many seconds')
 parser.add_argument('--stop', action='store_true', help='stop ongoing SD audio playback')
 parser.add_argument('--memory', action='store_true', help='report memory/cache configuration')
+parser.add_argument('--sd-format-info', action='store_true', help='preview whole-card FAT32 geometry without writing')
+parser.add_argument('--format-sd', action='store_true', help='ERASE all SD partitions; quick-format FAT32 and create/verify CONFIG.TXT')
+parser.add_argument('--eth-probe', action='store_true', help='read PHY IDs/link over MDIO (eth-lab build)')
+parser.add_argument('--eth-run', type=int, metavar='SECONDS', help='poll Ethernet DHCP/ARP/ping for 1..600 seconds (eth-lab, D-cache OFF)')
 parser.add_argument('--memory-test', action='store_true', help='destructive full PSRAM test before framebuffer initialization')
 parser.add_argument('--memory-bench', action='store_true', help='benchmark SRAM/PSRAM scratch buffers; preserves display pixels')
 parser.add_argument('--jpeg-bench', nargs='?', const='HOME.JPG', metavar='PATH', help='compare JPEG decode with framebuffer writes vs checksum only (ABBA)')
@@ -38,6 +42,8 @@ parser.add_argument('--wav-lab-repeat', action='store_true', help='inject one re
 args = parser.parse_args()
 if args.seconds is not None and (args.seconds <= 0 or args.play is None):
     parser.error('--seconds requires --play and a positive duration')
+if args.eth_run is not None and not 1 <= args.eth_run <= 600:
+    parser.error('--eth-run requires 1..600 seconds')
 for path in (args.image, args.play, args.jpeg_bench, args.jpeg_profile, args.jpeg_idct_bench, args.play_stall):
     if path is not None and (not path or not path.isascii() or any(c.isspace() for c in path) or len(path) > 80):
         parser.error('media paths must be ASCII without whitespace, at most 80 characters (FAT32 8.3 components)')
@@ -99,6 +105,25 @@ try:
         line = receive(b'ICACHE DONE', timeout=10)
         if b'Err(' in line:
             raise SystemExit('I-cache transition failed')
+    if args.eth_probe:
+        os.write(fd, b':eth-probe\n')
+        line = receive(b'ETH PROBE DONE', timeout=10)
+        if b'Err(' in line:
+            raise SystemExit('Ethernet PHY probe failed')
+    if args.eth_run is not None:
+        os.write(fd, (':eth-run ' + str(args.eth_run) + '\n').encode('ascii'))
+        try:
+            line = receive(b'ETH RUN DONE', timeout=args.eth_run + 15)
+        except KeyboardInterrupt:
+            os.write(fd, b'\x1b')
+            line = receive(b'ETH RUN DONE', timeout=5)
+        if b'Err(' in line or b'guard_ok: false' in line:
+            raise SystemExit('Ethernet run failed')
+    if args.sd_format_info or args.format_sd:
+        os.write(fd, b':format-sd FAT32 ERASE\n' if args.format_sd else b':format-sd\n')
+        line = receive(b'SD FORMAT DONE', timeout=300)
+        if b'Err(' in line or b'guard_ok: false' in line:
+            raise SystemExit('SD format failed')
     if args.l2_probe:
         os.write(fd, b':l2-probe\n')
         line = receive(b'L2 PROBE DONE', timeout=10)

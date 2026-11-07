@@ -26,7 +26,7 @@
 | Аудиокодек | **ES8311**, аналоговый микрофон → ADC, DAC → динамик | Код voice |
 | RTC | **RX8025T**, резервное питание от батареи по описи | В voice есть чтение регистров RTC |
 | Камера | **OV02C10**, ID `0x5602`, MIPI-CSI по описи | В voice есть чтение ID, но нет захвата изображения |
-| Ethernet | RJ45, 100 Мбит/с по описи | Модель PHY, адрес и соединения неизвестны |
+| Ethernet | RMII, PHY IC Plus IP101 family, MDIO address 1, ID `0243:0c54` | MDIO, DHCP и двунаправленный обмен проверены на борде |
 
 ## Сводная распиновка GPIO
 
@@ -50,6 +50,10 @@
 | 20 | PA только по старой описи I_W; также указан USB FS D+ | На нашем экземпляре для PA не используется | Проба с PA20 молчала, PA11 подтверждён звуком |
 | 23 | LCD backlight PWM | Выход на управление подсветкой | Код |
 | 27 | LCD RESET | Выход на сброс JD9165 | Код |
+| 28 | Ethernet CRS_DV | PHY → P4 | Схема и RX на борде |
+| 29 / 30 | Ethernet RXD0 / RXD1 | PHY → P4 | Схема и RX на борде |
+| 31 | Ethernet MDC | P4 → PHY | MDIO scan на борде |
+| 34 / 35 | Ethernet TXD0 / TXD1 | P4 → PHY | Схема и TX на борде |
 | 37 | Console UART I/O | TX или RX — порядок неизвестен | Опись |
 | 38 | Console UART I/O | TX или RX — порядок неизвестен | Опись |
 | 39 | SDMMC D0 / SDSPI MISO | microSD | Опись |
@@ -59,6 +63,10 @@
 | 43 | SDMMC CLK / SDSPI CLK | microSD | Опись |
 | 44 | SDMMC CMD / SDSPI MOSI | microSD | Опись |
 | 48 | I2S1 DIN | ES8311 ADC → P4, микрофон | Код voice |
+| 49 | Ethernet TX_EN | P4 → PHY | Схема и TX на борде |
+| 50 | Ethernet REF_CLK | 50 MHz, PHY → P4 | Схема и RMII на борде |
+| 51 | Ethernet PHY_RSTN | P4 → PHY | Только схема, reset не проверен |
+| 52 | Ethernet MDIO | Двунаправленный | PHY ID и link registers прочитаны |
 | 54 | C6 RESET | P4 → ESP32-C6 | Опись |
 
 Отсутствие GPIO в таблице не означает, что он свободен. Распиновка flash/PSRAM, выделенных линий MIPI/USB HS и остальных узлов здесь не восстановлена.
@@ -176,7 +184,29 @@ GID1/GID2 — прикладные протоколы удалённого ди�
 
 **RTC:** voice читает RX8025T на `0x32`; опись сообщает VLF=0, VDET=0 и сохранение времени при перезапуске. Исходного тестового лога нет. INT/выходы RTC и схема батареи неизвестны. Часы интерфейса voice синхронизируются через SNTP; наличие RTC не означает, что приложение использует его как источник времени.
 
-**Ethernet:** известны лишь упоминания RJ45 и 100 Мбит/с в описях. PHY, MDC/MDIO, RMII-сигналы, reset, clock и адрес PHY не найдены. Драйвера Ethernet в приложениях нет.
+**Ethernet (проверено 2026-11-07):** PHY IC Plus IP101 family, MDIO address 1,
+ID `0243:0c54` (OUI `0090c3`, model 5, revision 4). BMCR=`3100`, BMSR=`786d`,
+ANAR=`01e1`, ANLPAR=`dde1`: link/autoneg complete, common 100M full duplex.
+MAC version=`00001137`. Имеет собственный DMA, это не GDMA-AHB/AXI channel.
+
+Пины найдены в локальной схеме `old/datasheets/vendor-search/JC1060P470C_I_W_Y-V1.0.pdf`
+и подтверждены чтением PHY и реальным RX/TX (кроме reset, который не трогали):
+
+| Сигнал | GPIO | Направление относительно P4 |
+|---|---:|---|
+| MDC | 31 | Output через GPIO matrix signal 108 |
+| MDIO | 52 | Bidirectional, matrix input 107 / output 109 |
+| CRS_DV | 28 | Input, IOMUX function 3 |
+| RXD0 / RXD1 | 29 / 30 | Input, IOMUX function 3 |
+| TXD0 / TXD1 | 34 / 35 | Output, IOMUX function 3 |
+| TX_EN | 49 | Output, IOMUX function 3 |
+| REF_CLK | 50 | Input 50 MHz от PHY, IOMUX function 3 |
+| PHY_RSTN | 51 | По схеме; управление reset пока не проверялось |
+
+На PHY есть собственный 25-MHz кварц; RMII тактируется внешними 50 MHz, MPLL
+для Ethernet не перенастраивается. Схема содержит отличия от нашей ревизии
+в других подсистемах (например, LCD reset), поэтому остальные её цепи нельзя
+считать автоматически подтверждёнными. [Драйвер и ограничения](docs/ethernet.md).
 
 ## Разъёмы, кнопки и питание
 
