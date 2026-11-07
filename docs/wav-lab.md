@@ -32,11 +32,11 @@ python3 scripts/display-control.py --wav-lab-stall
 python3 scripts/display-control.py --wav-lab-control
 ```
 
-`audio-lab` — отдельный диагностический feature для ограничения размера кода.
-В нём отсутствуют старые bench/SD probe/write/tone/play команды; обычные image,
-cache controls и wav-lab доступны. Default build сохраняет прежние команды.
-Камера не запускалась, её драйвер не менялся. Тест требует активный framebuffer,
-выключенную камеру и пустую внутреннюю арену.
+`audio-lab` — необязательный feature для continuous I2S RX capture tests.
+С 2026-11-08 stage-2 image сохраняет все обычные команды; feature добавляет
+continuous RX capture diagnostics без размерных исключений. DMA allocations
+берутся из отдельной нижней арены 152 KiB. Камера не запускалась, её драйвер не менялся. Тест требует активный framebuffer,
+выключенную камеру и пустую DMA-арену.
 
 SATIE.WAV — PCM16 mono 16 kHz, раздаётся в оба I2S16 slots; HOME.JPG — baseline
 1024×600. Тест декодирует JPEG до истечения минуты, заканчивая текущий кадр.

@@ -7,7 +7,7 @@ Bare-metal Rust, без зависимостей, RTOS, allocator и IRQ. `hal::
 ## Запуск
 
 ```sh
-./scripts/image.sh --features eth-lab
+./scripts/image.sh
 espflash write-bin --port /dev/ttyACM0 0x2000 target/firmware.bin
 python3 scripts/display-control.py --icache on --dcache off --eth-probe
 python3 scripts/display-control.py --eth-run 120
@@ -23,11 +23,10 @@ PHY сохраняет физический линк. Это ограничен�
 сервера, IPv6, VLAN, фрагментации IP и DHCP renewal/rebinding пока нет.
 При истечении DHCP lease run прекращается, адрес дальше не используется.
 
-`eth-lab` исключает старые JPEG bench/profile/IDCT-bench, SD raw read/write
-bench/probe M/m/#/@, tone p и mixed/SD soak ради размера code region.
-Обычные image/play, Y PHY-independent SD capabilities, Z FAT32 read-only,
-! CONFIG.TXT сохраняются. Default, `sd-format` и `audio-lab` — отдельные образы;
-аппаратная карта памяти и SRAM-арена не менялись. Не смешивать lab features.
+С 2026-11-08 Ethernet входит в обычный stage-2 образ. Размерный feature eth-lab
+удалён; JPEG/SD bench, tone, image/play и форматирование доступны вместе.
+Дескрипторы и буферы Ethernet берутся из отдельного нижнего DMA-пула 152 KiB.
+[Загрузка и актуальная карта памяти](stage2-boot.md).
 
 ## PHY и часы
 

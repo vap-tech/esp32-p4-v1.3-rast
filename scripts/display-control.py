@@ -20,8 +20,8 @@ parser.add_argument('--stop', action='store_true', help='stop ongoing SD audio p
 parser.add_argument('--memory', action='store_true', help='report memory/cache configuration')
 parser.add_argument('--sd-format-info', action='store_true', help='preview whole-card FAT32 geometry without writing')
 parser.add_argument('--format-sd', action='store_true', help='ERASE all SD partitions; quick-format FAT32 and create/verify CONFIG.TXT')
-parser.add_argument('--eth-probe', action='store_true', help='read PHY IDs/link over MDIO (eth-lab build)')
-parser.add_argument('--eth-run', type=int, metavar='SECONDS', help='poll Ethernet DHCP/ARP/ping for 1..600 seconds (eth-lab, D-cache OFF)')
+parser.add_argument('--eth-probe', action='store_true', help='read PHY IDs/link over MDIO')
+parser.add_argument('--eth-run', type=int, metavar='SECONDS', help='poll Ethernet DHCP/ARP/ping for 1..600 seconds (D-cache OFF)')
 parser.add_argument('--memory-test', action='store_true', help='destructive full PSRAM test before framebuffer initialization')
 parser.add_argument('--memory-bench', action='store_true', help='benchmark SRAM/PSRAM scratch buffers; preserves display pixels')
 parser.add_argument('--jpeg-bench', nargs='?', const='HOME.JPG', metavar='PATH', help='compare JPEG decode with framebuffer writes vs checksum only (ABBA)')
@@ -75,6 +75,13 @@ try:
                 sys.stdout.buffer.write(data)
                 sys.stdout.buffer.flush()
                 pending.extend(data)
+                if until == b'DISPLAY commands:':
+                    boot_errors = {b'!H': 'invalid stage-2 header/layout',
+                                   b'!R': 'Flash read failed', b'!C': 'stage-2 CRC mismatch',
+                                   b'!W': 'cache writeback timeout', b'!T': 'trap in bootstrap'}
+                    reason = boot_errors.get(bytes(pending[:2]))
+                    if reason:
+                        raise RuntimeError('Bootstrap: ' + reason)
                 while b'\n' in pending:
                     line, _, tail = pending.partition(b'\n')
                     pending[:] = tail

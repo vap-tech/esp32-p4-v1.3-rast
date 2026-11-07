@@ -6,12 +6,8 @@ edition = "2021"
 [features]
 # Experimental rev1.x layout; not a runtime memory-size toggle.
 l2-128 = []
-# Long WAV/JPEG capture diagnostics; omit legacy bench commands to bound code size.
+# Optional continuous I2S RX capture diagnostics.
 audio-lab = []
-# Explicit formatting tool image; excludes mixed/SD soak commands to bound code size.
-sd-format = []
-# Ethernet bring-up image; excludes legacy mixed/SD soak commands.
-eth-lab = []
 
 [dependencies]
 

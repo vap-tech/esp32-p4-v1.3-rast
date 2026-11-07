@@ -1,5 +1,18 @@
 # Состояние проекта — 2026-11-06
 
+## Обновление 2026-11-08: stage-2 SRAM loader
+
+ROM загружает только SPM bootstrap. Runtime code/rodata/data читаются из Flash
+после настройки SRAM/L2 и проверяются CRC32; BSS затем обнуляется. Верхняя
+рабочая арена начинается за статикой, нижние 152 KiB — отдельный DMA pool.
+В default приблизительно 314 KiB work + 152 KiB DMA свободно; fixed CODE=132 KiB
+удалён. SRAM health-test и boot clock before/after experiment удалены, runtime
+clock command сохранён. Ethernet/format и все обычные команды в одном образе,
+features eth-lab/sd-format больше нет. [Карта, формат, проверки](stage2-boot.md).
+
+Ниже сохранены результаты предыдущих этапов; исторические размеры арены и образов
+не являются текущей картой размещения.
+
 ## Live WAV + JPEG + LCD with digital verification
 
 One SD/FAT32 volume now supports independent readonly SharedFile cursors.
@@ -63,10 +76,10 @@ Current boot defaults remain all-bypass; runtime experiments are opt-in.
 - Ethernet: IP101 family addr1 ID0243:0c54, RMII external 50MHz, 100/full;
   собственный MAC DMA, DHCP/ARP/ICMP проверены. Финальный образ выдержал 1000 ping
   и отдельный повтор со 100 MTU + 100 разных payload без потерь/DUP/RX errors.
-  D-cache OFF/L2=0; только явный timed `eth-lab` run, не фоновая служба,
+  D-cache OFF/L2=0; только явный timed Ethernet run, не фоновая служба,
   TCP/HTTP/fileserver ещё нет. [Команды и ограничения](ethernet.md).
 - SDXC 250.20 GB проверена на борде: 4-bit/50 MHz, read-only сравнения начала,
-  середины и конца совпали. Собственный quick formatter (`sd-format` build)
+  середины и конца совпали. Собственный quick formatter (обычный образ)
   создал MBR/FAT32 за 19.075 s, 32 KiB clusters, две FAT, backup VBR/FSInfo;
   CONFIG.TXT создан и проверен после remount и аппаратного reset.
   [Команды и ограничения форматирования](filesystem.md#явное-форматирование-sd).

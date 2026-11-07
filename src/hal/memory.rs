@@ -29,7 +29,80 @@ pub fn cache_snapshot() -> CacheSnapshot {
     }
 }
 
-pub const INTERNAL_START: usize = 0x4ff4_0000;
+pub const UPPER_BASE: usize = 0x4ff4_0000;
+pub const DMA_START: usize = 0x4ff0_0000;
+pub const DMA_END: usize = 0x4ff2_6000;
+
+#[cfg(target_arch = "riscv32")]
+extern "C" {
+    static _entry_start: u8;
+    static _entry_end: u8;
+    static _upper_start: u8;
+    static _upper_text_end: u8;
+    static _upper_rodata_end: u8;
+    static _upper_load_end: u8;
+    static _bss_start: u8;
+    static _bss_end: u8;
+    static _internal_start: u8;
+    static _internal_end: u8;
+    static _stack_bottom: u8;
+    static _stack_top: u8;
+    static _dma_start: u8;
+    static _dma_end: u8;
+}
+// Linker aliases may share an address. Keep LLVM from treating distinct
+// extern statics as necessarily distinct Rust objects when checking boundaries.
+#[cfg(target_arch = "riscv32")]
+#[inline]
+fn symbol_address(symbol: *const u8) -> usize {
+    core::hint::black_box(symbol as usize)
+}
+/// First free byte after stage-2 code, constants and statics (64-byte aligned).
+pub fn internal_start() -> usize {
+    #[cfg(target_arch = "riscv32")]
+    {
+        symbol_address(core::ptr::addr_of!(_internal_start))
+    }
+    #[cfg(not(target_arch = "riscv32"))]
+    {
+        UPPER_BASE
+    }
+}
+#[derive(Debug)]
+pub struct Layout {
+    pub bootstrap_bytes: usize,
+    pub runtime_start: usize,
+    pub text_bytes: usize,
+    pub rodata_bytes: usize,
+    pub data_bytes: usize,
+    pub bss_bytes: usize,
+    pub work_start: usize,
+    pub work_bytes: usize,
+    pub dma_bytes: usize,
+    pub stack_bytes: usize,
+}
+#[cfg(target_arch = "riscv32")]
+pub fn layout() -> Layout {
+    let start = symbol_address(core::ptr::addr_of!(_upper_start));
+    let text = symbol_address(core::ptr::addr_of!(_upper_text_end));
+    let rodata = symbol_address(core::ptr::addr_of!(_upper_rodata_end));
+    let end = symbol_address(core::ptr::addr_of!(_upper_load_end));
+    let bss = symbol_address(core::ptr::addr_of!(_bss_start));
+    let bss_end = symbol_address(core::ptr::addr_of!(_bss_end));
+    Layout {
+        bootstrap_bytes: symbol_address(core::ptr::addr_of!(_entry_end))
+            - symbol_address(core::ptr::addr_of!(_entry_start)),
+        runtime_start: start,
+        text_bytes: text - start,
+        rodata_bytes: rodata - text,
+        data_bytes: end - rodata,
+        bss_bytes: bss_end - bss,
+        work_start: internal_start(),
+        work_bytes: STACK_START - internal_start(),
+        dma_bytes: DMA_END - DMA_START,
+        stack_bytes: STACK_BYTES,
+    }
+}
 pub const L2_SIZE_REGISTER: u32 = if cfg!(feature = "l2-128") { 0x200 } else { 0 };
 pub const INTERNAL_END: usize = if cfg!(feature = "l2-128") {
     0x4ffa_0000
@@ -42,17 +115,19 @@ pub const STACK_PATTERN: u32 = 0xa55a_6996;
 #[derive(Debug)]
 pub enum Error {
     CacheLayout(u32),
+    RegionLayout,
     Mismatch {
         address: usize,
         expected: u32,
         actual: u32,
     },
 }
-/// Verify the available upper SRAM banks before switching away from the ROM-safe boot stack.
+/// Check the configured SRAM/cache partition and initialize the runtime stack.
+/// No writes to the arena or image data; the bring-up destructive test is retired.
 /// # Safety
-/// Single core, interrupts disabled, no use of upper SRAM yet. Must run exactly
-/// once before any allocation, high-stack use or DMA accessing this region.
-pub unsafe fn init_upper_sram() -> Result<(), Error> {
+/// Single core, interrupts disabled. Call once on the boot stack before switching
+/// SP to the reserved runtime stack. No other owner may access that stack yet.
+pub unsafe fn init_runtime_memory() -> Result<(), Error> {
     let cache = cache_snapshot();
     if cache.l2_size != L2_SIZE_REGISTER
         || cache.l1_bypass & 0x13 != 0x13
@@ -60,31 +135,33 @@ pub unsafe fn init_upper_sram() -> Result<(), Error> {
     {
         return Err(Error::CacheLayout(cache.l2_size));
     }
-    // Work through the uncached SRAM alias so the memory test reaches physical RAM.
-    for salt in [0x5731_a6c9, 0xa8ce_5936] {
-        for address in (INTERNAL_START..INTERNAL_END).step_by(4) {
-            let value = (address as u32).wrapping_mul(0x9e37_79b9) ^ salt;
-            unsafe {
-                ((address + 0x4000_0000) as *mut u32).write_volatile(value);
-            }
-        }
-        unsafe {
-            core::arch::asm!("fence rw, rw", options(nostack));
-        }
-        for address in (INTERNAL_START..INTERNAL_END).step_by(4) {
-            let expected = (address as u32).wrapping_mul(0x9e37_79b9) ^ salt;
-            let actual = unsafe { ((address + 0x4000_0000) as *const u32).read_volatile() };
-            if actual != expected {
-                return Err(Error::Mismatch {
-                    address,
-                    expected,
-                    actual,
-                });
-            }
+    #[cfg(target_arch = "riscv32")]
+    {
+        let start = symbol_address(core::ptr::addr_of!(_upper_start));
+        let load_end = symbol_address(core::ptr::addr_of!(_upper_load_end));
+        let bss_start = symbol_address(core::ptr::addr_of!(_bss_start));
+        let bss_end = symbol_address(core::ptr::addr_of!(_bss_end));
+        let linked = [
+            symbol_address(core::ptr::addr_of!(_internal_end)),
+            symbol_address(core::ptr::addr_of!(_stack_bottom)),
+            symbol_address(core::ptr::addr_of!(_stack_top)),
+            symbol_address(core::ptr::addr_of!(_dma_start)),
+            symbol_address(core::ptr::addr_of!(_dma_end)),
+        ];
+        if linked != [STACK_START, STACK_START, INTERNAL_END, DMA_START, DMA_END]
+            || start < UPPER_BASE
+            || load_end < start
+            || bss_start < load_end
+            || bss_end < bss_start
+            || internal_start() != bss_end
+            || !internal_start().is_multiple_of(64)
+            || internal_start() >= STACK_START
+        {
+            return Err(Error::RegionLayout);
         }
     }
     // Global bypass means neither alias can retain dirty lines. Initialize the
-    // separately reserved stack after the physical SRAM test, before switching SP.
+    // separately reserved stack before switching SP; leave all other SRAM intact.
     unsafe {
         for address in (STACK_START..INTERNAL_END).step_by(4) {
             (address as *mut u32).write_volatile(STACK_PATTERN);
@@ -120,19 +197,30 @@ pub fn valid_ahb_range(address: usize, bytes: usize) -> bool {
     bytes != 0
         && address.is_multiple_of(64)
         && bytes.is_multiple_of(64)
-        && address >= 0x4ff0_0000
-        && address
-            .checked_add(bytes)
-            .is_some_and(|end| end <= INTERNAL_END)
+        && address.checked_add(bytes).is_some_and(|end| {
+            (address >= DMA_START && end <= DMA_END)
+                || (address >= UPPER_BASE && end <= INTERNAL_END)
+        })
 }
 /// # Safety
-/// Upper SRAM must have passed init_upper_sram; call exactly once. Stack and
+/// init_runtime_memory must have succeeded; call exactly once. Stack and
 /// ROM areas are excluded. No other owner may ever access this arena's range.
 pub unsafe fn internal_arena() -> crate::memory::Arena<'static, crate::memory::Internal> {
     unsafe {
         crate::memory::Arena::from_raw(
-            core::ptr::NonNull::new_unchecked(INTERNAL_START as *mut u8),
-            STACK_START - INTERNAL_START,
+            core::ptr::NonNull::new_unchecked(internal_start() as *mut u8),
+            STACK_START - internal_start(),
+        )
+    }
+}
+/// Separate low SRAM pool, disjoint from runtime payload, work arena and boot scratch.
+/// # Safety
+/// Call once after init_runtime_memory. No other owner may access this interval.
+pub unsafe fn dma_arena() -> crate::memory::Arena<'static, crate::memory::Internal> {
+    unsafe {
+        crate::memory::Arena::from_raw(
+            core::ptr::NonNull::new_unchecked(DMA_START as *mut u8),
+            DMA_END - DMA_START,
         )
     }
 }
@@ -161,6 +249,7 @@ mod tests {
     use super::*;
     #[test]
     fn dma_bounds_alignment_and_overflow() {
+        assert!(valid_ahb_range(DMA_START, DMA_END - DMA_START));
         assert!(valid_ahb_range(0x4ff4_0000, 2048));
         for (a, n) in [
             (0x8800_0000, 2048),
@@ -169,6 +258,9 @@ mod tests {
             (INTERNAL_END, 64),
             (usize::MAX - 63, 128),
             (0x4ff4_0000, 0),
+            (DMA_END, 64), // Boot stack / legacy CPU scratch is not DMA pool.
+            (DMA_END - 64, 128),
+            (0x4ff2_8000, 64), // Reserved ROM interval.
         ] {
             assert!(!valid_ahb_range(a, n));
         }

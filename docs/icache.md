@@ -1,5 +1,7 @@
 # L1 I-cache при нулевом L2-cache, ESP32-P4 rev 1.3
 
+> Исторические измерения: карта с ареной 496/368 KiB относится к образам до 2026-11-08. Актуальная загрузка, динамическая рабочая арена и отдельный DMA pool — [stage2-boot.md](stage2-boot.md).
+
 Эксперимент 2026-11-06. Подтверждено на плате: core0 I-cache работает при
 **L2 cache capacity=0**, L2 bypass, L1 D-cache bypass. Все 768 KiB L2MEM остаются
 SRAM; внутренняя арена по-прежнему 496 KiB, stack 16 KiB. PSRAM остаётся uncached

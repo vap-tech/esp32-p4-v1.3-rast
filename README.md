@@ -38,11 +38,25 @@ python scripts/monitor.py /dev/ttyACM0
 
 Необходимы Rust с target из `rust-toolchain.toml` и `espflash` (4.7.0). Для доступа к порту пользователь должен входить в `uucp`; после добавления группы выполните `newgrp uucp` в терминале.
 
-`_start` в SPM включает clock SRAM, запрещает interrupts, сохраняет dirty cache data и переводит L1/L2 в bypass. L2 capacity=0 освобождает все 768 KiB L2MEM под SRAM. Код/константы — с `0x4FF00000`, data/BSS — с `0x4FF20000`; отдельная арена 496 KiB — с `0x4FF40000`, runtime stack 16 KiB — `0x4FFBC000…0x4FFC0000`. ROM-область сохраняется. Верхние 512 KiB проверяются до переключения стека. PSRAM 32 MiB отображается по команде и используется только uncached; первые 4 MiB отделены для дисплея/снимка, остальные 28 MiB — большая арена. Подробности, команды и измерения: [docs/memory.md](docs/memory.md).
+`_start` в SPM сохраняет dirty ROM cache data, переводит L1/L2 в bypass и
+настраивает L2MEM как SRAM. Затем собственный bootstrap читает runtime payload
+из Flash, проверяет CRC32 и только после этого запускает Rust из верхней SRAM.
+Код/константы/статика начинаются с `0x4FF40000`; рабочая арена динамически идёт
+за ними. Нижние **152 KiB** выделены отдельной DMA-арене, runtime stack — **16 KiB**,
+область ROM сохранена. Полного destructive SRAM test при старте больше нет.
+PSRAM остаётся 32 MiB uncached: 4 MiB display/screenshot + 28 MiB bulk arena.
+[Актуальная загрузка и карта](docs/stage2-boot.md), [история экспериментов](docs/memory.md).
+
+`image.sh` сначала создаёт `target/ram-image.bin` через espflash, затем наш
+`pack-image.py` собирает окончательный **target/firmware.bin** с bootstrap,
+manifest и payload. Промежуточный ram-image напрямую не прошивать.
+Команды Ethernet и форматирования теперь входят в обычный образ;
+размерные features `eth-lab` / `sd-format` удалены. `audio-lab` только добавляет
+RX capture tests, не отключает штатные команды.
 
 HAL доступен через `esp32_p4::hal`; драйверы внешних устройств — через `esp32_p4::devices`. Текущая прошивка опрашивает GT911 на GPIO7/8, I²C1, 100 кГц, выдаёт `down / move / up` в USB и heartbeat со счётчиками кадров/ошибок. Дисплей запускается через собственный DSI HAL: аппаратные вертикальные цветные полосы 1024×600 остаётся включённым постоянно, GPIO23 управляет подсветкой через LEDC PWM 20 кГц, 10 бит; яркость установлена на 25%, без стартового перебора уровней. Объект `devices::jd9165::Display` объединяет DSI, RESET и PWM; через USB доступны команды проверки функций панели (`python scripts/display-control.py '?'`). По команде `F` включается один RGB565 framebuffer 1024×600 в PSRAM; `V` направляет камеру через ISP прямо в него. Подробности: [docs/framebuffer.md](docs/framebuffer.md). CSI принимает одиночный RAW10 crop 64×32 в SRAM через DW-GDMA; команды `a/A/o` и ограничения — в [docs/csi.md](docs/csi.md). Протокол, API и ограничения описаны в [docs/gt911.md](docs/gt911.md).
 
-Сборка `espflash save-image --ignore-app-descriptor` создаёт только контейнер образа Espressif: заголовок ROM, загружаемые сегменты, checksum и SHA-256. Загрузчик и код ESP-IDF в него не входят.
+Промежуточный `espflash save-image --ignore-app-descriptor` создаёт контейнер Espressif: заголовок ROM, загружаемые сегменты, checksum и SHA-256. Сторонний загрузчик и код ESP-IDF не добавляются.
 
 Изменены flash по `0x2000` и, во время предшествующих проб, начало прежнего приложения по `0x10000`. Для возврата ассистента используйте полный проверенный дамп и инструкцию в локальном `backups/README.md`.
 

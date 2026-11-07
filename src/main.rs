@@ -15,108 +15,7 @@ mod audio_lab;
 
 use core::{arch::global_asm, fmt::Write, panic::PanicInfo};
 
-global_asm!(
-    ".section .text.entry,\"ax\"",
-    ".global _start",
-    ".option push",
-    ".option norelax",
-    "_start:",
-    "csrci mstatus, 8", // Keep machine interrupts disabled until a trap handler exists.
-    // Keep L2 SRAM clock on before moving the stack out of the 8-KiB TCM.
-    "li t0, 0x500e5060",
-    "lw t1, 0(t0)",
-    "ori t1, t1, 1",
-    "sw t1, 0(t0)",
-    "fence rw, rw",
-    "fence.i",
-    // Use an uncached boot stack while retiring ROM cache state. No Rust or
-    // SRAM-resident callee is entered until all bypasses are established.
-    "la sp, _boot_stack_top",
-    "li t0, 0x40000000",
-    "add sp, sp, t0",
-    "la t0, _trap",
-    "csrw mtvec, t0",
-    "call rust_cache_boot",
-    "la sp, _boot_stack_top",
-    "la t0, _trap",
-    "csrw mtvec, t0",
-    "la t0, _bss_start",
-    "la t1, _bss_end",
-    "1:",
-    "bgeu t0, t1, 2f",
-    "sw zero, 0(t0)",
-    "addi t0, t0, 4",
-    "j 1b",
-    "2:",
-    "call rust_memory_boot",
-    "la sp, _stack_top",
-    "call rust_main",
-    "3: j 3b",
-    ".balign 4",
-    "_trap:",
-    "csrr a0, mcause",
-    "csrr a1, mepc",
-    "csrr a2, mtval",
-    "call rust_trap",
-    "4: j 4b",
-    ".option pop",
-);
-
-// Filled before BSS is cleared, preserved in a dedicated 16-byte NOLOAD section.
-#[link_section = ".boot_audit"]
-static mut BOOT_CPU_HZ: [u64; 2] = [0; 2];
-
-// Runs from SPM on an uncached boot stack, before BSS initialization.
-#[no_mangle]
-#[link_section = ".text.entry"]
-extern "C" fn rust_cache_boot() {
-    unsafe {
-        hal::watchdog::disable();
-        let mut boot_timer = hal::time::Timer::new();
-        let mut boot_console = hal::usb_serial::Console::new();
-        let before_hz = clock_audit("before-cache-bypass", &mut boot_timer, &mut boot_console);
-        core::ptr::addr_of_mut!(BOOT_CPU_HZ)
-            .cast::<u64>()
-            .write_volatile(before_hz);
-        // Stop automatic preloads without disabling clocks shared with L2 SRAM.
-        for offset in [0xe4usize, 0xf8, 0x134, 0x2b4] {
-            let reg = (0x3ff1_0000 + offset) as *mut u32;
-            reg.write_volatile(reg.read_volatile() & !1);
-        }
-        // ESP-IDF v6.1's P4 ROM patch issues writeback twice and waits for DONE.
-        // Preserve ROM dirty data before bypassing either level.
-        for map in [16u32, 32] {
-            (0x3ff1_009c as *mut u32).write_volatile(map);
-            (0x3ff1_00a0 as *mut u32).write_volatile(0);
-            (0x3ff1_00a4 as *mut u32).write_volatile(0);
-            for _ in 0..2 {
-                (0x3ff1_0098 as *mut u32).write_volatile(4);
-                let mut spins = 0;
-                while (0x3ff1_0098 as *const u32).read_volatile() & 16 == 0 {
-                    spins += 1;
-                    if spins > 1_000_000 {
-                        (0x500d_2000 as *mut u32).write_volatile(b'!' as u32);
-                        (0x500d_2004 as *mut u32).write_volatile(1);
-                        loop {
-                            core::hint::spin_loop();
-                        }
-                    }
-                }
-            }
-        }
-        core::arch::asm!("fence rw, rw", options(nostack));
-        (0x3ff1_0008 as *mut u32).write_volatile(0x13);
-        (0x3ff1_0274 as *mut u32).write_volatile(0x20);
-        (0x3ff1_0278 as *mut u32).write_volatile(hal::memory::L2_SIZE_REGISTER);
-        (0x3ff1_027c as *mut u32).write_volatile(8);
-        core::arch::asm!("fence rw, rw", "fence.i", options(nostack));
-        let after_hz = clock_audit("after-cache-bypass", &mut boot_timer, &mut boot_console);
-        core::ptr::addr_of_mut!(BOOT_CPU_HZ)
-            .cast::<u64>()
-            .add(1)
-            .write_volatile(after_hz);
-    }
-}
+global_asm!(include_str!("boot.S"), l2_size = const hal::memory::L2_SIZE_REGISTER);
 
 #[no_mangle]
 extern "C" fn rust_memory_boot() {
@@ -127,13 +26,13 @@ extern "C" fn rust_memory_boot() {
         "MEMORY BOOT CACHE {:x?}",
         hal::memory::cache_snapshot()
     );
-    match unsafe { hal::memory::init_upper_sram() } {
+    match unsafe { hal::memory::init_runtime_memory() } {
         Ok(()) => {
             let _ = writeln!(
                 console,
-                "MEMORY UPPER SRAM verified {}KiB; caches bypassed; stack=16KiB arena={}KiB",
-                (hal::memory::INTERNAL_END - hal::memory::INTERNAL_START) / 1024,
-                (hal::memory::STACK_START - hal::memory::INTERNAL_START) / 1024
+                "MEMORY SRAM configured {}KiB; stack=16KiB work={}KiB",
+                (hal::memory::INTERNAL_END - hal::memory::UPPER_BASE) / 1024,
+                (hal::memory::STACK_START - hal::memory::internal_start()) / 1024
             );
         }
         Err(error) => {
@@ -210,8 +109,9 @@ extern "C" fn rust_main() -> ! {
     let mut psram = None;
     let mut large_arena: Option<esp32_p4::memory::Arena<'static, esp32_p4::memory::External>> =
         None;
-    // Boot proved and reserved this region; one owner for the entire run.
+    // Boot checked the layout and reserved the stack; one arena owner per run.
     let mut internal_arena = unsafe { hal::memory::internal_arena() };
+    let mut dma_arena = unsafe { hal::memory::dma_arena() };
     let mut framebuffer: Option<esp32_p4::devices::framebuffer::Framebuffer> = None;
     let mut scanout_active = false;
     let mut camera_live = false;
@@ -228,46 +128,29 @@ extern "C" fn rust_main() -> ! {
                     }
                 };
                 if let Some(seconds) = line.strip_prefix("eth-run ") {
-                    #[cfg(feature = "eth-lab")]
-                    {
-                        let seconds = seconds
-                            .parse::<u32>()
-                            .ok()
-                            .filter(|s| (1..=600).contains(s));
-                        if camera_live || internal_arena.stats().used != 0 || seconds.is_none() {
-                            let _ = writeln!(console, "ETH RUN DONE Err(state/seconds)");
-                            continue;
-                        }
-                        let result = ethernet_run(
-                            seconds.unwrap(),
-                            &internal_arena,
-                            &mut timer,
-                            &mut console,
-                        );
-                        internal_arena.reset();
-                        let _ = writeln!(
-                            console,
-                            "ETH RUN DONE {:?} stack={:?}",
-                            result,
-                            hal::memory::stack_usage()
-                        );
+                    let seconds = seconds
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|s| (1..=600).contains(s));
+                    if camera_live || dma_arena.stats().used != 0 || seconds.is_none() {
+                        let _ = writeln!(console, "ETH RUN DONE Err(state/seconds)");
+                        continue;
                     }
-                    #[cfg(not(feature = "eth-lab"))]
-                    {
-                        let _ = seconds;
-                        let _ = writeln!(console, "ETH RUN DONE Err(build eth-lab)");
-                    }
+                    let result =
+                        ethernet_run(seconds.unwrap(), &dma_arena, &mut timer, &mut console);
+                    dma_arena.reset();
+                    let _ = writeln!(
+                        console,
+                        "ETH RUN DONE {:?} stack={:?}",
+                        result,
+                        hal::memory::stack_usage()
+                    );
                 } else if line == "eth-probe" {
-                    #[cfg(feature = "eth-lab")]
-                    {
-                        let result = ethernet_probe(&mut timer, &mut console);
-                        let _ = writeln!(console, "ETH PROBE DONE {:?}", result);
-                    }
-                    #[cfg(not(feature = "eth-lab"))]
-                    let _ = writeln!(console, "ETH PROBE DONE Err(build eth-lab)");
+                    let result = ethernet_probe(&mut timer, &mut console);
+                    let _ = writeln!(console, "ETH PROBE DONE {:?}", result);
                 } else if line.starts_with("format-sd") {
-                    if !cfg!(feature = "sd-format") || cfg!(feature = "audio-lab") || camera_live {
-                        let _ = writeln!(console, "SD FORMAT DONE Err(state/build)");
+                    if camera_live {
+                        let _ = writeln!(console, "SD FORMAT DONE Err(camera active)");
                         continue;
                     }
                     if line != "format-sd" && line != "format-sd FAT32 ERASE" {
@@ -289,19 +172,19 @@ extern "C" fn rust_main() -> ! {
                 {
                     #[cfg(feature = "audio-lab")]
                     {
-                        if camera_live || !scanout_active || internal_arena.stats().used != 0 {
+                        if camera_live || !scanout_active || dma_arena.stats().used != 0 {
                             let _ = writeln!(console, "WAV LAB DONE Err(state)");
                             continue;
                         }
                         let result = audio_lab::run(
                             framebuffer.as_mut().unwrap(),
-                            &internal_arena,
+                            &dma_arena,
                             &mut i2c,
                             &mut timer,
                             &mut console,
                             line,
                         );
-                        internal_arena.reset();
+                        dma_arena.reset();
                         let _ = writeln!(
                             console,
                             "WAV LAB DONE {:?} guards={} stack={:?}",
@@ -314,10 +197,7 @@ extern "C" fn rust_main() -> ! {
                     {
                         let _ = writeln!(console, "WAV LAB DONE Err(build audio-lab)");
                     }
-                } else if !cfg!(feature = "audio-lab")
-                    && !cfg!(any(feature = "sd-format", feature = "eth-lab"))
-                    && line == "mixed-stress"
-                {
+                } else if line == "mixed-stress" {
                     if camera_live || !scanout_active {
                         let _ = writeln!(console, "MIXED DONE Err(state)");
                         continue;
@@ -331,20 +211,17 @@ extern "C" fn rust_main() -> ! {
                         framebuffer.as_ref().unwrap().guards_ok(),
                         hal::memory::stack_usage()
                     );
-                } else if !cfg!(feature = "audio-lab")
-                    && !cfg!(any(feature = "sd-format", feature = "eth-lab"))
-                    && line == "sd-stress"
-                {
+                } else if line == "sd-stress" {
                     if camera_live || !scanout_active {
                         let _ = writeln!(console, "SD STRESS DONE Err(state)");
                         continue;
                     }
-                    if internal_arena.stats().used != 0 {
+                    if dma_arena.stats().used != 0 {
                         let _ = writeln!(console, "SD STRESS DONE Err(arena busy)");
                         continue;
                     }
-                    let result = sd_stress(&internal_arena, &mut timer, &mut console);
-                    internal_arena.reset();
+                    let result = sd_stress(&dma_arena, &mut timer, &mut console);
+                    dma_arena.reset();
                     let _ = writeln!(
                         console,
                         "SD STRESS DONE {:?} guards={} stack={:?}",
@@ -391,27 +268,13 @@ extern "C" fn rust_main() -> ! {
                     );
                 } else if line == "clock" {
                     clock_audit("runtime", &mut timer, &mut console);
-                    let before = unsafe {
-                        core::ptr::addr_of!(BOOT_CPU_HZ)
-                            .cast::<u64>()
-                            .read_volatile()
-                    };
-                    let after = unsafe {
-                        core::ptr::addr_of!(BOOT_CPU_HZ)
-                            .cast::<u64>()
-                            .add(1)
-                            .read_volatile()
-                    };
-                    let _ = writeln!(
-                        console,
-                        "CLOCK BOOT before_hz={} after_hz={}",
-                        before, after
-                    );
                     let _ = writeln!(console, "CLOCK DONE Ok(())");
                 } else if line == "memory" {
                     let _ = writeln!(console, "MEMORY CACHE {:x?}", hal::memory::cache_snapshot());
                     let _ = writeln!(console, "MEMORY STACK {:?}", hal::memory::stack_usage());
-                    let _ = writeln!(console, "MEMORY INTERNAL {:?}", internal_arena.stats());
+                    let _ = writeln!(console, "MEMORY WORK {:?}", internal_arena.stats());
+                    let _ = writeln!(console, "MEMORY DMA {:?}", dma_arena.stats());
+                    let _ = writeln!(console, "MEMORY LAYOUT {:x?}", hal::memory::layout());
                     if let Some(arena) = large_arena.as_ref() {
                         let _ = writeln!(console, "MEMORY EXTERNAL {:?}", arena.stats());
                     }
@@ -566,10 +429,7 @@ extern "C" fn rust_main() -> ! {
                         scanout_active,
                         fb.guards_ok()
                     );
-                } else if let Some(path) = line
-                    .strip_prefix("jpeg-idct-bench ")
-                    .filter(|_| !cfg!(any(feature = "audio-lab", feature = "eth-lab")))
-                {
+                } else if let Some(path) = line.strip_prefix("jpeg-idct-bench ") {
                     if camera_live || !scanout_active || framebuffer.is_none() {
                         let _=writeln!(console,"JPEG IDCT DONE Err(requires active framebuffer, camera off; use --image first)");
                         continue;
@@ -587,10 +447,7 @@ extern "C" fn rust_main() -> ! {
                         framebuffer.as_ref().unwrap().guards_ok(),
                         hal::memory::stack_usage()
                     );
-                } else if let Some(path) = line
-                    .strip_prefix("jpeg-profile ")
-                    .filter(|_| !cfg!(any(feature = "audio-lab", feature = "eth-lab")))
-                {
+                } else if let Some(path) = line.strip_prefix("jpeg-profile ") {
                     if camera_live || !scanout_active || framebuffer.is_none() {
                         let _=writeln!(console,"JPEG PROFILE DONE Err(requires active framebuffer, camera off; use --image first)");
                         continue;
@@ -608,10 +465,7 @@ extern "C" fn rust_main() -> ! {
                         framebuffer.as_ref().unwrap().guards_ok(),
                         hal::memory::stack_usage()
                     );
-                } else if let Some(path) = line
-                    .strip_prefix("jpeg-bench ")
-                    .filter(|_| !cfg!(any(feature = "audio-lab", feature = "eth-lab")))
-                {
+                } else if let Some(path) = line.strip_prefix("jpeg-bench ") {
                     if camera_live || !scanout_active || framebuffer.is_none() {
                         let _=writeln!(console,"JPEG BENCH DONE Err(requires active framebuffer, camera off; use --image first)");
                         continue;
@@ -632,7 +486,6 @@ extern "C" fn rust_main() -> ! {
                 } else if let Some(path) = line
                     .strip_prefix("play ")
                     .or_else(|| line.strip_prefix("play-stall "))
-                    .filter(|_| !cfg!(feature = "audio-lab"))
                 {
                     let result = sd_audio(
                         path,
@@ -759,28 +612,28 @@ extern "C" fn rust_main() -> ! {
                 let _ = esp32_p4::devices::ov02c10::stream(&mut i2c, &mut timer, false);
                 camera_live = false;
                 let _ = writeln!(console, "CMD O camera stopped");
-            } else if !cfg!(any(feature = "audio-lab", feature = "eth-lab")) && command == b'p' {
+            } else if command == b'p' {
                 let result = audio_tone(&mut i2c, &mut timer, &mut console);
                 let _ = writeln!(console, "CMD p {:?}", result);
-            } else if !cfg!(feature = "audio-lab") && command == b'!' {
+            } else if command == b'!' {
                 let result = sd_config_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD ! {:?}", result);
-            } else if !cfg!(feature = "audio-lab") && command == b'Z' {
+            } else if command == b'Z' {
                 let result = sd_fat_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD Z {:?}", result);
-            } else if !cfg!(feature = "audio-lab") && command == b'Y' {
+            } else if command == b'Y' {
                 let result = sdmmc_info(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD Y {:?}", result);
-            } else if !cfg!(any(feature = "audio-lab", feature = "eth-lab")) && command == b'#' {
+            } else if command == b'#' {
                 let result = sdmmc_multi_write_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD # {:?}", result);
-            } else if !cfg!(any(feature = "audio-lab", feature = "eth-lab")) && command == b'@' {
+            } else if command == b'@' {
                 let result = sdmmc_write_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD @ {:?}", result);
-            } else if !cfg!(any(feature = "audio-lab", feature = "eth-lab")) && command == b'm' {
+            } else if command == b'm' {
                 let result = sdmmc_multi_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD m {:?}", result);
-            } else if !cfg!(any(feature = "audio-lab", feature = "eth-lab")) && command == b'M' {
+            } else if command == b'M' {
                 let result = sdmmc_probe(&mut timer, &mut console);
                 let _ = writeln!(console, "CMD M {:?}", result);
             } else if command == b'Q' {
@@ -2009,7 +1862,6 @@ fn sdmmc_info(
     Ok(())
 }
 
-#[link_section = ".text.entry"]
 #[inline(never)]
 fn media_command_line<'a>(
     console: &mut hal::usb_serial::Console,
@@ -2412,7 +2264,6 @@ fn jpeg_trial(
 }
 
 #[inline(never)]
-#[link_section = ".text.entry"]
 fn jpeg_bench(
     path: &str,
     fb: &mut esp32_p4::devices::framebuffer::Framebuffer,
@@ -2480,7 +2331,6 @@ fn cycle_calibration(timer: &mut hal::time::Timer) -> (u64, u64) {
 }
 
 #[inline(never)]
-#[link_section = ".text.entry"]
 fn jpeg_profile(
     path: &str,
     fb: &mut esp32_p4::devices::framebuffer::Framebuffer,
@@ -2562,7 +2412,6 @@ fn jpeg_profile(
 
 // Read-only clock audit. The ROM-selected CPU root/dividers are never written.
 #[inline(never)]
-#[link_section = ".text.entry"]
 fn clock_audit(
     label: &str,
     timer: &mut hal::time::Timer,
@@ -2579,7 +2428,6 @@ fn clock_audit(
 }
 
 #[inline(never)]
-#[link_section = ".text.entry"]
 fn jpeg_idct_bench(
     path: &str,
     fb: &mut esp32_p4::devices::framebuffer::Framebuffer,
@@ -2636,7 +2484,6 @@ fn jpeg_idct_bench(
     Ok(())
 }
 
-#[link_section = ".text.entry"]
 #[inline(never)]
 fn sd_stress(
     arena: &esp32_p4::memory::Arena<'_, esp32_p4::memory::Internal>,
@@ -2830,7 +2677,6 @@ fn mixed_stress(
     Ok(())
 }
 
-#[cfg(feature = "eth-lab")]
 fn ethernet_probe(
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
@@ -2856,7 +2702,6 @@ fn ethernet_probe(
     Ok(())
 }
 
-#[cfg(feature = "eth-lab")]
 fn ethernet_run(
     seconds: u32,
     arena: &esp32_p4::memory::Arena<'_, esp32_p4::memory::Internal>,

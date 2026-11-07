@@ -11,7 +11,7 @@ RTOS и изменений HAL. Поддержаны чтение и синхр�
 Деструктивная операция только по явной команде, не реакция на неизвестную ФС.
 
 ```sh
-./scripts/image.sh --features sd-format
+./scripts/image.sh
 espflash write-bin --port /dev/ttyACM0 0x2000 target/firmware.bin
 python3 scripts/display-control.py --icache on --dcache on --sd-format-info
 # Следующая команда уничтожает все разделы и прежние файлы SD:
@@ -19,10 +19,10 @@ python3 scripts/display-control.py --format-sd
 python3 scripts/display-control.py Z
 ```
 
-Отдельный feature `sd-format` сохраняет текущую карту памяти и SRAM-арену:
-в этом образе недоступны только старые `mixed-stress` и `sd-stress`.
-Default build сохраняет их, но не предоставляет команду форматирования.
+С 2026-11-08 форматирование входит в обычный stage-2 образ. Размерный feature
+sd-format удалён, прежние bench/soak команды доступны одновременно.
 Камера должна быть остановлена; форматирование синхронное, не совмещено с audio.
+[Актуальная загрузка и память](stage2-boot.md).
 
 Создаётся одна MBR primary partition типа 0Ch от LBA 2048 до конца устройства,
 512-byte sectors, две FAT, root cluster 2, FSInfo в 1/7, VBR в 0/6 относительно
