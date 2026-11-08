@@ -1,4 +1,4 @@
-# Состояние проекта — 2026-11-06
+# Состояние проекта — обновлено 2026-11-08
 
 ## Обновление 2026-11-08: stage-2 SRAM loader
 
@@ -8,7 +8,9 @@ ROM загружает только SPM bootstrap. Runtime code/rodata/data чи
 В default приблизительно 314 KiB work + 152 KiB DMA свободно; fixed CODE=132 KiB
 удалён. SRAM health-test и boot clock before/after experiment удалены, runtime
 clock command сохранён. Ethernet/format и все обычные команды в одном образе,
-features eth-lab/sd-format больше нет. [Карта, формат, проверки](stage2-boot.md).
+features eth-lab/sd-format больше нет. Default firmware.bin — 420656 B
+(включая padding), runtime payload — 166640 B. Это измерение текущей базы;
+точные размеры каждой сборки выводит image.sh. [Карта, формат, проверки](stage2-boot.md).
 
 Ниже сохранены результаты предыдущих этапов; исторические размеры арены и образов
 не являются текущей картой размещения.
@@ -118,7 +120,7 @@ Current boot defaults remain all-bypass; runtime experiments are opt-in.
   Аналоговый микрофон не захватывается.
   [Аудио](audio.md).
 
-## Текущие параметры
+## Исторические параметры до stage-2
 
 | Параметр | Значение |
 | --- | --- |
@@ -129,7 +131,7 @@ Current boot defaults remain all-bypass; runtime experiments are opt-in.
 | Analogue / digital gain | 1x / 1x, также по умолчанию |
 | Формат камеры | RAW10, crop 1024×600 из режима 1920×1080 |
 | Preview после reset | Включается явно командами F V |
-| Размер текущего образа | 134 848 B |
+| Размер образа на этом этапе, до stage-2 | 134 848 B |
 
 ## Известные проблемы и незавершённое
 
