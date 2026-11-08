@@ -1,7 +1,10 @@
 // ESP32 display stand, dimensions in mm. Front is -Y, up is +Z.
 // F5: assembly preview. Select a printable part below before exporting STL.
-part = "assembly"; // [assembly,base,lid,left_horn,right_horn]
+part = "assembly"; // [assembly,base,lid,left_horn,right_horn,speaker_gasket]
 show_hardware = true;
+show_speaker_gasket = false; // Enable to preview optional TPU spacer and shifted speaker.
+show_lid = true; // Disable to inspect rear pocket and port clearance.
+show_battery = true; // Inferred battery envelope, preview only.
 $fn = 64;
 
 base_w = 182.5;
@@ -31,7 +34,7 @@ board_head_depth = 2.2;
 horn_w = 15;
 horn_foot_w = 15;
 horn_foot_front = 20;
-horn_foot_back = 76;
+horn_foot_back = base_d-lid_t-0.5; // Stop before rear cover with 0.5 mm clearance.
 horn_foot_t = 6;
 horn_insert_d = 4.2; // Confirm actual heat-set insert outside diameter.
 horn_insert_depth = 8;
@@ -51,43 +54,45 @@ speaker_boss_depth = speaker_pilot_depth+3;
 speaker_bcd = 56.49;
 speaker_mount_angle = 45; // Rotate speaker and its four screws clear of battery pocket.
 speaker_z = base_h/2;
+speaker_gasket_od = 62.9;
+speaker_gasket_t = 2.8;
+speaker_gasket_hole_d = 2.5; // Same screw-hole diameter as enclosure.
 // Two fixed front ports; rough Helmholtz tuning ~140-150 Hz at 0.8 L net.
 // Driver T/S parameters unknown. Length includes the front wall.
 port_d = 16;
 port_wall = 2;
 port_length = 55;
-port_x = 62;
+port_x = 77;
 // Connector housing not measured: provisional rectangular pass-through.
 display_wire_w = 8;
 display_wire_d = 5;
+wire_exit_x = 45; // Right when viewed from the front/display.
+wire_exit_y = 56; // Just forward of battery pocket front wall.
 // Battery 1260110: inferred dimensions, +1 mm fit, +15 mm BMS allowance.
 battery_l = 110 + 1 + 15;
 battery_d = 60 + 1;
 battery_h = 12 + 1;
 battery_wall = 2;
+battery_floor_t = 5;
+battery_notch_w = 5;
+battery_notch_depth = 3;
+battery_notch_x = battery_l/2 - battery_notch_w/2;
 battery_back = base_d-lid_t;
-battery_front = battery_back-battery_d;
+battery_front = battery_back-battery_h-battery_wall;
+battery_top = base_h-wall;
+battery_bottom = battery_top-battery_d-battery_floor_t;
 
-// Open towards rear cover; roof separates battery from acoustic cavity.
-// Solid continuation of the pocket towards the print bed/front wall.
-// Circular speaker clearance is limited to the fill, preserving sealed pocket.
-module battery_front_fill() {
-    difference() {
-        translate([-battery_l/2-battery_wall,0,wall])
-            cube([battery_l+2*battery_wall,battery_front,battery_h+battery_wall]);
-        translate([0,-1,speaker_z]) rotate([-90,0,0])
-            cylinder(d=speaker_body,h=battery_front+2);
-    }
-}
+// On rear cover: open upwards, roof of assembled base closes the opening.
 module battery_pocket() {
     difference() {
-        translate([-battery_l/2-battery_wall,battery_front-battery_wall,wall])
-            cube([battery_l+2*battery_wall,battery_d+battery_wall,battery_h+battery_wall]);
-        translate([-battery_l/2,battery_front,wall-0.01])
-            cube([battery_l,battery_d+1,battery_h+0.01]);
-        // Wire exits upwards into the acoustic cavity at the BMS end.
-        translate([battery_l/2-12,battery_back-12,wall+battery_h-1])
-            cube([display_wire_w,display_wire_d,battery_wall+2]);
+        translate([-battery_l/2-battery_wall,battery_front,battery_bottom])
+            cube([battery_l+2*battery_wall,battery_h+battery_wall+0.01,
+                  battery_d+battery_floor_t]);
+        translate([-battery_l/2,battery_front+battery_wall,battery_bottom+battery_floor_t])
+            cube([battery_l,battery_h+1,battery_d+1]);
+        // Open-top wire notch, beside roof exit to the display.
+        translate([battery_notch_x-battery_notch_w/2,battery_front-1,battery_top-battery_notch_depth])
+            cube([battery_notch_w,battery_wall+2,battery_notch_depth+1]);
     }
 }
 
@@ -140,8 +145,6 @@ module base() {
                 translate([x-horn_foot_w/2,36,base_h-horn_pad_depth])
                     cube([horn_foot_w,39,horn_pad_depth]);
             port_shells();
-            battery_pocket();
-            battery_front_fill();
         }
         translate([0,0,speaker_z]) y_hole(speaker_body,12);
         for(a=[speaker_mount_angle:90:270+speaker_mount_angle])
@@ -160,11 +163,13 @@ module base() {
         }
         port_bores();
         // Upper centre exit towards display; seal around wire after assembly.
-        translate([-display_wire_w/2,base_d/2-display_wire_d/2,base_h-wall-1])
+        translate([wire_exit_x-display_wire_w/2,wire_exit_y-display_wire_d/2,base_h-wall-1])
             cube([display_wire_w,display_wire_d,wall+2]);
     }
 }
 module lid() {
+    union() {
+    battery_pocket();
     difference() {
         translate([-base_w/2,base_d-lid_t,0]) cube([base_w,lid_t,base_h]);
         lid_screws() {
@@ -173,6 +178,7 @@ module lid() {
                 y_hole(rear_head_d,rear_head_depth+0.02);
         }
     }
+}
 }
 // Printable orientation: speaker/front plane on Z=0, rear opening upwards.
 module front_down() { rotate([90,0,0]) children(); }
@@ -209,6 +215,16 @@ module horn(side=1) {
         }
     }
 }
+// Printed flat; optional TPU spacer, not fused to enclosure.
+module speaker_gasket() {
+    difference() {
+        cylinder(d=speaker_gasket_od,h=speaker_gasket_t);
+        translate([0,0,-1]) cylinder(d=speaker_body,h=speaker_gasket_t+2);
+        for(a=[speaker_mount_angle:90:270+speaker_mount_angle])
+            translate([sin(a)*speaker_bcd/2,cos(a)*speaker_bcd/2,-1])
+                cylinder(d=speaker_gasket_hole_d,h=speaker_gasket_t+2);
+    }
+}
 module hardware() {
     color([0.18,0.22,0.25,0.45]) board_frame() {
         translate([-board_w/2,0,0]) cube([board_w,board_t,board_h]);
@@ -218,21 +234,29 @@ module hardware() {
         for(x=[-mount_x/2,mount_x/2]) for(z=[7,107])
             translate([x,board_t+standoff_h/2,z]) y_hole(standoff_d,standoff_h);
     }
+    translate([0,show_speaker_gasket ? -speaker_gasket_t : 0,0])
     color([0.22,0.22,0.22,0.65]) {
         difference() {
             translate([0,0,speaker_z]) rotate([90,0,0]) cylinder(d=speaker_outer,h=speaker_rim);
             translate([0,0,speaker_z]) y_hole(speaker_body-5,10);
         }
-        translate([0,0,speaker_z]) rotate([-90,0,0]) cylinder(d1=speaker_body,d2=30,h=speaker_depth-speaker_rim);
+        translate([0,0,speaker_z]) rotate([-90,0,0]) cylinder(d=speaker_body,h=speaker_depth-speaker_rim);
     }
 }
 
 if(part=="assembly") {
     color("LightSlateGray") base();
-    color([0.7,0.75,0.8,0.65]) lid();
+    if(show_lid) color([0.7,0.75,0.8,0.65]) lid();
+    if(show_battery && show_lid) color([0.45,0.65,0.85,0.5])
+        translate([-battery_l/2,battery_front+battery_wall,battery_bottom+battery_floor_t])
+            cube([battery_l,battery_h,battery_d]);
     color("orange") { horn(-1); horn(1); }
+    if(show_speaker_gasket) color("MediumPurple")
+        translate([0,0,speaker_z]) rotate([90,0,0]) speaker_gasket();
     if(show_hardware) hardware();
 } else if(part=="base") front_down() base();
-else if(part=="lid") translate([0,0,-base_d+lid_t]) front_down() lid();
+else if(part=="lid") translate([0,0,base_d]) rotate([-90,0,0]) lid();
 else if(part=="left_horn") translate([0,0,-base_h]) horn(-1);
 else if(part=="right_horn") translate([0,0,-base_h]) horn(1);
+
+else if(part=="speaker_gasket") speaker_gasket();
