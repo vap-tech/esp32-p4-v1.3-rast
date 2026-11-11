@@ -20,6 +20,7 @@ rear_lid_lip=2;
 $fn=64;
 angle=-15;
 wall=3;
+body_radius=3; // External edge radius; 0 restores sharp enclosure.
 pod_w=72;
 pod_rear_taper=0;
 depth=58;
@@ -79,10 +80,20 @@ module pod_volume(inset=0, left=center_w/2, right=center_w/2+pod_w) {
             faces=[[3,2,1,0],[5,6,7,4],[1,5,4,0],
                    [2,6,5,1],[3,7,6,2],[0,4,7,3]],convexity=10);
 }
+// Erode by normal offsets, then expand: fillets stay inside original bounds.
+// Flat front/rear panels and horizontal base remain at their original planes.
+module rounded_pod_volume() {
+    if(body_radius>0)
+        minkowski() {
+            pod_volume(body_radius);
+            sphere(r=body_radius,$fn=32);
+        }
+    else pod_volume();
+}
 module pod() {
     difference() {
         union() {
-            difference() { pod_volume(); pod_volume(wall); }
+            difference() { rounded_pod_volume(); pod_volume(wall); }
             for(a=[45:90:315])
                 translate([speaker_x()+sin(a)*speaker_bcd/2,
                            face_h/2+cos(a)*speaker_bcd/2,0])
@@ -118,6 +129,7 @@ module display_mounts() {
 brace_bottom=7; // Lower ear stays ~3 mm above table after recess.
 brace_h=32;
 brace_t=4;
+brace_corner_r=3; // Outline only; thickness edges remain square.
 brace_w=center_w-1; // Fits between columns, 0.5 mm gap at either side.
 brace_mount_x=mount_dx/2;
 brace_gap=0.3;
@@ -151,7 +163,7 @@ module rear_opening() {
 }
 module rear_seat() {
     intersection() {
-    upright() pod_volume();
+    upright() rounded_pod_volume();
     rear_frame() {
         // Inward ledge supports the inserted lid; local supports allowed in slicer.
         difference() {
@@ -204,7 +216,11 @@ module right_lid() { rear_frame() translate([0,0,-rear_lid_t]) right_lid_flat();
 module body() { right_pod(); side(-1) right_pod(); }
 module brace_flat() {
     difference() {
-        translate([-brace_w/2,brace_bottom,0]) cube([brace_w,brace_h,brace_t]);
+        translate([-brace_w/2,brace_bottom,0])
+            linear_extrude(height=brace_t)
+                translate([brace_corner_r,brace_corner_r])
+                    offset(r=brace_corner_r)
+                        square([brace_w-2*brace_corner_r,brace_h-2*brace_corner_r]);
         brace_mount_positions() {
             translate([0,0,-1]) cylinder(d=3.2,h=brace_t+2);
             translate([0,0,brace_t-2.2]) cylinder(d=6,h=3);
