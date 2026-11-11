@@ -8,8 +8,6 @@ show_brace = true;
 $fn=64;
 angle=-15;
 wall=3;
-face_h=122;
-center_w=190;
 pod_w=72;
 pod_rear_taper=0;
 depth=58;
@@ -17,9 +15,12 @@ rear_top_drop=0;
 
 // Dimensions carried over from original stand; standoff size still provisional.
 board_w=182.5;
+display_side_gap=0.5;
+center_w=board_w+2*display_side_gap;
 board_h=114;
 board_t=8;
-board_bottom=4;
+board_corner_r=6; // Preview display outline only.
+board_bottom=5; // Lower edge is 5 mm below display.
 board_clearance=0.6;
 mount_dx=167;
 mount_dy=100;
@@ -28,6 +29,8 @@ peg_d=6;
 peg_length=10;
 peg_fit=0.4;
 mount_t=4;
+// Horizontal top meets highest point of upper ears (their front upper edge).
+face_h=board_bottom+mount_bottom+mount_dy+6+board_t*tan(angle);
 screwdriver_d=7; // Tool access through floor to lower M2 display screws.
 speaker_od=64.15;
 speaker_cutout=51.71;
@@ -100,12 +103,13 @@ module display_mounts() {
     }
 }
 // Rear frame: X across, Y upwards along rear wall, Z outwards behind case.
-brace_bottom=22;
+brace_bottom=7; // Lower ear stays ~3 mm above table after recess.
 brace_h=32;
 brace_t=4;
 brace_w=center_w-1; // Fits between columns, 0.5 mm gap at either side.
 brace_mount_x=mount_dx/2;
 brace_gap=0.3;
+brace_recess=brace_t+brace_gap; // Outer face flush with rear wall.
 brace_insert_d=4.2;
 brace_insert_depth=8;
 module rear_frame() {
@@ -128,10 +132,10 @@ module right_pod() {
         union() {
             pod();
             display_mounts();
-            rotate([-(90-angle),0,0]) rear_frame() right_brace_ears();
+            rotate([-(90-angle),0,0]) rear_frame() translate([0,0,-brace_recess]) right_brace_ears();
         }
         // Inserts face rear, in ears extending into the central gap.
-        rotate([-(90-angle),0,0]) rear_frame()
+        rotate([-(90-angle),0,0]) rear_frame() translate([0,0,-brace_recess])
             brace_mount_positions(true)
                 translate([0,0,-brace_insert_depth])
                     cylinder(d=brace_insert_d,h=brace_insert_depth+0.02);
@@ -147,10 +151,14 @@ module brace_flat() {
         }
     }
 }
-module rear_brace() { rear_frame() translate([0,0,brace_gap]) brace_flat(); }
+module rear_brace() { rear_frame() translate([0,0,brace_gap-brace_recess]) brace_flat(); }
 module equipment() {
     if(show_display) color([0.08,0.2,0.25,0.65]) {
-        translate([-board_w/2,board_bottom,0]) cube([board_w,board_h,board_t]);
+        translate([-board_w/2,board_bottom,0])
+            linear_extrude(height=board_t)
+                translate([board_corner_r,board_corner_r])
+                    offset(r=board_corner_r)
+                        square([board_w-2*board_corner_r,board_h-2*board_corner_r]);
         translate([-124.5/2,board_bottom+(board_h-74.6)/2,board_t]) cube([124.5,74.6,9]);
         for(x=[-mount_dx/2,mount_dx/2]) for(y=[board_bottom+7,board_bottom+107])
             translate([x,y,board_t]) cylinder(d=peg_d,h=peg_length);
