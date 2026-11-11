@@ -85,7 +85,7 @@ Drop не делает I/O: забытый/брошенный writer остав�
 8192/17/4096 B, fragmented chains, remount, multi-sector writes, успешный abort,
 drop без finish, ошибку данных и отказ clean flag между FAT copies.
 Frontend пока ограничивает новые имена 8.3; LFN, alias generation и каталог
-с несколькими слотами на имя отложены. TCP/HTTP обработчика PUT пока нет.
+с несколькими слотами на имя отложены. [TCP/HTTP PUT](web.md) использует этот writer и abort при обрыве транспорта.
 
 ```text
 Приложение → Fat32 / File → Partition → BlockDevice → SdDevice → HAL SDMMC

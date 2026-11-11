@@ -169,7 +169,7 @@ impl Display {
             }
         }
         self.restore_settings(timer)?;
-        self.dsi.start_pattern(self.pattern);
+        // Stay in command mode until an explicit framebuffer/pattern start.
         self.asleep = false;
         self.backlight.set_brightness(self.brightness);
         timer.delay_us(100);
@@ -270,7 +270,7 @@ impl Display {
 
     pub fn set_pattern(&mut self, pattern: Pattern) -> Result<(), Error> {
         self.awake()?;
-        self.dsi.set_pattern(pattern);
+        self.dsi.start_pattern(pattern);
         self.pattern = pattern;
         Ok(())
     }
@@ -418,7 +418,7 @@ impl Display {
         if !self.asleep {
             return Ok(());
         }
-        self.dsi.start_pattern(self.pattern);
+        self.dsi.set_video_enabled(true);
         timer.delay_us(20_000);
         self.dsi.write_dcs(0x11, &[], timer)?;
         timer.delay_us(120_000);

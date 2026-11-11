@@ -1,0 +1,67 @@
+# Named command	internal action (never accepted as a wire key)
+help	?
+display status	q
+display errors	e
+display scanline	L
+display test bist	B
+display pattern vertical	v
+display pattern horizontal	h
+display pattern ber	b
+display video 650 rgb565	6
+display video 750 rgb565	7
+display video 750 rgb888	8
+display video 550 rgb565	z
+display invert on	i
+display invert off	I
+display mirror x	x
+display mirror y	y
+display mirror off	n
+display order bgr	c
+display order rgb	C
+display off	d
+display on	D
+display idle on	j
+display fill black	k
+display fill white	f
+display fill off	N
+display sleep	s
+display wake	w
+display te vblank	t
+display te both	u
+display te off	T
+display te line 300	l
+display idle-color green	g
+display reset software	r
+display reset hardware	R
+display brightness up	+
+display brightness down	-
+display test rgb	Q
+display test chart	E
+display screenshot	W
+display thumbnail	H
+display framebuffer start	F
+display framebuffer status	S
+display framebuffer stop	U
+camera controls	=
+camera gain digital up	]
+camera gain digital down	[
+camera gain analogue up	}
+camera gain analogue down	{
+camera exposure up	>
+camera exposure down	<
+camera start	V
+camera start-test	G
+camera stop	O
+camera info	a
+camera capture-test	A
+camera scene	o
+audio tone	p
+sd config-create	!
+sd list	Z
+sd capabilities	Y
+sd probe	M
+sd benchmark read	m
+sd test multi-write	#
+sd test write	@
+memory psram-test	P
+display idle off	J

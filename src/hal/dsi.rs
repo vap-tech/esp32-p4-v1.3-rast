@@ -189,6 +189,7 @@ impl Dsi {
         modify(CLOCK + 0x18, 0, 1 << 5);
         write(DMA + 0x10, 1);
         write(HOST + 4, 0);
+        self.configure_video_geometry();
         write(BRIDGE + 4, 0);
         write(BRIDGE, 1);
         // Do not mask FIFO underruns on the visible lines. The field at
@@ -501,6 +502,14 @@ impl Dsi {
             (3 << 5) | (0xff << 8),
             (1 << 5) | (4 << 8) | (1 << 7),
         );
+        self.configure_video_geometry();
+        self.set_pattern(pattern);
+        write(HOST + 0x34, 0); // Video mode.
+        write(HOST + 0x04, 1);
+    }
+
+    // Common packet geometry; does not enable VPG or start a video stream.
+    fn configure_video_geometry(&mut self) {
         write(HOST + 0x0c, 0); // VC0.
         self.video_timing();
         write(HOST + 0x14, 0); // Timing polarity: all active high.
@@ -514,9 +523,6 @@ impl Dsi {
         write(HOST + 0x58, 12);
         write(HOST + 0x5c, 20);
         write(HOST + 0x60, 600);
-        self.set_pattern(pattern);
-        write(HOST + 0x34, 0); // Video mode.
-        write(HOST + 0x04, 1);
     }
 
     pub fn set_pattern(&mut self, pattern: Pattern) {

@@ -54,7 +54,7 @@ manifest и payload. Промежуточный ram-image напрямую не 
 размерные features `eth-lab` / `sd-format` удалены. `audio-lab` только добавляет
 RX capture tests, не отключает штатные команды.
 
-HAL доступен через `esp32_p4::hal`; драйверы внешних устройств — через `esp32_p4::devices`. Текущая прошивка опрашивает GT911 на GPIO7/8, I²C1, 100 кГц, выдаёт `down / move / up` в USB и heartbeat со счётчиками кадров/ошибок. Дисплей запускается через собственный DSI HAL: аппаратные вертикальные цветные полосы 1024×600 остаётся включённым постоянно, GPIO23 управляет подсветкой через LEDC PWM 20 кГц, 10 бит; яркость установлена на 25%, без стартового перебора уровней. Объект `devices::jd9165::Display` объединяет DSI, RESET и PWM; через USB доступны команды проверки функций панели (`python scripts/display-control.py '?'`). По команде `F` включается один RGB565 framebuffer 1024×600 в PSRAM; `V` направляет камеру через ISP прямо в него. Подробности: [docs/framebuffer.md](docs/framebuffer.md). CSI принимает одиночный RAW10 crop 64×32 в SRAM через DW-GDMA; команды `a/A/o` и ограничения — в [docs/csi.md](docs/csi.md). Протокол, API и ограничения описаны в [docs/gt911.md](docs/gt911.md).
+HAL доступен через `esp32_p4::hal`; драйверы внешних устройств — через `esp32_p4::devices`. Текущая прошивка опрашивает GT911 на GPIO7/8, I²C1, 100 кГц, выдаёт `down / move / up` в USB и heartbeat со счётчиками кадров/ошибок. Дисплей запускается через собственный DSI HAL: при загрузке включается салатовая заливка RGB565 framebuffer 1024×600 в PSRAM, GPIO23 управляет подсветкой через LEDC PWM 20 кГц, 10 бит; яркость установлена на 25%, без стартового перебора уровней. Объект `devices::jd9165::Display` объединяет DSI, RESET и PWM; через USB доступны команды проверки функций панели (`python scripts/display-control.py help`). Один RGB565 framebuffer 1024×600 в PSRAM включается автоматически; `camera start` направляет камеру через ISP прямо в него. Подробности: [docs/framebuffer.md](docs/framebuffer.md). CSI принимает одиночный RAW10 crop 64×32 в SRAM через DW-GDMA; именованные команды `camera info` / `camera capture-test` / `camera scene` и ограничения — в [docs/csi.md](docs/csi.md). Протокол, API и ограничения описаны в [docs/gt911.md](docs/gt911.md).
 
 Промежуточный `espflash save-image --ignore-app-descriptor` создаёт контейнер Espressif: заголовок ROM, загружаемые сегменты, checksum и SHA-256. Сторонний загрузчик и код ESP-IDF не добавляются.
 
@@ -71,10 +71,9 @@ HAL доступен через `esp32_p4::hal`; драйверы внешних
 
 Монитор использует только стандартную библиотеку Python (Linux). Он освобождает DTR/RTS и переподключается после USB reset. Во время прошивки монитор нужно остановить. В этой сессии обычный монитор espflash оставлял плату в download mode; для проверки запуска используется `scripts/monitor.py`.
 
-Текущий stage-2 образ — **420656 байт** (около 411 KiB, включая Flash padding);
-загружаемый runtime payload — **166640 байт**. Размеры зависят от features и
-изменений кода; точные значения выводит `scripts/image.sh`.
-Исторический образ до stage-2 занимал **141936 байт**. Read-only RTC выводится с heartbeat; VLF/VDET установлены, календарь некорректен, время не менялось. На плате подтверждены GT911 1024×600, поток касаний и подтверждение кадров. Результаты предыдущих проверок I²C, таймера и GPIO сохранены в документации. Минимальный исходный образ 368 байт и особенности запуска описаны в [docs/boot.md](docs/boot.md).
+Текущий stage-2 образ с HTTP и Flash-assets — около **1 MiB** с padding;
+загружаемый runtime — около **189 KiB**. Точные размеры выводит `scripts/image.sh`.
+Исторические образы до HTTP занимали 420656 B, а до stage-2 — 141936 B. Read-only RTC выводится с heartbeat; VLF/VDET установлены, календарь некорректен, время не менялось. На плате подтверждены GT911 1024×600, поток касаний и подтверждение кадров. Результаты предыдущих проверок I²C, таймера и GPIO сохранены в документации. Минимальный исходный образ 368 байт и особенности запуска описаны в [docs/boot.md](docs/boot.md).
 
 Локальный справочник по регистрам: `~/esp-idf`, tag `v6.1`. SDK не устанавливается и в сборку не подключается.
 
@@ -149,3 +148,10 @@ Real WAV/JPEG lab: one SD/FAT32 volume, independent readonly cursors, continuous
 GPIO9 RX sample comparison and ring latency bounds. Both I-only and I+D passed
 minute runs; the detector catches an injected repeated frame without DMA error.
 Default DAC volume is now **-21 dB** (+3 dB). [Results and build](docs/wav-lab.md).
+
+Веб-файлы Flashbox: `python3 scripts/display-control.py --icache on --dcache off --web-run 3600`.
+Адрес печатается в `WEB READY`: страница из Flash, список/скачивание/последовательный
+PUT на SD. Без перезаписи существующих файлов, пока ASCII 8.3. Свободно около
+265 KiB work SRAM + 152 KiB DMA pool до запуска EMAC. [API и проверки](docs/web.md).
+
+Консоль принимает только полные строки `:command [args]` + Enter; одиночные буквы больше не выполняются. Общий список — [docs/console.md](docs/console.md), в скрипте: `python3 scripts/display-control.py help`.

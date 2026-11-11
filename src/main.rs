@@ -13,6 +13,8 @@ use esp32_p4::{
 #[cfg(feature = "audio-lab")]
 mod audio_lab;
 
+mod web_server;
+
 use core::{arch::global_asm, fmt::Write, panic::PanicInfo};
 
 global_asm!(include_str!("boot.S"), l2_size = const hal::memory::L2_SIZE_REGISTER);
@@ -51,6 +53,13 @@ extern "C" fn rust_main() -> ! {
     let _ = writeln!(console, "P4 rev1.3: ROM -> Rust OK");
     let mut timer = unsafe { hal::time::Timer::new() };
     let _ = writeln!(console, "SYSTIMER: XTAL/2.5, 16 MHz");
+    if let Err(error) = unsafe { hal::clock::init(&mut timer) } {
+        let _ = writeln!(console, "CLOCK INIT FAILED {}", error);
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+    clock_audit("boot", &mut timer, &mut console);
     let backlight_pin = unsafe { hal::gpio::Output::<23>::new_low() };
     let backlight = unsafe { hal::ledc::Pwm::new(backlight_pin) };
     timer.delay_us(100_000);
@@ -65,7 +74,7 @@ extern "C" fn rust_main() -> ! {
                 Ok(mut panel) => {
                     let _ = writeln!(
                         console,
-                        "DISPLAY READY VERTICAL 25% PWM20k duty={}",
+                        "DISPLAY READY backlight 25%, preparing framebuffer duty={}",
                         panel.pwm_duty()
                     );
                     let _ = writeln!(console, "PANEL {:?}", panel.snapshot(&mut timer));
@@ -84,6 +93,39 @@ extern "C" fn rust_main() -> ! {
             None
         }
     };
+    let mut psram = None;
+    let mut large_arena: Option<esp32_p4::memory::Arena<'static, esp32_p4::memory::External>> =
+        None;
+    // Boot checked the layout and reserved the stack; one arena owner per run.
+    let mut internal_arena = unsafe { hal::memory::internal_arena() };
+    let mut dma_arena = unsafe { hal::memory::dma_arena() };
+    let mut framebuffer: Option<esp32_p4::devices::framebuffer::Framebuffer> = None;
+    let mut scanout_active = false;
+    // Keep backlight on: show the real transition while preparing DMA scanout.
+    const BOOT_COLOR: u16 = 0x87e0; // Light green, RGB565.
+    let boot_started = timer.now_us();
+    let boot_result = (|| -> Result<(), &'static str> {
+        let memory = unsafe { hal::psram::Psram::new(&mut timer) }.map_err(|_| "PSRAM init")?;
+        let (display_memory, arena) = memory.split();
+        large_arena = Some(arena);
+        framebuffer = Some(esp32_p4::devices::framebuffer::Framebuffer::new_filled(
+            display_memory,
+            BOOT_COLOR,
+        ));
+        let panel = display.as_mut().ok_or("panel unavailable")?;
+        unsafe { panel.start_framebuffer(esp32_p4::devices::framebuffer::DMA_ADDRESS, &mut timer) }
+            .map_err(|_| "DMA start")?;
+        scanout_active = true;
+        Ok(())
+    })();
+    let _ = writeln!(
+        console,
+        "BOOT FRAMEBUFFER {:?} color={:04x} us={} guards={}",
+        boot_result,
+        BOOT_COLOR,
+        timer.now_us().wrapping_sub(boot_started),
+        framebuffer.as_ref().is_some_and(|fb| fb.guards_ok())
+    );
     let mut i2c = unsafe { hal::i2c::I2c::new(&mut timer) };
     let mut touch = loop {
         match Gt911::new(&mut i2c, &mut timer) {
@@ -106,28 +148,95 @@ extern "C" fn rust_main() -> ! {
     let mut heartbeat = timer.now_us();
     display_help(&mut console);
     let mut csi: Option<hal::csi::Csi> = None;
-    let mut psram = None;
-    let mut large_arena: Option<esp32_p4::memory::Arena<'static, esp32_p4::memory::External>> =
-        None;
-    // Boot checked the layout and reserved the stack; one arena owner per run.
-    let mut internal_arena = unsafe { hal::memory::internal_arena() };
-    let mut dma_arena = unsafe { hal::memory::dma_arena() };
-    let mut framebuffer: Option<esp32_p4::devices::framebuffer::Framebuffer> = None;
-    let mut scanout_active = false;
     let mut camera_live = false;
     let mut camera_controls = esp32_p4::devices::ov02c10::Controls::preview();
+    let mut command_input = esp32_p4::console::Input::default();
+    let mut alarm_active = false;
+    let mut alarm_poll = timer.now_us().wrapping_sub(1_000_000);
+    let mut alarm_retry = timer.now_us();
+    let mut clock_enabled = true;
+    let mut clock_face = esp32_p4::clock_face::ClockFace::default();
+    let mut clock_poll = timer.now_us().wrapping_sub(1_000_000);
     loop {
-        if let Some(command) = console.read_byte() {
-            if command == b':' {
-                let mut line = [0u8; 96];
-                let line = match media_command_line(&mut console, &mut timer, &mut line) {
-                    Ok(line) => line,
-                    Err(error) => {
-                        let _ = writeln!(console, "MEDIA ERROR {}", error);
-                        continue;
-                    }
+        let mut received = None;
+        let mut frame_bytes = [0u8; 96];
+        while let Some(byte) = console.read_byte() {
+            if let Some(frame) = command_input.feed(byte, timer.now_us()) {
+                received = Some(frame.map(|text| {
+                    frame_bytes[..text.len()].copy_from_slice(text.as_bytes());
+                    text.len()
+                }));
+                break;
+            }
+        }
+        if let Some(frame) = received {
+            let name = match frame {
+                Ok(len) => core::str::from_utf8(&frame_bytes[..len]).unwrap(),
+                Err(error) => {
+                    let _ = writeln!(console, "COMMAND ERROR {}", error);
+                    continue;
+                }
+            };
+            let command = esp32_p4::console::action(name).unwrap_or(0);
+            if matches!(command, b'Q' | b'E' | b'V' | b'G' | b'U') {
+                clock_enabled = false;
+            }
+            if command == 0 {
+                let mut normalized = [0; 96];
+                let Some(line) = esp32_p4::console::route(name, &mut normalized) else {
+                    let _ = writeln!(console, "COMMAND ERROR unknown command; use :help");
+                    continue;
                 };
-                if let Some(seconds) = line.strip_prefix("eth-run ") {
+                if line == "clock-ui on" || line == "clock-ui off" {
+                    clock_enabled = line.ends_with(" on");
+                    clock_face.invalidate();
+                    clock_poll = timer.now_us().wrapping_sub(1_000_000);
+                    let _ = writeln!(console, "DISPLAY CLOCK DONE Ok({})", clock_enabled);
+                } else if let Some(value) = line.strip_prefix("brightness ") {
+                    match value.parse::<u8>().ok().filter(|n| *n <= 100) {
+                        Some(percent) => {
+                            if let Some(panel) = display.as_mut() {
+                                panel.set_brightness(percent);
+                                let _ =
+                                    writeln!(console, "DISPLAY BRIGHTNESS DONE Ok({})", percent);
+                            } else {
+                                let _ =
+                                    writeln!(console, "DISPLAY BRIGHTNESS DONE Err(no display)");
+                            }
+                        }
+                        None => {
+                            let _ = writeln!(console, "DISPLAY BRIGHTNESS DONE Err(range 0..100)");
+                        }
+                    }
+                } else if let Some(command) = line.strip_prefix("rtc ") {
+                    let result = rtc_command(command, &mut i2c, &mut timer);
+                    match result {
+                        Ok(ref snapshot) => {
+                            let _ = writeln!(console, "RTC DATA raw={:02x?} date={:?} settings={:?} usable={} VLF={} VDET={} alarm={} timer={} update={}", snapshot.raw, snapshot.datetime(), snapshot.settings(), snapshot.time_usable(), snapshot.voltage_low(), snapshot.voltage_detected(), snapshot.alarm_pending(), snapshot.timer_pending(), snapshot.update_pending());
+                        }
+                        Err(ref error) => {
+                            let _ = writeln!(console, "RTC ERROR {:?}", error);
+                        }
+                    }
+                    let _ = writeln!(console, "RTC DONE {:?}", result.map(|_| ()));
+                } else if let Some(seconds) = line.strip_prefix("web-run ") {
+                    if let Ok(seconds @ 1..=86400) = seconds.parse::<u32>() {
+                        if camera_live || dma_arena.stats().used != 0 {
+                            let _ = writeln!(console, "WEB RUN DONE Err(state)");
+                            continue;
+                        }
+                        let result = web_server::run(seconds, &dma_arena, &mut timer, &mut console);
+                        dma_arena.reset();
+                        let _ = writeln!(
+                            console,
+                            "WEB RUN DONE {:?} stack={:?}",
+                            result,
+                            hal::memory::stack_usage()
+                        );
+                    } else {
+                        let _ = writeln!(console, "WEB RUN DONE Err(seconds)");
+                    }
+                } else if let Some(seconds) = line.strip_prefix("eth-run ") {
                     let seconds = seconds
                         .parse::<u32>()
                         .ok()
@@ -378,8 +487,12 @@ extern "C" fn rust_main() -> ! {
                         hal::memory::stack_usage()
                     );
                 } else if let Some(path) = line.strip_prefix("image ") {
+                    clock_enabled = false;
                     if camera_live {
-                        let _ = writeln!(console, "MEDIA IMAGE DONE Err(camera active; use O)");
+                        let _ = writeln!(
+                            console,
+                            "MEDIA IMAGE DONE Err(camera active; use :camera stop)"
+                        );
                         continue;
                     }
                     if display.is_none() {
@@ -493,11 +606,19 @@ extern "C" fn rust_main() -> ! {
                         &mut timer,
                         &mut console,
                         line.starts_with("play-stall "),
+                        if clock_enabled && scanout_active && !camera_live {
+                            framebuffer.as_mut().map(|fb| (fb, &mut clock_face))
+                        } else {
+                            None
+                        },
+                        None,
                     );
                     let _ = writeln!(console, "MEDIA PLAY DONE {:?}", result);
                 } else {
                     let _ = writeln!(console, "MEDIA ERROR see docs/console.md");
                 }
+            } else if command == b'?' {
+                display_help(&mut console);
             } else if command == 27 {
                 let _ = writeln!(console, "MEDIA PLAY DONE Ok(idle)");
             } else if matches!(command, b'+' | b'-') {
@@ -510,15 +631,19 @@ extern "C" fn rust_main() -> ! {
                     panel.set_brightness(brightness);
                     let _ = writeln!(
                         console,
-                        "CMD {} BACKLIGHT {}% duty={}",
-                        command as char,
+                        "COMMAND {} BACKLIGHT {}% duty={}",
+                        esp32_p4::console::action_name(command),
                         panel.brightness(),
                         panel.pwm_duty()
                     );
                 }
             } else if matches!(command, b'[' | b']' | b'{' | b'}' | b'<' | b'>') {
                 if !camera_live {
-                    let _ = writeln!(console, "CMD {} camera off; use V first", command as char);
+                    let _ = writeln!(
+                        console,
+                        "COMMAND {} camera off; use :camera start first",
+                        esp32_p4::console::action_name(command)
+                    );
                     continue;
                 }
                 let mut requested = camera_controls;
@@ -549,20 +674,26 @@ extern "C" fn rust_main() -> ! {
                 let actual = esp32_p4::devices::ov02c10::read_controls(&mut i2c, &mut timer);
                 let _ = writeln!(
                     console,
-                    "CMD {} CAMERA_CONTROLS {:?} actual={:?}",
-                    command as char, result, actual
+                    "COMMAND {} CAMERA_CONTROLS {:?} actual={:?}",
+                    esp32_p4::console::action_name(command),
+                    result,
+                    actual
                 );
             } else if command == b'=' {
                 let actual = esp32_p4::devices::ov02c10::read_controls(&mut i2c, &mut timer);
                 let brightness = display.as_ref().map(|panel| panel.brightness());
                 let _ = writeln!(
                     console,
-                    "CMD = CAMERA_CONTROLS {:?} BACKLIGHT {:?}%",
+                    "COMMAND camera controls CAMERA_CONTROLS {:?} BACKLIGHT {:?}%",
                     actual, brightness
                 );
             } else if matches!(command, b'V' | b'G') {
                 if !scanout_active {
-                    let _ = writeln!(console, "CMD {} use F first", command as char);
+                    let _ = writeln!(
+                        console,
+                        "COMMAND {} use :display framebuffer start first",
+                        esp32_p4::console::action_name(command)
+                    );
                     continue;
                 }
                 if let Some(receiver) = csi.as_mut() {
@@ -574,12 +705,22 @@ extern "C" fn rust_main() -> ! {
                     sensor::configure_window(&mut i2c, &mut timer, 1024, 600, command == b'G');
                 if let Err(error) = configured {
                     let _ = sensor::stream(&mut i2c, &mut timer, false);
-                    let _ = writeln!(console, "CMD {} sensor {:?}", command as char, error);
+                    let _ = writeln!(
+                        console,
+                        "COMMAND {} sensor {:?}",
+                        esp32_p4::console::action_name(command),
+                        error
+                    );
                     continue;
                 }
                 if let Err(error) = sensor::set_controls(&mut i2c, &mut timer, camera_controls) {
                     let _ = sensor::stream(&mut i2c, &mut timer, false);
-                    let _ = writeln!(console, "CMD {} controls {:?}", command as char, error);
+                    let _ = writeln!(
+                        console,
+                        "COMMAND {} controls {:?}",
+                        esp32_p4::console::action_name(command),
+                        error
+                    );
                     continue;
                 }
                 if csi.is_none() {
@@ -587,7 +728,12 @@ extern "C" fn rust_main() -> ! {
                 }
                 let start = sensor::stream(&mut i2c, &mut timer, true);
                 if start.is_err() {
-                    let _ = writeln!(console, "CMD {} start {:?}", command as char, start);
+                    let _ = writeln!(
+                        console,
+                        "COMMAND {} start {:?}",
+                        esp32_p4::console::action_name(command),
+                        start
+                    );
                     continue;
                 }
                 timer.delay_us(100_000);
@@ -602,8 +748,10 @@ extern "C" fn rust_main() -> ! {
                 }
                 let _ = writeln!(
                     console,
-                    "CMD {} live={} {:?}",
-                    command as char, camera_live, result
+                    "COMMAND {} live={} {:?}",
+                    esp32_p4::console::action_name(command),
+                    camera_live,
+                    result
                 );
             } else if command == b'O' {
                 if let Some(receiver) = csi.as_mut() {
@@ -611,31 +759,31 @@ extern "C" fn rust_main() -> ! {
                 }
                 let _ = esp32_p4::devices::ov02c10::stream(&mut i2c, &mut timer, false);
                 camera_live = false;
-                let _ = writeln!(console, "CMD O camera stopped");
+                let _ = writeln!(console, "COMMAND camera stop camera stopped");
             } else if command == b'p' {
                 let result = audio_tone(&mut i2c, &mut timer, &mut console);
-                let _ = writeln!(console, "CMD p {:?}", result);
+                let _ = writeln!(console, "COMMAND audio tone {:?}", result);
             } else if command == b'!' {
                 let result = sd_config_probe(&mut timer, &mut console);
-                let _ = writeln!(console, "CMD ! {:?}", result);
+                let _ = writeln!(console, "COMMAND sd config-create {:?}", result);
             } else if command == b'Z' {
                 let result = sd_fat_probe(&mut timer, &mut console);
-                let _ = writeln!(console, "CMD Z {:?}", result);
+                let _ = writeln!(console, "COMMAND sd list {:?}", result);
             } else if command == b'Y' {
                 let result = sdmmc_info(&mut timer, &mut console);
-                let _ = writeln!(console, "CMD Y {:?}", result);
+                let _ = writeln!(console, "COMMAND sd capabilities {:?}", result);
             } else if command == b'#' {
                 let result = sdmmc_multi_write_probe(&mut timer, &mut console);
-                let _ = writeln!(console, "CMD # {:?}", result);
+                let _ = writeln!(console, "COMMAND sd test multi-write {:?}", result);
             } else if command == b'@' {
                 let result = sdmmc_write_probe(&mut timer, &mut console);
-                let _ = writeln!(console, "CMD @ {:?}", result);
+                let _ = writeln!(console, "COMMAND sd test write {:?}", result);
             } else if command == b'm' {
                 let result = sdmmc_multi_probe(&mut timer, &mut console);
-                let _ = writeln!(console, "CMD m {:?}", result);
+                let _ = writeln!(console, "COMMAND sd benchmark read {:?}", result);
             } else if command == b'M' {
                 let result = sdmmc_probe(&mut timer, &mut console);
-                let _ = writeln!(console, "CMD M {:?}", result);
+                let _ = writeln!(console, "COMMAND sd probe {:?}", result);
             } else if command == b'Q' {
                 if let (Some(fb), Some(panel)) = (framebuffer.as_mut(), display.as_mut()) {
                     if camera_live {
@@ -664,9 +812,12 @@ extern "C" fn rust_main() -> ! {
                         );
                     }
                     fb.color_check();
-                    let _ = writeln!(console, "CMD Q color probe done");
+                    let _ = writeln!(console, "COMMAND display test rgb color probe done");
                 } else {
-                    let _ = writeln!(console, "CMD Q use F first");
+                    let _ = writeln!(
+                        console,
+                        "COMMAND display test rgb use :display framebuffer start first"
+                    );
                 }
             } else if command == b'E' {
                 if let Some(fb) = framebuffer.as_mut() {
@@ -678,12 +829,15 @@ extern "C" fn rust_main() -> ! {
                     fb.color_check();
                     let _ = writeln!(
                         console,
-                        "CMD E color-check active={} guards={}",
+                        "COMMAND display test chart color-check active={} guards={}",
                         scanout_active,
                         fb.guards_ok()
                     );
                 } else {
-                    let _ = writeln!(console, "CMD E use F first");
+                    let _ = writeln!(
+                        console,
+                        "COMMAND display test chart use :display framebuffer start first"
+                    );
                 }
             } else if command == b'F' {
                 if camera_live {
@@ -701,14 +855,22 @@ extern "C" fn rust_main() -> ! {
                         None => match unsafe { hal::psram::Psram::new(&mut timer) } {
                             Ok(memory) => memory,
                             Err(error) => {
-                                let _ = writeln!(console, "CMD F PSRAM {:?}", error);
+                                let _ = writeln!(
+                                    console,
+                                    "COMMAND display framebuffer start PSRAM {:?}",
+                                    error
+                                );
                                 continue;
                             }
                         },
                     };
                     let _ = writeln!(console, "PSRAM {:?}", memory.info);
                     if let Err(error) = memory.check() {
-                        let _ = writeln!(console, "CMD F memory {:?}", error);
+                        let _ = writeln!(
+                            console,
+                            "COMMAND display framebuffer start memory {:?}",
+                            error
+                        );
                         continue;
                     }
                     let (display_memory, arena) = memory.split();
@@ -731,7 +893,7 @@ extern "C" fn rust_main() -> ! {
                 }
                 let _ = writeln!(
                     console,
-                    "CMD F active={} guards={}",
+                    "COMMAND display framebuffer start active={} guards={}",
                     scanout_active,
                     framebuffer.as_ref().unwrap().guards_ok()
                 );
@@ -756,7 +918,7 @@ extern "C" fn rust_main() -> ! {
                 }
                 let _ = writeln!(
                     console,
-                    "CMD S active={} camera={}",
+                    "COMMAND display framebuffer status active={} camera={}",
                     scanout_active, camera_live
                 );
             } else if command == b'W' {
@@ -783,9 +945,16 @@ extern "C" fn rust_main() -> ! {
                         }
                         let _ = writeln!(console);
                     }
-                    let _ = writeln!(console, "CMD W screenshot done live={}", camera_live);
+                    let _ = writeln!(
+                        console,
+                        "COMMAND display screenshot screenshot done live={}",
+                        camera_live
+                    );
                 } else {
-                    let _ = writeln!(console, "CMD W use F first");
+                    let _ = writeln!(
+                        console,
+                        "COMMAND display screenshot use :display framebuffer start first"
+                    );
                 }
             } else if command == b'H' {
                 if let Some(fb) = framebuffer.as_ref() {
@@ -798,7 +967,7 @@ extern "C" fn rust_main() -> ! {
                         let _ = writeln!(console);
                     }
                 }
-                let _ = writeln!(console, "CMD H thumbnail done");
+                let _ = writeln!(console, "COMMAND display thumbnail thumbnail done");
             } else if command == b'U' {
                 if camera_live {
                     csi.as_mut().unwrap().stop();
@@ -812,10 +981,16 @@ extern "C" fn rust_main() -> ! {
                     }
                     scanout_active = false;
                 }
-                let _ = writeln!(console, "CMD U patterns restored");
+                let _ = writeln!(
+                    console,
+                    "COMMAND display framebuffer stop patterns restored"
+                );
             } else if command == b'P' {
                 if framebuffer.is_some() {
-                    let _ = writeln!(console, "CMD P framebuffer owns PSRAM; test skipped");
+                    let _ = writeln!(
+                        console,
+                        "COMMAND memory psram-test framebuffer owns PSRAM; test skipped"
+                    );
                     continue;
                 }
 
@@ -827,16 +1002,24 @@ extern "C" fn rust_main() -> ! {
                             psram = Some(memory);
                         }
                         Err(error) => {
-                            let _ = writeln!(console, "CMD P {:?}", error);
+                            let _ = writeln!(console, "COMMAND memory psram-test {:?}", error);
                             continue;
                         }
                     }
                 }
                 let _ = writeln!(console, "PSRAM memory check 4MiB");
-                let _ = writeln!(console, "CMD P {:?}", psram.as_mut().unwrap().check());
+                let _ = writeln!(
+                    console,
+                    "COMMAND memory psram-test {:?}",
+                    psram.as_mut().unwrap().check()
+                );
             } else if matches!(command, b'a' | b'A' | b'o') {
                 if camera_live && command != b'a' {
-                    let _ = writeln!(console, "CMD {} camera live; O stops it", command as char);
+                    let _ = writeln!(
+                        console,
+                        "COMMAND {} camera live; :camera stop stops it",
+                        esp32_p4::console::action_name(command)
+                    );
                     continue;
                 }
 
@@ -851,11 +1034,69 @@ extern "C" fn rust_main() -> ! {
             } else if scanout_active && !matches!(command, b'?' | b'q' | b'e' | b'i' | b'I') {
                 let _ = writeln!(
                     console,
-                    "CMD {} framebuffer active; U restores patterns",
-                    command as char
+                    "COMMAND {} framebuffer active; :display framebuffer stop restores patterns",
+                    esp32_p4::console::action_name(command)
                 );
             } else if let Some(panel) = display.as_mut() {
                 display_command(command, panel, &mut timer, &mut console);
+            }
+        }
+        if timer.now_us().wrapping_sub(alarm_poll) >= 1_000_000 {
+            alarm_poll = timer.now_us();
+            if let Ok(s) = Rx8025t::read(&mut i2c, &mut timer) {
+                if s.time_usable() && s.alarm_enabled() && s.alarm_pending() && !alarm_active {
+                    alarm_active = true;
+                    alarm_retry = timer.now_us();
+                    let _ = writeln!(console, "ALARM FIRED RTC AF=true AIE=true");
+                    if scanout_active && !camera_live {
+                        if let Some(fb) = framebuffer.as_mut() {
+                            esp32_p4::clock_face::alarm_button(fb, true);
+                        }
+                    }
+                }
+            }
+        }
+        if alarm_active && timer.now_us() >= alarm_retry && scanout_active && !camera_live {
+            clock_enabled = true;
+            if let Some(fb) = framebuffer.as_mut() {
+                let result = sd_audio(
+                    "SATIE.WAV",
+                    &mut i2c,
+                    &mut timer,
+                    &mut console,
+                    false,
+                    Some((fb, &mut clock_face)),
+                    Some((&mut touch, &mut alarm_active)),
+                );
+                let _ = writeln!(console, "ALARM AUDIO {:?} active={}", result, alarm_active);
+                if !alarm_active {
+                    esp32_p4::clock_face::alarm_button(fb, false);
+                }
+                // EOF repeats; SD/audio failure leaves touch active and retries slowly.
+                alarm_retry = timer.now_us() + if result.is_ok() { 250_000 } else { 5_000_000 };
+            }
+            tracker = Tracker::default();
+        }
+        if clock_enabled
+            && scanout_active
+            && !camera_live
+            && timer.now_us().wrapping_sub(clock_poll) >= 1_000_000
+        {
+            clock_poll = timer.now_us();
+            let date = Rx8025t::read(&mut i2c, &mut timer)
+                .ok()
+                .filter(|s| s.time_usable())
+                .and_then(|s| s.datetime().ok());
+            if let Some(fb) = framebuffer.as_mut() {
+                let started = timer.now_us();
+                let changed = clock_face.draw(fb, date);
+                let _ = writeln!(
+                    console,
+                    "CLOCK DRAW glyphs={} us={} valid={}",
+                    changed,
+                    timer.now_us().wrapping_sub(started),
+                    date.is_some()
+                );
             }
         }
         match touch.read_frame(&mut i2c, &mut timer) {
@@ -864,6 +1105,23 @@ extern "C" fn rust_main() -> ! {
                     frames = frames.wrapping_add(1);
                 }
                 for event in tracker.update(frame).into_iter().flatten() {
+                    if alarm_active
+                        && event.kind == Kind::Down
+                        && esp32_p4::clock_face::stop_hit(event.point.x, event.point.y)
+                    {
+                        match Rx8025t::acknowledge_alarm(&mut i2c, &mut timer) {
+                            Ok(()) => {
+                                alarm_active = false;
+                                if let Some(fb) = framebuffer.as_mut() {
+                                    esp32_p4::clock_face::alarm_button(fb, false);
+                                }
+                                let _ = writeln!(console, "ALARM ACK RTC AF cleared; AIE retained");
+                            }
+                            Err(error) => {
+                                let _ = writeln!(console, "ALARM ACK ERROR {:?}", error);
+                            }
+                        }
+                    }
                     let kind = match event.kind {
                         Kind::Down => "down",
                         Kind::Move => "move",
@@ -940,8 +1198,15 @@ extern "C" fn rust_main() -> ! {
 fn display_help(console: &mut hal::usb_serial::Console) {
     let _ = writeln!(
         console,
-        "DISPLAY commands: see docs/console.md; :image PATH; :play PATH; :sd-stress"
+        "CONSOLE v1: :command [arguments] + newline; ESC stops active jobs"
     );
+    for (name, _) in esp32_p4::console::entries(esp32_p4::console::COMMANDS) {
+        let _ = writeln!(console, "  {}", name);
+    }
+    for (name, _) in esp32_p4::console::entries(esp32_p4::console::ROUTES) {
+        let _ = writeln!(console, "  {} [arguments]", name);
+    }
+    let _ = writeln!(console, "CONSOLE HELP END");
 }
 
 #[inline(never)]
@@ -1012,7 +1277,7 @@ fn display_command(
         b'd' => panel.set_display_on(false, timer),
         b'D' => panel.set_display_on(true, timer),
         b'j' => panel.set_idle(true, timer),
-        b'W' => panel.set_idle(false, timer),
+        b'J' => panel.set_idle(false, timer),
         b'k' => panel.set_test_fill(Some(Fill::Black), timer),
         b'f' => panel.set_test_fill(Some(Fill::White), timer),
         b'N' => panel.set_test_fill(None, timer),
@@ -1029,8 +1294,8 @@ fn display_command(
     };
     let _ = writeln!(
         console,
-        "CMD {} {:?} duty={} PANEL {:?}",
-        char::from(command),
+        "COMMAND {} {:?} duty={} PANEL {:?}",
+        esp32_p4::console::action_name(command),
         result,
         panel.pwm_duty(),
         panel.snapshot(timer)
@@ -1068,11 +1333,15 @@ fn camera_command(
     use esp32_p4::devices::ov02c10 as camera;
     if command == b'a' {
         let _ = writeln!(console, "CAMERA {:?}", camera::snapshot(bus, timer));
-        let _ = writeln!(console, "CMD a OK");
+        let _ = writeln!(console, "COMMAND camera info OK");
         return;
     }
     if !phy_powered {
-        let _ = writeln!(console, "CMD {} error: LDO3 unavailable", command as char);
+        let _ = writeln!(
+            console,
+            "COMMAND {} error: LDO3 unavailable",
+            esp32_p4::console::action_name(command)
+        );
         return;
     }
     let _ = writeln!(
@@ -1082,7 +1351,12 @@ fn camera_command(
     );
     if let Err(error) = camera::configure_crop(bus, timer, command == b'A') {
         let _ = camera::stream(bus, timer, false);
-        let _ = writeln!(console, "CMD {} sensor error {:?}", command as char, error);
+        let _ = writeln!(
+            console,
+            "COMMAND {} sensor error {:?}",
+            esp32_p4::console::action_name(command),
+            error
+        );
         return;
     }
     if csi.is_none() {
@@ -1109,7 +1383,12 @@ fn camera_command(
     if start.is_err() {
         receiver.stop();
         let _ = camera::stream(bus, timer, false);
-        let _ = writeln!(console, "CMD {} stream error {:?}", command as char, start);
+        let _ = writeln!(
+            console,
+            "COMMAND {} stream error {:?}",
+            esp32_p4::console::action_name(command),
+            start
+        );
         return;
     }
     // Let the sensor emit its initial unmatched boundary packet, then capture
@@ -1126,7 +1405,12 @@ fn camera_command(
     };
     if let Err(error) = result {
         let _ = camera::stream(bus, timer, false);
-        let _ = writeln!(console, "CMD {} arm error {:?}", command as char, error);
+        let _ = writeln!(
+            console,
+            "COMMAND {} arm error {:?}",
+            esp32_p4::console::action_name(command),
+            error
+        );
         return;
     }
     let (result, status) = receiver.finish(timer);
@@ -1168,7 +1452,11 @@ fn camera_command(
         "CAMERA DATA guards={} changed={} hash={:08x} first={:02x?}",
         guards, changed, hash, first
     );
-    let _ = writeln!(console, "CMD {} CAMERA_DONE", command as char);
+    let _ = writeln!(
+        console,
+        "COMMAND {} CAMERA_DONE",
+        esp32_p4::console::action_name(command)
+    );
 }
 
 #[no_mangle]
@@ -1863,42 +2151,6 @@ fn sdmmc_info(
 }
 
 #[inline(never)]
-fn media_command_line<'a>(
-    console: &mut hal::usb_serial::Console,
-    timer: &mut hal::time::Timer,
-    buffer: &'a mut [u8; 96],
-) -> Result<&'a str, &'static str> {
-    let started = timer.now_us();
-    let mut len = 0;
-    let mut overflow = false;
-    loop {
-        if timer.now_us().wrapping_sub(started) & ((1 << 48) - 1) > 2_000_000 {
-            return Err("command timeout");
-        }
-        if let Some(byte) = console.read_byte() {
-            if byte == b'\n' {
-                if overflow {
-                    return Err("command too long");
-                }
-                return core::str::from_utf8(&buffer[..len]).map_err(|_| "ASCII command required");
-            }
-            if byte == b'\r' {
-                continue;
-            }
-            if !byte.is_ascii_graphic() && byte != b' ' {
-                overflow = true;
-            }
-            if len < buffer.len() {
-                buffer[len] = byte;
-                len += 1;
-            } else {
-                overflow = true;
-            }
-        }
-    }
-}
-
-#[inline(never)]
 fn sd_image(
     path: &str,
     fb: &mut esp32_p4::devices::framebuffer::Framebuffer,
@@ -1971,6 +2223,11 @@ fn sd_audio(
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
     stall: bool,
+    mut clock: Option<(
+        &mut esp32_p4::devices::framebuffer::Framebuffer,
+        &mut esp32_p4::clock_face::ClockFace,
+    )>,
+    mut alarm: Option<(&mut Gt911, &mut bool)>,
 ) -> Result<(), PlaybackError> {
     use esp32_p4::{
         devices::es8311::Es8311,
@@ -2045,8 +2302,20 @@ fn sd_audio(
         let mut refill_count = 0u32;
         let mut max_read_us = 0;
         let mut waiting = file.with_timer(|timer| timer.now_us());
+        let mut touch_due = waiting;
+        let mut clock_due = waiting;
+        let mut clock_updates = 0u32;
+        let mut max_clock_us = 0u64;
         loop {
             if console.read_byte() == Some(27) {
+                if let Some((_, active)) = alarm.as_mut() {
+                    if file
+                        .with_timer(|timer| Rx8025t::acknowledge_alarm(bus, timer))
+                        .is_ok()
+                    {
+                        **active = false;
+                    }
+                }
                 let _ = writeln!(console, "MEDIA PLAY STOP requested");
                 break;
             }
@@ -2063,6 +2332,21 @@ fn sd_audio(
                 );
             }
             if !ready.map_err(audio)? {
+                if file
+                    .with_timer(|timer| timer.now_us())
+                    .wrapping_sub(touch_due)
+                    >= 20_000
+                {
+                    touch_due = file.with_timer(|timer| timer.now_us());
+                    if let Some((touch, active)) = alarm.as_mut() {
+                        let hit = file.with_timer(|timer| alarm_stop_touch(touch, bus, timer));
+                        if hit {
+                            **active = false;
+                            let _ = writeln!(console, "ALARM ACK RTC AF cleared; AIE retained");
+                            break;
+                        }
+                    }
+                }
                 if file.with_timer(|timer| timer.now_us().wrapping_sub(waiting) & ((1 << 48) - 1))
                     > 200_000
                 {
@@ -2088,6 +2372,24 @@ fn sd_audio(
             index = (index + 1) % hal::i2s::STREAM_BUFFERS;
             refill_count += 1;
             waiting = file.with_timer(|timer| timer.now_us());
+            // Refill audio first. While the four DMA blocks play independently,
+            // use the resulting headroom for one bounded RTC/render operation.
+            if waiting.wrapping_sub(clock_due) >= 1_000_000 {
+                clock_due = waiting;
+                if let Some((fb, face)) = clock.as_mut() {
+                    let date = file
+                        .with_timer(|timer| Rx8025t::read(bus, timer))
+                        .ok()
+                        .filter(|s| s.time_usable())
+                        .and_then(|s| s.datetime().ok());
+                    face.draw(fb, date);
+                    max_clock_us = max_clock_us.max(
+                        file.with_timer(|timer| timer.now_us())
+                            .wrapping_sub(waiting),
+                    );
+                    clock_updates += 1;
+                }
+            }
             if refill_count.is_multiple_of(320) {
                 let _ = writeln!(
                     console,
@@ -2096,6 +2398,11 @@ fn sd_audio(
                 );
             }
         }
+        let _ = writeln!(
+            console,
+            "MEDIA PLAY CLOCK updates={} max_us={}",
+            clock_updates, max_clock_us
+        );
         // Descriptor EOF means drained AHB FIFO; allow the small I2S FIFO tail
         // to leave before muting (the next buffer contains silence near file EOF).
         file.with_timer(|timer| timer.delay_us(2_000));
@@ -2410,7 +2717,7 @@ fn jpeg_profile(
     Ok(())
 }
 
-// Read-only clock audit. The ROM-selected CPU root/dividers are never written.
+// Read-only clock audit of the explicitly configured root/dividers.
 #[inline(never)]
 fn clock_audit(
     label: &str,
@@ -2835,4 +3142,139 @@ fn ethernet_run(
     let _=writeln!(console,"ETH SUMMARY rx={} tx={} rx_errors={} arp_replies={} echo_replies={} lease={:?} status={:08x?}",received,sent,rx_errors,arp,echo,lease,emac.status());
     drop(emac); // Confirm DMA stop before caller resets the arena.
     Ok(())
+}
+
+fn rtc_command(
+    command: &str,
+    bus: &mut hal::i2c::I2c,
+    timer: &mut hal::time::Timer,
+) -> Result<esp32_p4::devices::rx8025t::Snapshot, esp32_p4::devices::rx8025t::Error> {
+    use esp32_p4::devices::rx8025t::{
+        Alarm, AlarmDay, Compensation, DateTime, Error, Frequency, Settings, TimerClock,
+    };
+    let mut words = command.split_ascii_whitespace();
+    let op = words.next().ok_or(Error::InvalidSetting)?;
+    let number = |s: Option<&str>| -> Result<u16, Error> {
+        s.and_then(|s| s.parse().ok()).ok_or(Error::InvalidSetting)
+    };
+    match op {
+        "read" if words.next().is_none() => {}
+        "init" | "set" => {
+            let date = DateTime::parse(words.next().ok_or(Error::InvalidCalendar)?)
+                .map_err(|_| Error::InvalidCalendar)?;
+            if words.next().is_some() {
+                return Err(Error::InvalidSetting);
+            }
+            if op == "init" {
+                Rx8025t::initialize(bus, timer, date, Settings::default())?;
+            } else {
+                Rx8025t::set_datetime(bus, timer, date)?;
+            }
+        }
+        "config" => {
+            let compensation = match words.next() {
+                Some("0.5") => Compensation::HalfSecond,
+                Some("2") => Compensation::TwoSeconds,
+                Some("10") => Compensation::TenSeconds,
+                Some("30") => Compensation::ThirtySeconds,
+                _ => return Err(Error::InvalidSetting),
+            };
+            let frequency = match words.next() {
+                Some("32768") => Frequency::Hz32768,
+                Some("1024") => Frequency::Hz1024,
+                Some("1") => Frequency::Hz1,
+                _ => return Err(Error::InvalidSetting),
+            };
+            let update_each_minute = match words.next() {
+                Some("second") => false,
+                Some("minute") => true,
+                _ => return Err(Error::InvalidSetting),
+            };
+            let update_interrupt = match words.next() {
+                Some("off") => false,
+                Some("on") => true,
+                _ => return Err(Error::InvalidSetting),
+            };
+            if words.next().is_some() {
+                return Err(Error::InvalidSetting);
+            }
+            Rx8025t::configure(
+                bus,
+                timer,
+                Settings {
+                    compensation,
+                    frequency,
+                    update_each_minute,
+                    update_interrupt,
+                },
+            )?;
+        }
+        "clear" if words.next().is_none() => Rx8025t::clear_flags(bus, timer)?,
+        "ram" => {
+            let value = number(words.next())?;
+            if value > 255 || words.next().is_some() {
+                return Err(Error::InvalidSetting);
+            }
+            Rx8025t::write_ram(bus, timer, value as u8)?;
+        }
+        "timer" => {
+            let count = number(words.next())?;
+            let clock = match words.next() {
+                Some("4096") => TimerClock::Hz4096,
+                Some("64") => TimerClock::Hz64,
+                Some("second") => TimerClock::Second,
+                Some("minute") => TimerClock::Minute,
+                _ => return Err(Error::InvalidSetting),
+            };
+            if words.next().is_some() {
+                return Err(Error::InvalidSetting);
+            }
+            Rx8025t::set_timer(
+                bus,
+                timer,
+                if count == 0 { None } else { Some(count) },
+                clock,
+                false,
+            )?;
+        }
+        "alarm-ack" if words.next().is_none() => Rx8025t::acknowledge_alarm(bus, timer)?,
+        "alarm-off" if words.next().is_none() => Rx8025t::disable_alarm(bus, timer)?,
+        "alarm" => {
+            let hour = number(words.next())?;
+            let minute = number(words.next())?;
+            if hour > 23 || minute > 59 || words.next().is_some() {
+                return Err(Error::InvalidSetting);
+            }
+            Rx8025t::set_alarm(
+                bus,
+                timer,
+                Alarm {
+                    hour: Some(hour as u8),
+                    minute: Some(minute as u8),
+                    day: AlarmDay::Any,
+                    interrupt: true,
+                },
+            )?;
+        }
+        _ => return Err(Error::InvalidSetting),
+    }
+    Rx8025t::read(bus, timer)
+}
+
+/// Check fresh touch reports while audio DMA continues; acknowledge RTC before dismissal.
+fn alarm_stop_touch(
+    touch: &mut Gt911,
+    bus: &mut hal::i2c::I2c,
+    timer: &mut hal::time::Timer,
+) -> bool {
+    if let Ok(Some(frame)) = touch.read_frame(bus, timer) {
+        if frame
+            .points()
+            .iter()
+            .any(|p| esp32_p4::clock_face::stop_hit(p.x, p.y))
+        {
+            return Rx8025t::acknowledge_alarm(bus, timer).is_ok();
+        }
+    }
+    false
 }

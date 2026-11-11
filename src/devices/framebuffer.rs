@@ -12,7 +12,18 @@ pub struct Framebuffer {
 }
 impl Framebuffer {
     pub fn new(memory: DisplayMemory) -> Self {
-        let mut this = Self { _memory: memory };
+        let mut this = Self::guarded(memory);
+        this.color_bars();
+        this
+    }
+    /// Initialize a uniform frame directly, without drawing intermediate test bars.
+    pub fn new_filled(memory: DisplayMemory, color: u16) -> Self {
+        let mut this = Self::guarded(memory);
+        this.fill_rgb565(color);
+        this
+    }
+    fn guarded(memory: DisplayMemory) -> Self {
+        let this = Self { _memory: memory };
         unsafe {
             for i in 0..32 {
                 (BASE as *mut u32).add(i).write_volatile(0x5aa5_5aa5);
@@ -21,7 +32,6 @@ impl Framebuffer {
                     .write_volatile(0x5aa5_5aa5);
             }
         }
-        this.color_bars();
         this
     }
     pub fn fill_rgb565_halfwords(&mut self, color: u16) {

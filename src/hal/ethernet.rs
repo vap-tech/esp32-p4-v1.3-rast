@@ -180,6 +180,11 @@ impl<'a, 't> Emac<'a, 't> {
         emac.active = true;
         Ok(emac)
     }
+    /// Temporarily lend the sole timer to another polled device. No EMAC method
+    /// can execute through this borrow while the operation is running.
+    pub fn with_timer<R>(&mut self, operation: impl FnOnce(&mut Timer) -> R) -> R {
+        operation(self.timer)
+    }
     pub fn now_us(&mut self) -> u64 {
         self.timer.now_us()
     }

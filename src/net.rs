@@ -1,5 +1,7 @@
-//! Minimal bounded Ethernet/IPv4 packet logic for bring-up, no sockets or TCP.
+//! Bounded Ethernet/IPv4 packet logic for bring-up and the local file server.
 //! DHCP client (one lease), ARP reply and ICMP echo. No allocations or fragments.
+pub mod http;
+pub mod tcp;
 pub const MAC: [u8; 6] = [0x02, 0xf1, 0xb2, 0xd3, 0x81, 0x00];
 pub const FRAME: usize = 1536;
 

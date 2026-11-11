@@ -10,8 +10,10 @@
 - Маленький bootstrap в SPM, code/rodata/data/BSS в upper SRAM. Fixed CODE 132 KiB
   удалён. Нижние 152 KiB выделены DMA pool, верхняя work arena начинается после
   всей статики и уменьшается по мере роста образа, runtime stack 16 KiB отдельно.
-- Default unified image: около 163 KiB payload + 19.25 KiB BSS; свободно около
-  314 KiB work + 152 KiB DMA. ROM-reserved 96 KiB не выделяются приложению.
+- Default с HTTP: около 189 KiB payload + 42 KiB BSS; свободно около
+  265 KiB work + 152 KiB DMA. ROM-reserved 96 KiB не выделяются приложению.
+- Статические Flash-assets уже реализованы для gzip HTML: slot 0x100000,
+  ROM read порциями, CRC32; постоянная SRAM-копия не создаётся. [Формат](web.md).
 - PSRAM CPU alias 0x88000000 некешируемый; это не готовый путь исполнения кода.
 - Arena — bump allocation, память возвращается reset целого региона, не Drop.
   Независимые освобождения, movable handles и вытеснение пока не реализованы.
@@ -25,8 +27,8 @@ allocation и синхронно останавливает DMA в Drop; start �
 проверяет D-cache OFF / L2=0. Снятие этого ограничения требует отдельной
 проверенной политики когерентности RX/TX buffers и descriptors.
 
-Первый следующий способ уменьшить resident payload — статические Flash-assets
-с явным чтением в session buffer. Overlays стоит вводить после этого, отдельно
+Первый статический Flash-asset (gzip HTML) уже читается в session buffer.
+Следующий шаг — вынести другие холодные ресурсы. Overlays стоит вводить отдельно
 от владения активными DMA-буферами.
 
 ## Целевое разграничение

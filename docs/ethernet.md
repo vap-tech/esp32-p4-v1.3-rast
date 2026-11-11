@@ -19,8 +19,9 @@ ping 192.168.1.167
 Ctrl-C в управляющем скрипте посылает ESC и ждёт подтверждения остановки.
 Обычный boot сеть не запускает; после окончания run MAC/DMA остановлены,
 PHY сохраняет физический линк. Это ограниченный по времени диагностический
-цикл, пока не фоновая служба совместно с touch/audio/SD. TCP, HTTP, файлового
-сервера, IPv6, VLAN, фрагментации IP и DHCP renewal/rebinding пока нет.
+цикл, пока не фоновая служба совместно с touch/audio/SD. Отдельная команда
+`:web-run N` поднимает [TCP/HTTP файловый сервер](web.md) поверх того же EMAC.
+IPv6, VLAN, фрагментации IP и DHCP renewal/rebinding пока нет.
 При истечении DHCP lease run прекращается, адрес дальше не используется.
 
 С 2026-11-08 Ethernet входит в обычный stage-2 образ. Размерный feature eth-lab
@@ -71,7 +72,8 @@ broadcast response. Ответы проверяются по xid, chaddr, cookie
 ACK должен соответствовать выбранным offer/server, lifetime должен быть ненулевым.
 IPv4 header checksum и nonzero UDP checksum проверяются. IP fragments отвергаются.
 После ACK отвечает на ARP request своего адреса и корректный ICMP echo request,
-сохраняя identifier/sequence/payload. TCP/UDP endpoints не открываются.
+сохраняя identifier/sequence/payload. В eth-run TCP/UDP endpoints не открываются;
+web-run дополнительно слушает TCP/80.
 
 Первый TX с одним descriptor, замкнутым на себя, дал реальные DUP ping (3 дубля
 на 4 запросах). После перехода на 4 TX slots DHCP стал давать одну пару

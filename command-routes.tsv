@@ -1,0 +1,28 @@
+# Public prefix	internal handler
+rtc	rtc
+net web serve	web-run
+net ethernet run	eth-run
+net ethernet probe	eth-probe
+sd format	format-sd
+audio test loopback	wav-lab
+audio test underrun	wav-lab-stall
+audio test control	wav-lab-control
+audio test repeat	wav-lab-repeat
+system test mixed	mixed-stress
+sd test dma	sd-stress
+system cache l2-probe	l2-probe
+system cache data	dcache
+system cache instruction	icache
+system cache l2	l2
+system clock	clock
+memory status	memory
+memory benchmark	memory-bench
+memory test	memory-test
+display image	image
+jpeg benchmark idct	jpeg-idct-bench
+jpeg profile	jpeg-profile
+jpeg benchmark output	jpeg-bench
+audio play	play
+audio test play-stall	play-stall
+display brightness	brightness
+display clock	clock-ui

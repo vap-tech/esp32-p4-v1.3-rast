@@ -43,10 +43,10 @@ Flashbox — лёгкий файловый менеджер для ESP32-P4. О�
 Предел FAT32 — 4 ГиБ − 1 байт. Имена не обрезаются и не переименовываются молча.
 LFN требует дополнительных записей каталога и коротких aliases; пока отложено.
 
-На борде пока есть DHCP/ARP/ping и файловый слой, но **TCP/HTTP API ещё нет**.
-Этот интерфейс подготовлен для подключения backend, не является уже работающим
-файловым сервером. Потоковый writer FAT32 принимает произвольные куски тела,
-публикует файл только по finish; при отмене HTTP обработчик должен вызвать abort.
+На борде работает собственный bounded TCP/HTTP backend: страница из Flash,
+GET/HEAD файлов, список и потоковый PUT на SD. Запуск и ограничения —
+[docs/web.md](../docs/web.md). FAT32 публикует файл только после finish;
+обрыв при здоровом носителе вызывает abort. I/O failure оставляет dirty volume.
 
 Проверки без npm: `node tests/frontend-uploads.mjs` из корня проекта.
 
@@ -82,18 +82,18 @@ LFN требует дополнительных записей каталога 
 
 ```
 
-И тот же API сразу подходит для `curl`:
+И тот же API сразу подходит для `curl` (IP взять из WEB READY; mDNS пока нет):
 
 ```
 
 # Список
-curl "http://esp32.local/api/list?path=/"
+curl "http://192.168.1.167/api/list?path=/"
 
 # Загрузка
-curl -T firmware.bin http://esp32.local/fs/firmware.bin
+curl -T firmware.bin http://192.168.1.167/fs/firmware.bin
 
 # Скачивание
-curl -o firmware.bin http://esp32.local/fs/firmware.bin
+curl -o firmware.bin http://192.168.1.167/fs/firmware.bin
 
 ```
 

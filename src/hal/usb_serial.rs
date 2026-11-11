@@ -4,7 +4,7 @@ use core::{fmt, marker::PhantomData};
 const FIFO: *mut u32 = 0x500d_2000 as *mut u32;
 const CONFIG: *mut u32 = 0x500d_2004 as *mut u32;
 
-/// Exclusive blocking console. No allocator, buffering, or USB stack.
+/// Exclusive console with bounded USB backpressure. No allocator, buffering, or USB stack.
 pub struct Console {
     _exclusive: PhantomData<*mut ()>,
 }
@@ -18,13 +18,20 @@ impl Console {
         }
     }
 
-    fn put(&mut self, byte: u8) {
+    fn put(&mut self, byte: u8) -> bool {
         unsafe {
+            // A battery-powered boot must not wait for a USB host.
+            let mut budget = 10_000;
             while CONFIG.read_volatile() & 2 == 0 {
+                if budget == 0 {
+                    return false;
+                }
+                budget -= 1;
                 core::hint::spin_loop();
             }
             FIFO.write_volatile(byte as u32);
         }
+        true
     }
 
     fn flush(&mut self) {
@@ -46,10 +53,12 @@ impl Console {
 impl fmt::Write for Console {
     fn write_str(&mut self, text: &str) -> fmt::Result {
         for byte in text.bytes() {
-            if byte == b'\n' {
-                self.put(b'\r');
+            if byte == b'\n' && !self.put(b'\r') {
+                return Ok(());
             }
-            self.put(byte);
+            if !self.put(byte) {
+                return Ok(());
+            }
         }
         // Submit even a short packet. Longer writes are sent when FIFO fills.
         self.flush();

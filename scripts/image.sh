@@ -6,4 +6,4 @@ cargo build --release --locked --target riscv32imafc-unknown-none-elf "$@"
 espflash save-image --chip esp32p4 --min-chip-rev 1.3 --ignore-app-descriptor \
   --flash-mode dio --flash-size 16mb --flash-freq 80mhz \
   target/riscv32imafc-unknown-none-elf/release/esp32-p4 target/ram-image.bin
-exec python3 scripts/pack-image.py target/ram-image.bin target/firmware.bin
+exec python3 scripts/pack-image.py target/ram-image.bin target/firmware.bin frontend/index.html

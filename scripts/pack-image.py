@@ -6,6 +6,7 @@ ROM receives only SPM segments, and boot.S loads the upper image afterwards.
 No ELF/Python packages or ESP-IDF runtime are required.
 """
 import hashlib
+import gzip
 from pathlib import Path
 import struct
 import sys
@@ -65,7 +66,10 @@ def make_rom(header, segments):
     return bytes(out)
 
 
-def pack(image):
+ASSET = 0x100000
+
+
+def pack(image, html=None):
     header, segments = parse_rom(image)
     # Round-trip an actual espflash image before changing its segment list.
     if make_rom(header, segments) != image:
@@ -99,13 +103,21 @@ def pack(image):
     manifest = struct.pack('<8s6I32s', MAGIC, 1, address, len(data),
                            crc, PAYLOAD, 0, bytes(32))
     assert len(manifest) == 64
-    return rom + b'\xff' * (MANIFEST - FLASH_BASE - len(rom)) + manifest + data
+    result = rom + b'\xff' * (MANIFEST - FLASH_BASE - len(rom)) + manifest + data
+    if html is not None:
+        asset = gzip.compress(html, compresslevel=9, mtime=0)
+        if len(result) > ASSET - FLASH_BASE or len(asset) > 65536:
+            raise ValueError('runtime overlaps asset slot or asset exceeds 64 KiB')
+        result += b'\xff' * (ASSET - FLASH_BASE - len(result))
+        result += struct.pack('<8sII', b'P4WEB001', len(asset), zlib.crc32(asset))
+        result += asset + bytes(-len(asset) % 4)
+    return result
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 3:
-        raise SystemExit('usage: pack-image.py INPUT.bin OUTPUT.bin')
-    result = pack(Path(sys.argv[1]).read_bytes())
+    if len(sys.argv) not in (3, 4):
+        raise SystemExit('usage: pack-image.py INPUT.bin OUTPUT.bin [INDEX.html]')
+    result = pack(Path(sys.argv[1]).read_bytes(), Path(sys.argv[3]).read_bytes() if len(sys.argv) == 4 else None)
     Path(sys.argv[2]).write_bytes(result)
     fields = struct.unpack_from('<8s6I', result, MANIFEST - FLASH_BASE)
     print(f'SPM bootstrap + upper SRAM: load={fields[2]:#x}, payload={fields[3]} B, '

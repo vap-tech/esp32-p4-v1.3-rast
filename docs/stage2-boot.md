@@ -38,9 +38,11 @@
 | `_bss_end..4ffbc000` | Динамически вычисляемая work arena, 64-B aligned |
 | `4ffbc000..4ffc0000` | Runtime stack 16 KiB с guard/watermark |
 
-С текущим объединённым default image: payload около **163 KiB**, BSS **19.25 KiB**,
+На этапе объединённого default image до HTTP: payload около **163 KiB**, BSS **19.25 KiB**,
 work около **314 KiB**, отдельно DMA **152 KiB**, то есть около **466 KiB** свободных
-арен. Точные размеры печатает `--memory`. Никакого CODE budget 132 KiB нет:
+арен. После добавления TCP/HTTP work около 265 KiB, DMA по-прежнему 152 KiB;
+payload около 189 KiB, BSS около 42 KiB. [Flash-assets и сервер](web.md).
+Точные размеры печатает `--memory`. Никакого CODE budget 132 KiB нет:
 рост `.upper` уменьшает work arena, а linker запрещает оставлять меньше 64 KiB.
 Нижний pool и runtime/statics/work/stack не пересекаются. Для l2-128 верхняя граница
 SRAM сдвигается как раньше, размеры work вычисляются заново, а не вычитаются вручную.
@@ -79,7 +81,9 @@ bootstrap, затем пересчитывает ROM checksum/SHA. Manifest до
 Это integrity check, не подпись или реализация Secure Boot.
 
 Финальный файл `target/firmware.bin` прошивается **целиком по 0x2000** как прежде.
-Его размер около 411 KiB, включая FF gap; это не объём занятой SRAM.
+До HTTP его размер был около 411 KiB. С Flash-assets по 0x100000 — около
+1 MiB, включая FF gap; это не объём занятой SRAM.
+После runtime packer добавляет отдельную gzip-страницу: [формат](web.md).
 `target/ram-image.bin` напрямую прошивать нельзя: runtime segment должен быть
 прочитан уже после настройки SRAM/L2. Обычный ROM load верхних cache banks в
 прошлых экспериментах не сохранял ожидаемое содержимое после старта.
