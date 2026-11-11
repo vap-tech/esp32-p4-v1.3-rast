@@ -27,6 +27,7 @@ peg_d=6;
 peg_length=10;
 peg_fit=0.4;
 mount_t=4;
+screwdriver_d=7; // Tool access through floor to lower M2 display screws.
 speaker_od=64.15;
 speaker_cutout=51.71;
 speaker_depth=29;
@@ -121,9 +122,16 @@ module center_frame() {
 }
 module body() {
     // Trim frame, rails and floor to one common outer contour.
-    intersection() {
-        union() { center_frame(); side(1) pod(); side(-1) pod(); }
-        pod_volume(0,-center_w/2-pod_w,center_w/2+pod_w);
+    difference() {
+        intersection() {
+            union() { center_frame(); side(1) pod(); side(-1) pod(); }
+            pod_volume(0,-center_w/2-pod_w,center_w/2+pod_w);
+        }
+        // Continue screw axes backwards until they cross the horizontal floor.
+        // Start behind each mounting seat, preserving the M2 head support.
+        for(x=[-mount_dx/2,mount_dx/2])
+            translate([x,board_bottom+mount_bottom,board_t+peg_length+mount_t])
+                cylinder(d=screwdriver_d,h=foot_depth+30);
     }
 }
 module equipment() {
