@@ -1,10 +1,22 @@
+use <speaker_accent_ring.scad>
 // Integrated display + two separate speaker enclosures. All dimensions mm.
 // Design coordinates: X horizontal, Y along front face upwards, Z into case.
 // Assembly and body rest on XY at world Z=0. Front and rear walls slope equally towards each other.
-part = "assembly"; // [assembly,body,left_pod,right_pod,rear_brace]
+part = "assembly"; // [assembly,body,left_pod,right_pod,rear_brace,left_lid,right_lid]
 show_display = true;
 show_speakers = true;
+show_accent_rings = true;
+accent_flange_d=68;
+accent_flange_h=1.2;
+accent_seat_h=2.8;
 show_brace = true;
+show_rear_lids = true;
+rear_lid_t=4;
+rear_lid_fit=0.3;
+rear_lid_insert_d=4.2; // Same successful fit as original enclosure.
+rear_lid_insert_depth=8;
+rear_lid_border=3;
+rear_lid_lip=2;
 $fn=64;
 angle=-15;
 wall=3;
@@ -127,20 +139,68 @@ module right_brace_ears() {
             cube([wall+1,12,10]);
     }
 }
+function rear_height()=case_height/cos(abs(angle));
+module rear_corner_positions() {
+    for(x=[center_w/2+8,center_w/2+pod_w-8])
+        for(y=[8,rear_height()-8]) translate([x,y,0]) children();
+}
+module rear_opening() {
+    rear_frame()
+        translate([center_w/2+rear_lid_border,rear_lid_border,-rear_lid_t-0.2])
+            cube([pod_w-2*rear_lid_border,rear_height()-2*rear_lid_border,rear_lid_t+2]);
+}
+module rear_seat() {
+    intersection() {
+    upright() pod_volume();
+    rear_frame() {
+        // Inward ledge supports the inserted lid; local supports allowed in slicer.
+        difference() {
+            translate([center_w/2,0,-rear_lid_t-2])
+                cube([pod_w,rear_height(),2]);
+            translate([center_w/2+rear_lid_border+rear_lid_lip,
+                       rear_lid_border+rear_lid_lip,-rear_lid_t-3])
+                cube([pod_w-2*(rear_lid_border+rear_lid_lip),
+                      rear_height()-2*(rear_lid_border+rear_lid_lip),4]);
+        }
+        // Tie each boss into both perimeter walls.
+        rear_corner_positions() translate([0,0,-rear_lid_t-rear_lid_insert_depth-2])
+            cylinder(d=14,h=rear_lid_insert_depth+2);
+    }
+    }
+}
 module right_pod() {
     difference() {
         union() {
-            pod();
+            difference() { pod(); rotate([-(90-angle),0,0]) rear_opening(); }
             display_mounts();
-            rotate([-(90-angle),0,0]) rear_frame() translate([0,0,-brace_recess]) right_brace_ears();
+            rotate([-(90-angle),0,0]) {
+                rear_frame() translate([0,0,-brace_recess]) right_brace_ears();
+                rear_seat();
+            }
         }
-        // Inserts face rear, in ears extending into the central gap.
-        rotate([-(90-angle),0,0]) rear_frame() translate([0,0,-brace_recess])
+        rotate([-(90-angle),0,0]) rear_frame() {
             brace_mount_positions(true)
-                translate([0,0,-brace_insert_depth])
+                translate([0,0,-brace_recess-brace_insert_depth])
                     cylinder(d=brace_insert_d,h=brace_insert_depth+0.02);
+            rear_corner_positions()
+                translate([0,0,-rear_lid_t-rear_lid_insert_depth])
+                    cylinder(d=rear_lid_insert_d,h=rear_lid_insert_depth+0.02);
+        }
     }
 }
+module right_lid_flat() {
+    difference() {
+        translate([center_w/2+rear_lid_border+rear_lid_fit,
+                   rear_lid_border+rear_lid_fit,0])
+            cube([pod_w-2*(rear_lid_border+rear_lid_fit),
+                  rear_height()-2*(rear_lid_border+rear_lid_fit),rear_lid_t]);
+        rear_corner_positions() {
+            translate([0,0,-1]) cylinder(d=3.2,h=rear_lid_t+2);
+            translate([0,0,rear_lid_t-2.2]) cylinder(d=6,h=3);
+        }
+    }
+}
+module right_lid() { rear_frame() translate([0,0,-rear_lid_t]) right_lid_flat(); }
 module body() { right_pod(); side(-1) right_pod(); }
 module brace_flat() {
     difference() {
@@ -163,7 +223,13 @@ module equipment() {
         for(x=[-mount_dx/2,mount_dx/2]) for(y=[board_bottom+7,board_bottom+107])
             translate([x,y,board_t]) cylinder(d=peg_d,h=peg_length);
     }
-    if(show_speakers) for(s=[-1,1]) side(s) color([0.2,0.2,0.2,0.65]) {
+    if(show_accent_rings) for(s=[-1,1]) side(s) color("DarkOrange")
+        translate([speaker_x(),face_h/2,0]) rotate([180,0,0])
+            speaker_accent_ring(flange_d=accent_flange_d,
+                flange_h=accent_flange_h,seat_h=accent_seat_h);
+    if(show_speakers) for(s=[-1,1]) side(s)
+        translate([0,0,show_accent_rings ? -accent_flange_h-accent_seat_h : 0])
+        color([0.2,0.2,0.2,0.65]) {
         translate([speaker_x(),face_h/2,-speaker_rim]) cylinder(d=speaker_od,h=speaker_rim);
         translate([speaker_x(),face_h/2,0]) cylinder(d=speaker_cutout,h=speaker_depth-speaker_rim);
     }
@@ -174,7 +240,11 @@ if(part=="assembly") {
         equipment();
     }
     if(show_brace) color("SteelBlue") rear_brace();
+    if(show_rear_lids) color("Silver") { right_lid(); side(-1) right_lid(); }
 } else if(part=="body") upright() body();
-else if(part=="right_pod") upright() right_pod();
-else if(part=="left_pod") upright() side(-1) right_pod();
+else if(part=="right_pod") right_pod();
+else if(part=="left_pod") side(-1) right_pod();
 else if(part=="rear_brace") translate([0,-brace_bottom,0]) brace_flat();
+
+else if(part=="right_lid") right_lid_flat();
+else if(part=="left_lid") side(-1) right_lid_flat();
