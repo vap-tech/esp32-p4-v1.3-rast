@@ -1,9 +1,10 @@
 // Integrated display + two separate speaker enclosures. All dimensions mm.
 // Design coordinates: X horizontal, Y along front face upwards, Z into case.
 // Assembly and body rest on XY at world Z=0. Front and rear walls slope equally towards each other.
-part = "assembly"; // [assembly,body]
+part = "assembly"; // [assembly,body,left_pod,right_pod,rear_brace]
 show_display = true;
 show_speakers = true;
+show_brace = true;
 $fn=64;
 angle=-15;
 wall=3;
@@ -82,13 +83,13 @@ module pod() {
     }
 }
 module display_mounts() {
-    for(x=[-mount_dx/2,mount_dx/2]) for(y=[board_bottom+mount_bottom,
+    for(x=[mount_dx/2]) for(y=[board_bottom+mount_bottom,
                                         board_bottom+mount_bottom+mount_dy]) {
         difference() {
             hull() {
                 translate([x,y,board_t]) cylinder(d=12,h=peg_length+mount_t);
-                translate([x<0 ? -center_w/2 : center_w/2-3,y-6,board_t])
-                    cube([3,12,peg_length+mount_t]);
+                translate([center_w/2-1,y-6,board_t])
+                    cube([wall+1,12,peg_length+mount_t]);
             }
             // Display standoffs slide into these sockets, seat at their ends.
             translate([x,y,board_t-0.01]) cylinder(d=peg_d+peg_fit,h=peg_length+0.01);
@@ -98,42 +99,55 @@ module display_mounts() {
         }
     }
 }
-module center_frame() {
-    difference() {
-        translate([-center_w/2-0.5,0,0]) cube([center_w+1,face_h,wall]);
-        // Full display outline cutout; four rear sockets carry the display.
-        translate([-(board_w+board_clearance)/2,board_bottom-board_clearance/2,-1])
-            cube([board_w+board_clearance,board_h+board_clearance,wall+2]);
-        // No top crossbar: buttons and SD remain accessible.
-        translate([-(board_w+board_clearance)/2,board_bottom+board_h,-1])
-            cube([board_w+board_clearance,face_h,wall+2]);
-    }
-    display_mounts();
-    // Continuous floor across full footprint, flush with pod bottoms.
-    intersection() {
-        pod_volume(0,-center_w/2-0.5,center_w/2+0.5);
-        rotate([-(90-angle),0,0])
-            translate([-center_w/2-1,-foot_depth-1,0])
-                cube([center_w+2,foot_depth+2,wall]);
-    }
-    // Side rails integrate the four sockets with the facade and pod walls.
-    for(s=[-1,1]) side(s)
-        translate([center_w/2-3.4,0,0]) cube([3.9,face_h,board_t+peg_length+mount_t]);
+// Rear frame: X across, Y upwards along rear wall, Z outwards behind case.
+brace_bottom=22;
+brace_h=32;
+brace_t=4;
+brace_w=center_w-1; // Fits between columns, 0.5 mm gap at either side.
+brace_mount_x=mount_dx/2;
+brace_gap=0.3;
+brace_insert_d=4.2;
+brace_insert_depth=8;
+module rear_frame() {
+    translate([0,-foot_depth,0]) rotate([90-abs(angle),0,0]) children();
 }
-module body() {
-    // Trim frame, rails and floor to one common outer contour.
+module brace_mount_positions(right_only=false) {
+    for(x=right_only ? [brace_mount_x] : [-brace_mount_x,brace_mount_x])
+        for(y=[brace_bottom+6,brace_bottom+brace_h-6])
+            translate([x,y,0]) children();
+}
+module right_brace_ears() {
+    brace_mount_positions(true) hull() {
+        translate([0,0,-10]) cylinder(d=12,h=10);
+        translate([center_w/2-1-brace_mount_x,-6,-10])
+            cube([wall+1,12,10]);
+    }
+}
+module right_pod() {
     difference() {
-        intersection() {
-            union() { center_frame(); side(1) pod(); side(-1) pod(); }
-            pod_volume(0,-center_w/2-pod_w,center_w/2+pod_w);
+        union() {
+            pod();
+            display_mounts();
+            rotate([-(90-angle),0,0]) rear_frame() right_brace_ears();
         }
-        // Continue screw axes backwards until they cross the horizontal floor.
-        // Start behind each mounting seat, preserving the M2 head support.
-        for(x=[-mount_dx/2,mount_dx/2])
-            translate([x,board_bottom+mount_bottom,board_t+peg_length+mount_t])
-                cylinder(d=screwdriver_d,h=foot_depth+30);
+        // Inserts face rear, in ears extending into the central gap.
+        rotate([-(90-angle),0,0]) rear_frame()
+            brace_mount_positions(true)
+                translate([0,0,-brace_insert_depth])
+                    cylinder(d=brace_insert_d,h=brace_insert_depth+0.02);
     }
 }
+module body() { right_pod(); side(-1) right_pod(); }
+module brace_flat() {
+    difference() {
+        translate([-brace_w/2,brace_bottom,0]) cube([brace_w,brace_h,brace_t]);
+        brace_mount_positions() {
+            translate([0,0,-1]) cylinder(d=3.2,h=brace_t+2);
+            translate([0,0,brace_t-2.2]) cylinder(d=6,h=3);
+        }
+    }
+}
+module rear_brace() { rear_frame() translate([0,0,brace_gap]) brace_flat(); }
 module equipment() {
     if(show_display) color([0.08,0.2,0.25,0.65]) {
         translate([-board_w/2,board_bottom,0]) cube([board_w,board_h,board_t]);
@@ -151,4 +165,8 @@ if(part=="assembly") {
         color("LightSlateGray") body();
         equipment();
     }
+    if(show_brace) color("SteelBlue") rear_brace();
 } else if(part=="body") upright() body();
+else if(part=="right_pod") upright() right_pod();
+else if(part=="left_pod") upright() side(-1) right_pod();
+else if(part=="rear_brace") translate([0,-brace_bottom,0]) brace_flat();
