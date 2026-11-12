@@ -90,3 +90,10 @@ impl super::fat32::SharedFile<'_, super::Partition<SdDevice<'_>>> {
         self.with_device(|d| operation(d.device_mut().timer))
     }
 }
+
+impl super::fat32::FileWriter<'_, super::Partition<SdDevice<'_>>> {
+    /// Serialize timer access with writes through this exclusive stream owner.
+    pub fn with_timer<R>(&mut self, operation: impl FnOnce(&mut Timer) -> R) -> R {
+        operation(self.device_mut().device_mut().timer)
+    }
+}

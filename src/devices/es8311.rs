@@ -60,6 +60,18 @@ impl Es8311 {
         timer.delay_us(50_000);
         Ok(Self)
     }
+    /// Enable analog microphone SDOUT, left ADC + right DAC reference, 24dB PGA.
+    /// PA remains off; caller provides the I2S clocks before initialization.
+    pub fn microphone(bus: &mut I2c, timer: &mut Timer) -> Result<Self, Error> {
+        let mut codec = Self::new(bus, timer)?;
+        codec.mute(bus, timer, true)?;
+        Self::write(bus, timer, 0x0a, 0x0c)?; // Enable ADC serial output, PCM16.
+        Self::write(bus, timer, 0x14, 0x1a)?; // Analog mic, not DMIC.
+        Self::write(bus, timer, 0x16, 4)?; // 24dB PGA (same as old recording firmware).
+        Self::write(bus, timer, 0x44, 0x58)?; // Left microphone, right DAC reference.
+        timer.delay_us(50_000);
+        Ok(codec)
+    }
     pub fn mute(&mut self, bus: &mut I2c, timer: &mut Timer, mute: bool) -> Result<(), Error> {
         let reg = Self::read(bus, timer, 0x31)? & !0x60;
         Self::write(bus, timer, 0x31, reg | if mute { 0x60 } else { 0 })

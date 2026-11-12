@@ -609,6 +609,45 @@ pub struct FileWriter<'a, D> {
     failed: bool,
 }
 impl<D: BlockDevice> FileWriter<'_, D> {
+    pub(crate) fn device_mut(&mut self) -> &mut D {
+        &mut self.fs.device
+    }
+    /// Rewrite an already-written prefix in the first sector (e.g. final WAV sizes).
+    /// No append/seek, no published files; failures poison the stream like write().
+    pub fn rewrite_prefix(&mut self, bytes: &[u8]) -> Result<(), Error<D::Error>> {
+        if self.failed {
+            return Err(Error::NeedsRecovery);
+        }
+        if bytes.len() > 512 || bytes.len() > self.size as usize {
+            return Err(Error::InvalidOffset);
+        }
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        if self.size < 512 {
+            self.tail[..bytes.len()].copy_from_slice(bytes);
+            return Ok(());
+        }
+        let sector = self.fs.geometry.cluster_sector(self.first);
+        let mut first = [0; 512];
+        let result = (|| {
+            self.fs
+                .device
+                .read(u64::from(sector), &mut first)
+                .map_err(Error::Device)?;
+            first[..bytes.len()].copy_from_slice(bytes);
+            self.fs
+                .device
+                .write(u64::from(sector), &first)
+                .map_err(Error::Device)
+        })();
+        self.fs.edge.sector = None;
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+
     pub fn len(&self) -> u32 {
         self.size
     }
@@ -1268,6 +1307,46 @@ mod tests {
                 .unwrap(),
             (cluster % 128) as usize * 4,
         )
+    }
+    #[test]
+    fn stream_patch_prefix_preserves_data_and_tail() {
+        for len in [44, 511, 512, 513, 4097] {
+            let mut fs = Fat32::mount(Partition::mbr(writable_disk(), 0).unwrap()).unwrap();
+            let mut expected: Vec<u8> = (0..len).map(pattern).collect();
+            let mut w = fs.create_stream("PATCH.WAV").unwrap();
+            w.write(&expected).unwrap();
+            assert!(w.rewrite_prefix(&[0; 513]).is_err());
+            w.rewrite_prefix(b"RIFF").unwrap();
+            expected[..4].copy_from_slice(b"RIFF");
+            assert_eq!(w.len() as usize, len);
+            w.finish().unwrap();
+            let mut file = fs.open("PATCH.WAV").unwrap();
+            let mut got = vec![0; len];
+            assert_eq!(file.read(&mut got).unwrap(), len);
+            assert_eq!(got, expected);
+        }
+    }
+    #[test]
+    fn stream_prefix_io_failure_cannot_publish_or_claim_rollback() {
+        for read_failure in [false, true] {
+            let mut fs = Fat32::mount(Partition::mbr(writable_disk(), 0).unwrap()).unwrap();
+            let mut w = fs.create_stream("BROKEN.WAV").unwrap();
+            w.write(&[3; 1024]).unwrap();
+            let lba = START + u64::from(w.fs.geometry.cluster_sector(w.first));
+            if read_failure {
+                w.fs.device.device.fail_at = Some(lba);
+            } else {
+                w.fs.device.device.fail_write = Some(lba);
+            }
+            assert!(w.rewrite_prefix(b"RIFF").is_err());
+            assert!(matches!(w.write(b"x"), Err(Error::NeedsRecovery)));
+            assert!(matches!(w.abort(), Err(Error::NeedsRecovery)));
+            assert!(matches!(fs.open("BROKEN.WAV"), Err(Error::NotFound)));
+            assert!(matches!(
+                fs.create_stream("NEXT.WAV"),
+                Err(Error::NeedsRecovery)
+            ));
+        }
     }
     #[test]
     fn stream_arbitrary_chunks_publish_at_finish_and_remount() {

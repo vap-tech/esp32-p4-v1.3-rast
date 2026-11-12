@@ -15,6 +15,9 @@ parser.add_argument('commands', nargs='*', help='named commands, quote commands 
 parser.add_argument('--port', default='/dev/ttyACM0')
 parser.add_argument('--hold', type=float, default=1.0, help='seconds to observe after each reply')
 parser.add_argument('--image', nargs='?', const='HOME.JPG', metavar='PATH', help='show baseline 1024x600 JPEG from SD (default HOME.JPG)')
+parser.add_argument('--arbitration', metavar='COMMAND', help='status or bench PROFILE MODE TARGET ROUNDS; memory contention experiment')
+parser.add_argument('--record', metavar='PATH', help='record microphone to a new PCM16/16kHz WAV on SD; STOP/ESC finishes')
+parser.add_argument('--record-seconds', type=int, default=10, metavar='1..600', help='maximum recording duration (default 10 seconds)')
 parser.add_argument('--play', nargs='?', const='SATIE.WAV', metavar='PATH', help='play PCM16/16kHz WAV from SD (default SATIE.WAV); Ctrl-C stops')
 parser.add_argument('--seconds', type=float, help='stop playback after this many seconds')
 parser.add_argument('--stop', action='store_true', help='stop ongoing SD audio playback')
@@ -52,7 +55,9 @@ if args.web_run is not None and not 1 <= args.web_run <= 86400:
     parser.error('--web-run requires 1..86400 seconds')
 if args.eth_run is not None and not 1 <= args.eth_run <= 600:
     parser.error('--eth-run requires 1..600 seconds')
-for path in (args.image, args.play, args.jpeg_bench, args.jpeg_profile, args.jpeg_idct_bench, args.play_stall):
+if not 1 <= args.record_seconds <= 600:
+    parser.error('--record-seconds requires 1..600')
+for path in (args.record, args.image, args.play, args.jpeg_bench, args.jpeg_profile, args.jpeg_idct_bench, args.play_stall):
     if path is not None and (not path or not path.isascii() or any(c.isspace() for c in path) or len(path) > 80):
         parser.error('media paths must be ASCII without whitespace, at most 80 characters (FAT32 8.3 components)')
 if any(not c or not c.isascii() or any(x in c for x in '\r\n') for c in args.commands) or args.hold < 0:
@@ -273,6 +278,28 @@ try:
         line = receive(b'JPEG IDCT DONE', timeout=180)
         if b'Err(' in line or b'guards=false' in line:
             raise RuntimeError('IDCT benchmark failed; see firmware reply')
+    if args.arbitration is not None:
+        command = args.arbitration
+        if not command or not command.isascii() or any(c in command for c in '\r\n') or len(command) > 72:
+            raise SystemExit('Invalid arbitration command')
+        send(fd, (':memory arbitration ' + command + '\n').encode('ascii'))
+        try:
+            line = receive(b'ARBITRATION DONE', timeout=180)
+        except KeyboardInterrupt:
+            send(fd, b'\x1b')
+            line = receive(b'ARBITRATION DONE', timeout=10)
+        if b'Err(' in line:
+            raise SystemExit('Arbitration experiment failed')
+    if args.record is not None:
+        print('HOST -> record ' + args.record, flush=True)
+        send(fd, (':audio record ' + args.record + ' ' + str(args.record_seconds) + '\n').encode('ascii'))
+        try:
+            line = receive(b'RECORD DONE', timeout=args.record_seconds + 30)
+        except KeyboardInterrupt:
+            send(fd, b'\x1b')
+            line = receive(b'RECORD DONE', timeout=15)
+        if b'Err(' in line or b'guard_ok: false' in line:
+            raise SystemExit('Recording failed; see firmware reply')
     if args.play is not None:
         print('HOST -> play ' + args.play, flush=True)
         send(fd, (':play ' + args.play + '\n').encode('ascii'))

@@ -13,6 +13,8 @@ use esp32_p4::{
 #[cfg(feature = "audio-lab")]
 mod audio_lab;
 
+mod arbitration_lab;
+mod recorder;
 mod web_server;
 
 use core::{arch::global_asm, fmt::Write, panic::PanicInfo};
@@ -187,7 +189,82 @@ extern "C" fn rust_main() -> ! {
                     let _ = writeln!(console, "COMMAND ERROR unknown command; use :help");
                     continue;
                 };
-                if line == "clock-ui on" || line == "clock-ui off" {
+                if line == "arbitration status" {
+                    let _ = writeln!(
+                        console,
+                        "ARBITRATION STATE {:x?}",
+                        hal::arbitration::snapshot()
+                    );
+                    let _ = writeln!(
+                        console,
+                        "ARBITRATION REGULATORS {:x?}",
+                        hal::arbitration::regulator_snapshot()
+                    );
+                    let _ = writeln!(console, "ARBITRATION DONE Ok(())");
+                } else if let Some(args) = line.strip_prefix("arbitration bench ") {
+                    if camera_live
+                        || !scanout_active
+                        || alarm_active
+                        || internal_arena.stats().used != 0
+                        || large_arena.as_ref().is_none_or(|a| a.stats().used != 0)
+                    {
+                        let _=writeln!(console,"ARBITRATION DONE Err(requires idle arenas, active LCD, camera/alarm off)");
+                        continue;
+                    }
+                    let result = arbitration_lab::run(
+                        args,
+                        arbitration_lab::Context {
+                            fb: framebuffer.as_mut().unwrap(),
+                            panel: display.as_mut().unwrap(),
+                            timer: &mut timer,
+                            console: &mut console,
+                            internal: &internal_arena,
+                            external: large_arena.as_ref().unwrap(),
+                        },
+                    );
+                    internal_arena.reset();
+                    large_arena.as_mut().unwrap().reset();
+                    let _ = writeln!(console, "ARBITRATION DONE {:?}", result);
+                } else if let Some(args) = line.strip_prefix("record ") {
+                    let mut words = args.split_ascii_whitespace();
+                    let path = words.next().unwrap_or("");
+                    let seconds = words.next().and_then(|s| s.parse::<u32>().ok());
+                    if path.is_empty()
+                        || seconds.is_none()
+                        || words.next().is_some()
+                        || camera_live
+                        || alarm_active
+                    {
+                        let _ = writeln!(console, "RECORD DONE Err(PATH SECONDS, no camera/alarm)");
+                        continue;
+                    }
+                    let result = recorder::run(
+                        path,
+                        seconds.unwrap(),
+                        recorder::Context {
+                            bus: &mut i2c,
+                            timer: &mut timer,
+                            console: &mut console,
+                            arena: &internal_arena,
+                            touch: &mut touch,
+                            panel: display.as_mut(),
+                            ui: if scanout_active {
+                                framebuffer.as_mut().map(|fb| (fb, &mut clock_face))
+                            } else {
+                                None
+                            },
+                        },
+                    );
+                    internal_arena.reset();
+                    clock_face.invalidate();
+                    tracker = Tracker::default();
+                    let _ = writeln!(
+                        console,
+                        "RECORD DONE {:?} stack={:?}",
+                        result,
+                        hal::memory::stack_usage()
+                    );
+                } else if line == "clock-ui on" || line == "clock-ui off" {
                     clock_enabled = line.ends_with(" on");
                     clock_face.invalidate();
                     clock_poll = timer.now_us().wrapping_sub(1_000_000);

@@ -1,4 +1,4 @@
-//! Continuous GPIO9 capture on AHB RX0. Caller retains the arena allocations
+//! Continuous GPIO9/GPIO48 capture on AHB RX0. Caller retains the arena allocations
 //! until stop() confirms park. CPU touches these buffers only through uncached aliases.
 use super::*;
 pub const BLOCKS: usize = 8;
@@ -17,6 +17,21 @@ impl Ring {
     /// (BLOCKS*2048 data bytes and BLOCKS*64 descriptor bytes). TX owns the
     /// shared I2S clocks. No cached alias may be used until stop confirms park.
     pub unsafe fn start(data: usize, desc: usize, timer: &mut Timer) -> Result<Self, Error> {
+        unsafe { Self::start_pin(data, desc, 9, timer) }
+    }
+    /// Start RX from loopback GPIO9 or codec SDOUT GPIO48.
+    /// # Safety
+    /// Same ownership/alignment contract as start(), plus exclusive selected GPIO input.
+    pub unsafe fn start_pin(
+        data: usize,
+        desc: usize,
+        pin: u8,
+        timer: &mut Timer,
+    ) -> Result<Self, Error> {
+        if pin != 9 && pin != 48 {
+            return Err(Error::InvalidBuffer);
+        }
+
         if !super::super::memory::valid_ahb_range(data, BLOCKS * WORDS * 4)
             || !super::super::memory::valid_ahb_range(desc, BLOCKS * 64)
         {
@@ -42,8 +57,15 @@ impl Ring {
                 FRAC_X | (FRAC_Y << 9) | (FRAC_Z << 18) | (FRAC_YN1 << 27),
             );
             modify(I2S + 0x24, 0, 1 << 30);
-            modify(0x500e_1004 + 9 * 4, 7 << 12, (1 << 12) | (1 << 9));
-            write(GPIO + 0x158 + 34 * 4, 9 | (1 << 7));
+            if pin == 48 {
+                write(GPIO + 0x34, 1 << 16);
+            }
+            modify(
+                0x500e_1004 + usize::from(pin) * 4,
+                7 << 12,
+                (1 << 12) | (1 << 9),
+            );
+            write(GPIO + 0x158 + 34 * 4, u32::from(pin) | (1 << 7));
             write(I2S + 0x20, RX_CONF | 3);
             write(I2S + 0x20, RX_CONF);
             write(

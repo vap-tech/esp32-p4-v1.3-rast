@@ -14,3 +14,5 @@ pub mod sdmmc;
 pub mod time;
 pub mod usb_serial;
 pub mod watchdog;
+
+pub mod arbitration;

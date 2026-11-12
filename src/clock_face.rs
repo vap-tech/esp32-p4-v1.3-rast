@@ -21,6 +21,9 @@ fn glyph(c: u8) -> [u8; 7] {
         b'-' => [0, 0, 0, 31, 0, 0, 0],
         b'M' => [17, 27, 21, 21, 17, 17, 17],
         b'S' => [15, 16, 16, 14, 1, 1, 30],
+        b'R' => [30, 17, 17, 30, 20, 18, 17],
+        b'E' => [31, 16, 16, 30, 16, 16, 31],
+        b'C' => [15, 16, 16, 16, 16, 16, 15],
         b'T' => [31, 4, 4, 4, 4, 4, 4],
         b'O' => [14, 17, 17, 17, 17, 17, 14],
         b'P' => [30, 17, 17, 30, 16, 16, 16],
@@ -180,5 +183,49 @@ mod alarm_tests {
         for p in [(311, 480), (712, 500), (400, 479), (400, 568), (0, 0)] {
             assert!(!super::stop_hit(p.0, p.1));
         }
+    }
+}
+
+/// Recording elapsed seconds and simple peak meter. Call no faster than ~4Hz.
+pub fn record_meter(fb: &mut Framebuffer, seconds: u32, peak: u16, visible: bool) {
+    let mut text = *b"REC 0000";
+    let mut n = seconds;
+    for i in (4..8).rev() {
+        text[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    for (i, c) in text.iter().enumerate() {
+        draw_char(fb, 368 + i * 36, 110, if visible { *c } else { b' ' }, 6);
+    }
+    let mut row = [BACKGROUND; 360];
+    if visible {
+        let width = peak_meter_width(peak);
+        row[..width].fill(0xf800);
+    }
+    for y in 170..186 {
+        fb.write_run(332, y, &row);
+    }
+    fb.finish_writes();
+}
+
+// Approximate log amplitude: meter spans -72 dBFS .. 0 dBFS.
+fn peak_meter_width(peak: u16) -> usize {
+    if peak == 0 {
+        return 0;
+    }
+    let log = 15 - peak.leading_zeros();
+    let base = 1u32 << log;
+    let log_q8 = log * 256 + (u32::from(peak) - base) * 256 / base;
+    (log_q8.saturating_sub(3 * 256) as usize * 360 / (12 * 256)).min(360)
+}
+#[cfg(test)]
+mod meter_tests {
+    #[test]
+    fn full_scale_and_six_db_steps() {
+        assert_eq!(super::peak_meter_width(0), 0);
+        assert_eq!(super::peak_meter_width(8), 0);
+        assert_eq!(super::peak_meter_width(32768), 360);
+        assert_eq!(super::peak_meter_width(16384), 330);
+        assert_eq!(super::peak_meter_width(8192), 300);
     }
 }

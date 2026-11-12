@@ -117,6 +117,7 @@ python3 scripts/display-control.py --web-run 300
 | `display clock` | on / off; автозапуск, время MSK из UTC RTC |
 | `display image` | PATH, baseline JPEG 1024×600 |
 | `audio play` | PATH, PCM16 WAV 16 кГц |
+| `audio record` | PATH SECONDS, новый WAV, 1…600 с; STOP/ESC |
 | `rtc` | read / init / set / config / alarm / alarm-ack / alarm-off / timer / ram / clear, см. [rtc.md](rtc.md) |
 | `system clock` | без аргументов, только измерение |
 | `system cache instruction` / `system cache data` / `system cache l2` | on / off; L2 только l2-128 build |
@@ -140,3 +141,19 @@ BIST, тесты записи SD, переключение кешей, тест�
 [DMA](dma.md), [web](web.md), [Ethernet](ethernet.md), [RTC](rtc.md),
 [audio lab](wav-lab.md). На этом этапе системы команд механизм запуска
 драйверов сохранён; изменения касаются приёма, имён и транспорта USB.
+
+Запись микрофона: `--record PATH --record-seconds N`, подробнее [recorder.md](recorder.md).
+
+Диагностика арбитража: `:memory arbitration status` и
+`:memory arbitration bench PROFILE MODE TARGET ROUNDS`.
+Профили `baseline`, `matrix-prio`, `matrix-qos`, `combined`,
+`wrong-port-qos` (контроль), `postwrite-off`, `cutthrough-off`;
+MODE=`u16|u32|paced`, TARGET=`frame|scratch|linear`, ROUNDS=1..200.
+Тест может намеренно вызвать видимые срывы LCD; сохраняет и восстанавливает
+пиксели и изменённые настройки. Условия, метрики и ограничения:
+[memory-arbitration.md](memory-arbitration.md).
+
+Для короткого исследования H2X доступны также MODE=`probe|busy|fence-busy`:
+одно чтение BUSY / ожидание сброса / fence и ожидание, каждые32 пикселя.
+Таймаут одного ожидания160000 тактов. Это диагностические режимы, не новая
+штатная политика рисования; см. ограничения измерений в memory-arbitration.md.

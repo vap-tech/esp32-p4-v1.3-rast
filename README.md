@@ -155,3 +155,5 @@ PUT на SD. Без перезаписи существующих файлов, 
 265 KiB work SRAM + 152 KiB DMA pool до запуска EMAC. [API и проверки](docs/web.md).
 
 Консоль принимает только полные строки `:command [args]` + Enter; одиночные буквы больше не выполняются. Общий список — [docs/console.md](docs/console.md), в скрипте: `python3 scripts/display-control.py help`.
+
+Запись микрофона: `python3 scripts/display-control.py --record REC0004.WAV --record-seconds 30`. Новый WAV на SD, STOP/ESC завершает файл; [проверки и ограничения](docs/recorder.md).

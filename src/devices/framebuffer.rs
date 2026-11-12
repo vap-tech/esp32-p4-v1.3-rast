@@ -106,14 +106,20 @@ impl Framebuffer {
     /// Write one bounded RGB565 run (e.g. an MCU row from the JPEG reader).
     pub fn write_run(&mut self, x: usize, y: usize, pixels: &[u16]) {
         assert!(y < HEIGHT && x <= WIDTH && pixels.len() <= WIDTH - x);
-        for (i, &pixel) in pixels.iter().enumerate() {
-            unsafe {
-                (CPU_ADDRESS as *mut u16)
-                    .add(y * WIDTH + x + i)
-                    .write_volatile(pixel);
-            }
+        let start = y * WIDTH + x;
+        // Pack adjacent RGB565 pixels, pacing external writes for LCD reads.
+        unsafe {
+            write_pixels((CPU_ADDRESS as *mut u16).add(start), pixels, || {
+                core::arch::asm!("fence rw, rw", options(nostack));
+                // Board boot policy explicitly sets CPU to 160MHz: 320 cycles=2us.
+                let start = crate::hal::time::cycle_count();
+                while crate::hal::time::cycle_count().wrapping_sub(start) < 320 {
+                    core::hint::spin_loop();
+                }
+            });
         }
     }
+
     pub fn finish_writes(&mut self) {
         unsafe {
             core::arch::asm!("fence rw, rw", options(nostack));
@@ -174,5 +180,60 @@ impl Framebuffer {
                 .add(WIDTH * (HEIGHT / 2) + i * WIDTH / 8 + 64)
                 .read_volatile()
         })
+    }
+}
+
+/// # Safety
+/// Destination must own pixels.len() writable u16 elements; no overlapping source.
+/// A u32 pair is written only when its address is four-byte aligned.
+unsafe fn write_pixels(destination: *mut u16, pixels: &[u16], mut yield_bus: impl FnMut()) {
+    let mut offset = 0;
+    if destination.addr() & 3 != 0 && !pixels.is_empty() {
+        unsafe {
+            destination.write_volatile(pixels[0]);
+        }
+        offset = 1;
+    }
+    let (pairs, tail) = pixels[offset..].as_chunks::<2>();
+    for (index, pair) in pairs.iter().enumerate() {
+        let packed = u32::from(pair[0]) | (u32::from(pair[1]) << 16);
+        unsafe {
+            destination.add(offset).cast::<u32>().write_volatile(packed);
+        }
+        offset += 2;
+        if (index + 1).is_multiple_of(16) {
+            yield_bus();
+        }
+    }
+    if let Some(&pixel) = tail.first() {
+        unsafe {
+            destination.add(offset).write_volatile(pixel);
+        }
+    }
+}
+#[cfg(test)]
+mod packed_tests {
+    #[test]
+    fn rgb565_pairs_preserve_order_alignment_and_guards() {
+        for start in [0, 1] {
+            for len in 0..=34 {
+                let mut backing = [0x7c1f7c1fu32; 20];
+                let values: [u16; 34] =
+                    core::array::from_fn(|i| (i as u16).wrapping_mul(257).wrapping_add(0x1234));
+                let pointer = backing.as_mut_ptr().cast::<u16>();
+                unsafe {
+                    super::write_pixels(pointer.add(start), &values[..len], || {});
+                }
+                for i in 0..40 {
+                    let actual = unsafe { pointer.add(i).read_volatile() };
+                    let expected = if (start..start + len).contains(&i) {
+                        values[i - start]
+                    } else {
+                        0x7c1f
+                    };
+                    assert_eq!(actual, expected, "start={} len={} index={}", start, len, i);
+                }
+            }
+        }
     }
 }

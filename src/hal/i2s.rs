@@ -531,5 +531,4 @@ mod tests {
     }
 }
 
-#[cfg(feature = "audio-lab")]
 pub mod capture;

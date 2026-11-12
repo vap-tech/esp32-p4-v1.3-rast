@@ -26,3 +26,5 @@ audio play	play
 audio test play-stall	play-stall
 display brightness	brightness
 display clock	clock-ui
+audio record	record
+memory arbitration	arbitration

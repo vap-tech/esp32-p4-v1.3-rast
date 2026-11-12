@@ -119,6 +119,30 @@ impl Wave {
         Ok(n)
     }
 }
+/// Sector-aligned PCM16 mono/16kHz WAV header. JUNK aligns audio to sector 1.
+/// Returns None for odd payload sizes or RIFF overflow.
+pub fn recording_header(data_bytes: u32) -> Option<[u8; 512]> {
+    if data_bytes & 1 != 0 {
+        return None;
+    }
+    let riff = data_bytes.checked_add(504)?;
+    let mut h = [0; 512];
+    h[..4].copy_from_slice(b"RIFF");
+    h[4..8].copy_from_slice(&riff.to_le_bytes());
+    h[8..16].copy_from_slice(b"WAVEfmt ");
+    h[16..20].copy_from_slice(&16u32.to_le_bytes());
+    h[20..22].copy_from_slice(&1u16.to_le_bytes());
+    h[22..24].copy_from_slice(&1u16.to_le_bytes());
+    h[24..28].copy_from_slice(&16000u32.to_le_bytes());
+    h[28..32].copy_from_slice(&32000u32.to_le_bytes());
+    h[32..34].copy_from_slice(&2u16.to_le_bytes());
+    h[34..36].copy_from_slice(&16u16.to_le_bytes());
+    h[36..40].copy_from_slice(b"JUNK");
+    h[40..44].copy_from_slice(&460u32.to_le_bytes());
+    h[504..508].copy_from_slice(b"data");
+    h[508..512].copy_from_slice(&data_bytes.to_le_bytes());
+    Some(h)
+}
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -129,6 +153,28 @@ mod tests {
         let n = (b.len() - 8) as u32;
         b[4..8].copy_from_slice(&n.to_le_bytes());
         b
+    }
+    #[test]
+    fn recorded_sector_header_parses_and_checks_bounds() {
+        let h = recording_header(4).unwrap();
+        let mut bytes = h.to_vec();
+        bytes.extend_from_slice(&[1, 0, 2, 0]);
+        let wave = Wave::parse(&mut Bytes {
+            data: &bytes,
+            pos: 0,
+        })
+        .unwrap();
+        assert_eq!(
+            (
+                wave.data_offset,
+                wave.data_bytes,
+                wave.channels,
+                wave.sample_rate
+            ),
+            (512, 4, 1, 16000)
+        );
+        assert!(recording_header(3).is_none());
+        assert!(recording_header(u32::MAX - 1).is_none());
     }
     #[test]
     fn pcm_chunks_padding_and_mono_expansion() {
