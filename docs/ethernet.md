@@ -99,3 +99,74 @@ SD и прочитал CONFIG.TXT, hash `ce6bb87b` совпал. Неудачн�
 47 host tests прошли (2 ignored). Host tests проверяют RFC checksum vector, odd payload, DHCP bounds/client/xid,
 malformed options, nonzero UDP checksum, ARP target, ICMP options/payload,
 ошибочные checksums и fragments. Логи: `target/ethernet/` (ignored).
+
+## Контрольный RAM HTTP тест через коммутатор
+
+Та же firmware и TCP/HTTP, без SD; DHCP192.168.1.167. Борда подключена RJ45,
+ноут остаётся Wi-Fi192.168.50.97, маршрут через192.168.50.1.
+1 MiB: download1.103 s /928.8 KiB/s, upload0.510 s /2006.9 KiB/s.
+4 MiB: download2.047 s /2001.0 KiB/s, upload2.085 s /1964.7 KiB/s.
+Download сверён побайтно; upload проверяет received count.
+Capture7949 packets, kernel drops0; максимальный интервал между всеми пакетами
+9.11 ms, секундных пауз предыдущего C6-прогона нет.
+Артефакты: target/network-capture/p4-wired-tcp.pcap и p4-wired-tcp.txt.
+
+Это подтверждает способность одного HP core и текущего стека выдавать около
+2 MiB/s в RAM HTTP при другом сетевом тракте. Не измеряет потолок Ethernet:
+ноут по-прежнему беспроводной, присутствует routing. Отсутствие секундных пауз
+без C6 указывает на важность C6/SDIO/радио-тракта, но не локализует исходные
+пропуски и не отменяет найденное условие fast retransmit/window-update в smoltcp.
+Wi-Fi и Ethernet HTTP пока запускаются по очереди, не одновременно.
+
+### Ноут и борда на одном проводном сегменте
+
+Ноут enp0s31f6=192.168.1.183/24, Wi-Fi DOWN, прямой route до192.168.1.167.
+Без изменения firmware: три RAM HTTP теста по4 MiB на направление:
+- download2.082/2.057/2.058 s,1967.0/1991.2/1990.5 KiB/s;
+- upload1.587/1.582/1.588 s,2581.1/2588.7/2579.1 KiB/s.
+Download проверен побайтно, upload поreceived count.
+Capture24924 packets, kernel drops0, файл target/network-capture/p4-all-wired.pcap.
+Перекрывающихся data sequence ranges в этих шести соединениях не обнаружено;
+GRO/TSO могут объединять наблюдаемые сегменты, поэтому это не счётчик PHY frames.
+В download ACK delay на ноуте median0.03–0.04 ms,max0.79 ms, zero-window нет.
+В каждом upload у борды681 объявление window0; advertised RX до6144B.
+ACK delay upload median1.85–1.87 ms, max2.52 ms. Это регулярная backpressure
+при заполнении RX, а не секундные потери/восстановление как в C6-прогоне.
+Следующее измерение: RX consumption/poll budgets, bytewise copies и занятость CPU;
+для download дополнительно время внутри Emac::transmit, который сейчас ждёт
+завершения descriptor после каждого кадра, несмотря на TX ring. Причина потолка
+скорости пока не доказана; конфигурацию/алгоритмы в этом тесте не меняли.
+
+### Профиль EMAC и I-cache A/B
+
+Добавлены агрегированные counters; вывод только после RAM net-test.
+EMAC array: rx_calls,rx_frames,rx_copy_us,tx_frames,tx_copy_us,tx_wait_us.
+Poll tuple: calls,total_us,read_empty,write_full. Времена вложенные: poll включает
+EMAC copy/wait; суммировать их как независимые стадии нельзя. AtomicU32 counters
+предназначены для коротких прогонов; переполнение при долгом накоплении допустимо.
+
+При холодном старте L1 I/D bypass; предыдущие проводные прогоны стартовали без
+явного icache on. Профильная сборка, I OFF:4 MiB download1856–1865 KiB/s,
+upload2380–2401 KiB/s. Пример GET2.195189s:TX copy673577us,wait364316us,
+RX copy33449us,poll1920444us. POST1.716077s:RX copy677439us,
+TX copy12429us,wait13425us,poll1389600us. write_full=0.
+Counters снизили скорость относительно прежних1967–1991/2579–2589KiB/s;
+это инструментированная, а не бесплатная диагностика.
+
+Та же профильная firmware, только icache on: register readback l1_bypass=18
+(decimal=0x12), D bypass остаётся, L2 size0,PSRAM uncached.
+Три4MiB GET:1.166/1.159/1.160s,3513.3/3533.4/3531.7KiB/s.
+Три POST:0.809/0.808/0.797s,5060.3/5071.7/5139.4KiB/s.
+GET1.158466s:TX copy221002us(19.1%),wait362199us(31.3%),RX copy12041us;
+poll1022056us,write_full0. POST0.795702s:RX copy222531us(28.0%),
+TX copy4619us,wait12449us,poll638756us,read_empty11447,write_full0.
+Copy bytewise volatile, по двум сторонам; это отдельно от других TCP/HTTP copies.
+RX часто временно пуст во время polling; один этот счётчик не доказывает CPU idle.
+
+I-cache остаётся runtime-настройкой, при reset снова bypass. Default boot policy
+в этой работе не изменена. Рекомендация по результатам профиля: широкое копирование
+и асинхронная публикация TX ring с проверкой освобождённых descriptor/errors;
+оба изменения ещё не реализованы. Глобальный D-cache для EMAC по-прежнему запрещён.
+Логи /tmp/p4-eth-prof-live.log и /tmp/p4-eth-prof-icache.log сохранены также
+в target/network-capture; новая firmware содержит counters. Host86 pass,
+Clippy all-features clean; memory link guards сохранены, payload411200B.

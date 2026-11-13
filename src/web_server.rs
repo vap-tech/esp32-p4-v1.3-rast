@@ -19,6 +19,10 @@ pub(crate) trait Port {
         None
     }
 
+    fn wired_stats(&self) -> Option<[u32; 6]> {
+        None
+    }
+    fn reset_stats(&mut self) {}
     fn shares_sdmmc(&self) -> bool {
         false
     }
@@ -32,6 +36,13 @@ pub(crate) trait Port {
     fn status(&self) -> [u32; 6];
 }
 impl Port for hal::ethernet::Emac<'_, '_> {
+    fn wired_stats(&self) -> Option<[u32; 6]> {
+        Some(self.stats())
+    }
+    fn reset_stats(&mut self) {
+        hal::ethernet::Emac::reset_stats(self);
+    }
+
     fn with_timer<R>(&mut self, operation: impl FnOnce(&mut hal::time::Timer) -> R) -> R {
         hal::ethernet::Emac::with_timer(self, operation)
     }
@@ -269,6 +280,10 @@ struct Network<'a, 'c, P: Port> {
     deadline: u64,
     stop: bool,
     rx_errors: u32,
+    ticks: u64,
+    poll_us: u64,
+    read_empty: u64,
+    write_full: u64,
     busy: &'a Cell<bool>,
 }
 impl<P: Port> Network<'_, '_, P> {
@@ -293,6 +308,8 @@ impl<P: Port> Network<'_, '_, P> {
             tx_budget: 16,
         };
         self.tcp.poll(now, &mut device);
+        self.ticks += 1;
+        self.poll_us += self.port.borrow_mut().now_us() - now;
         if let Some(error) = error {
             return Err(error);
         }
@@ -339,6 +356,7 @@ impl<P: Port> Transport for Connection<'_, '_, '_, P> {
             if self.network.borrow().tcp.eof(self.slot) {
                 return Ok(0);
             }
+            self.network.borrow_mut().read_empty += 1;
             self.tick()?;
         }
     }
@@ -361,11 +379,15 @@ impl<P: Port> Transport for Connection<'_, '_, '_, P> {
             if self.now() - start > 30_000_000 || !self.network.borrow().tcp.alive(self.slot) {
                 return Err(web::Error::Transport);
             }
+            let before = at;
             at += self
                 .network
                 .borrow_mut()
                 .tcp
                 .write(self.slot, &self.buffer[at..self.used]);
+            if at == before {
+                self.network.borrow_mut().write_full += 1;
+            }
             self.tick()?;
         }
         self.used = 0;
@@ -480,6 +502,10 @@ fn serve<P: Port>(
         deadline: start + u64::from(seconds) * 1_000_000,
         stop: false,
         rx_errors: 0,
+        ticks: 0,
+        poll_us: 0,
+        read_empty: 0,
+        write_full: 0,
         busy: &busy,
     };
     let mut offer = None;
@@ -596,6 +622,17 @@ fn serve<P: Port>(
         } else {
             None
         };
+        let measuring = request
+            .as_ref()
+            .is_ok_and(|r| r.route == http::Route::NetTest);
+        if measuring {
+            port.borrow_mut().reset_stats();
+            let mut n = network.borrow_mut();
+            n.ticks = 0;
+            n.poll_us = 0;
+            n.read_empty = 0;
+            n.write_full = 0;
+        }
         let request_started = port.borrow_mut().now_us();
         let mut connection = Connection {
             network: &network,
@@ -655,6 +692,19 @@ fn serve<P: Port>(
             network.borrow_mut().tcp.abort(slot);
         }
         network.borrow_mut().tcp.release(slot);
+        if measuring {
+            let wired = port.borrow().wired_stats();
+            if let Some(stats) = wired {
+                let elapsed = port.borrow_mut().now_us() - request_started;
+                let mut n = network.borrow_mut();
+                let counters = (n.ticks, n.poll_us, n.read_empty, n.write_full);
+                let _ = writeln!(
+                    n.console,
+                    "EMAC NET us={} {:?} poll=(calls,us,read_empty,write_full) {:?}",
+                    elapsed, stats, counters
+                );
+            }
+        }
         if let Some(before) = diagnostics {
             let after = port.borrow().diagnostics().unwrap();
             let elapsed = port.borrow_mut().now_us() - request_started;

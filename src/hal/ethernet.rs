@@ -95,6 +95,12 @@ const DMA: usize = MAC + 0x1000;
 
 /// Owns arena storage until DMA is synchronously stopped, including on errors.
 /// Initial bring-up requires D-cache bypass and L2=0; cached DMA is not implied.
+// Single EMAC owner; atomic counters keep diagnostics outside driver state.
+static PROFILE: [core::sync::atomic::AtomicU32; 6] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 6];
+fn profile(index: usize, value: u64) {
+    PROFILE[index].fetch_add(value as u32, core::sync::atomic::Ordering::Relaxed);
+}
 pub struct Emac<'a, 't> {
     storage: crate::memory::Buffer<'a, crate::memory::Internal>,
     timer: &'t mut Timer,
@@ -188,6 +194,14 @@ impl<'a, 't> Emac<'a, 't> {
     pub fn now_us(&mut self) -> u64 {
         self.timer.now_us()
     }
+    pub fn stats(&self) -> [u32; 6] {
+        core::array::from_fn(|i| PROFILE[i].load(core::sync::atomic::Ordering::Relaxed))
+    }
+    pub fn reset_stats(&mut self) {
+        for counter in &PROFILE {
+            counter.store(0, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
     pub fn status(&self) -> [u32; 6] {
         [
             read(DMA + 0x14),
@@ -207,6 +221,7 @@ impl<'a, 't> Emac<'a, 't> {
     /// Copies a completed, single-descriptor frame, then returns OWN to DMA.
     /// Frame length includes trailing FCS if the MAC supplies it.
     pub fn receive(&mut self, out: &mut [u8; FRAME]) -> Result<Option<usize>, Error> {
+        profile(0, 1);
         let dma_status = read(DMA + 0x14);
         if dma_status & (1 << 13) != 0 {
             return Err(Error::Dma(dma_status));
@@ -221,11 +236,14 @@ impl<'a, 't> Emac<'a, 't> {
         let valid =
             header & (1 << 15) == 0 && header & (3 << 8) == (3 << 8) && (14..=FRAME).contains(&len);
         if valid {
+            profile(1, 1);
+            let started = self.timer.now_us();
             for (i, byte) in out[..len].iter_mut().enumerate() {
                 *byte = unsafe {
                     ((self.base + DESCS + self.rx * FRAME + i) as *const u8).read_volatile()
                 };
             }
+            profile(2, self.timer.now_us() - started);
         }
         fence();
         write(desc, 1 << 31);
@@ -242,20 +260,27 @@ impl<'a, 't> Emac<'a, 't> {
         if !(14..=1514).contains(&frame.len()) {
             return Err(Error::Address);
         }
+        profile(3, 1);
         let desc = self.base + (RX_COUNT + self.tx) * 64;
+        let started = self.timer.now_us();
         wait_clear(desc, 1 << 31, self.timer, 10_000).map_err(|_| Error::TransmitTimeout)?;
+        profile(5, self.timer.now_us() - started);
+        let started = self.timer.now_us();
         for (i, byte) in frame.iter().enumerate() {
             unsafe {
                 ((self.base + DESCS + (RX_COUNT + self.tx) * FRAME + i) as *mut u8)
                     .write_volatile(*byte);
             }
         }
+        profile(4, self.timer.now_us() - started);
         write(desc + 4, frame.len() as u32);
         fence();
         write(desc, (1 << 31) | (1 << 29) | (1 << 28) | (1 << 20));
         fence();
         write(DMA + 4, 1);
+        let started = self.timer.now_us();
         wait_clear(desc, 1 << 31, self.timer, 10_000).map_err(|_| Error::TransmitTimeout)?;
+        profile(5, self.timer.now_us() - started);
         let status = read(desc);
         self.tx = (self.tx + 1) % TX_COUNT;
         if status & (1 << 15) != 0 {
