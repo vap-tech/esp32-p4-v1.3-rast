@@ -1,6 +1,14 @@
 # Состояние проекта — обновлено 2026-11-13
 
 
+## Ethernet TX pipeline и копирование кадров
+
+Проводной RAM HTTP после word copy/TX ring: 5.19–5.25 MiB/s GET и
+5.52–5.60 MiB/s POST, 3x4MiB на направление. web-run включает I-cache,
+D-cache остаётся OFF, L2=0. TX DMA wait около6ms на4MiB вместо362ms.
+31 HTTP request,rx_errors0,stack44144/65536B,guard intact. Host87 pass.
+[Профиль, проверки и ограничения](ethernet.md).
+
 ## Обновление 2026-11-13: async SDMMC и FAT
 
 Веб-файлы используют embedded-fatfs с LFN/Unicode через async BlockDevice.

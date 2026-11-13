@@ -170,3 +170,39 @@ I-cache остаётся runtime-настройкой, при reset снова b
 Логи /tmp/p4-eth-prof-live.log и /tmp/p4-eth-prof-icache.log сохранены также
 в target/network-capture; новая firmware содержит counters. Host86 pass,
 Clippy all-features clean; memory link guards сохранены, payload411200B.
+
+### Исправление: word copy и TX pipeline
+
+`Emac` копирует DMA-сторону 32-bit volatile words, CPU-срезы могут быть
+невыровнены; 1–3 хвостовых байта обрабатываются отдельно без выхода за кадр.
+Host-тест проверяет разные длины/смещения, содержимое и обе guard-области.
+TX публикует OWN и возвращается после копирования в собственный ring buffer,
+не ожидая именно этого кадра. Ждёт (до10ms) только перед повторным использованием
+занятого slot. Pending mask учитывает все четыре descriptors; receive/transmit
+снимают завершения и проверяют error summary. Ошибка TX отличается от RX Frame,
+передаётся как transport failure; при остановке DMA storage удерживается до
+подтверждения остановки как прежде. D-cache ON по-прежнему не разрешён.
+
+Проводной `web-run` теперь сам включает I-cache после проверки DMA cache policy;
+D-cache/L2 не переключаются. I-cache остаётся включённым после возврата в консоль,
+до reset или явного icache off. Начальная boot policy по-прежнему bypass.
+TX token содержит временный CPU workspace: после возврата driver владеет своей
+копией, а не удерживает borrowed slice smoltcp до окончания DMA.
+
+Та же профильная сборка с исправлением, 3x4MiB:
+GET0.771/0.763/0.762s,5312.4/5371.7/5373.7KiB/s;
+POST0.720/0.724/0.715s,5691.1/5657.4/5731.5KiB/s.
+Пример GET760793us:TX copy180636us,TX wait5733us (вместо362199us),
+RX copy8266us,poll624580us,write_full0.
+POST713123us:RX copy140314us,TX copy4173us,wait2447us,poll556193us.
+
+Capture24545 packets,kernel drops0; overlapping TCP data ranges не обнаружены,
+паузы между data-пакетами >20ms в этих соединениях отсутствуют.
+RX advertised window0 при POST всё ещё регулярно встречается (681 раз/запрос),
+но время возобновления уменьшилось: ACK delay median~0.88ms,max1.20ms.
+Режим polling и приложение всё ещё можно оптимизировать; это не line-rate.
+12 reconnect,3 simultaneous clients,GET/RST,truncated RAM POST,SD create/read
+32772B,HOME.JPG read и cleanup прошли; root до/после совпал.
+Host87 tests pass,Clippy clean,payload411504B.
+Capture и логи: target/network-capture/p4-eth-ring.pcap и p4-eth-ring-live.log.
+31 HTTP requests completed,rx_errors0;stack44144/65536B,guard intact.

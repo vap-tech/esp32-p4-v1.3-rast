@@ -178,7 +178,8 @@ impl Asset for FlashPage {
         Ok(n)
     }
 }
-/// smoltcp tokens borrow frame workspaces only until the synchronous DMA call ends.
+/// TX tokens lend a CPU workspace until the driver has copied the frame into
+/// its owned DMA storage; hardware completion may happen after the token returns.
 struct NetDevice<'a, P: Port> {
     port: &'a RefCell<P>,
     rx: &'a mut [u8; net::FRAME],
@@ -406,6 +407,10 @@ pub fn run(
     if cache.l1_bypass & 16 == 0 || cache.l2_size != 0 {
         return Err(web::Error::CacheConfiguration);
     }
+    // Instruction caching is independent of uncached data/DMA ownership.
+    unsafe { hal::memory::set_instruction_cache(true) }
+        .map_err(|_| web::Error::CacheConfiguration)?;
+    let _ = writeln!(console, "WEB ICACHE ON (D-cache remains bypassed)");
     let mut mdio = unsafe { hal::ethernet::Mdio::new() };
     let link = (|| {
         let _ = mdio.read(1, 1, timer)?;

@@ -18,6 +18,7 @@ pub enum Error {
     Memory,
     ResetTimeout,
     TransmitTimeout,
+    Transmit(u32),
     Dma(u32),
     Frame(u32),
 }
@@ -107,6 +108,7 @@ pub struct Emac<'a, 't> {
     base: usize,
     rx: usize,
     tx: usize,
+    tx_pending: u8,
     active: bool,
 }
 impl<'a, 't> Emac<'a, 't> {
@@ -151,6 +153,7 @@ impl<'a, 't> Emac<'a, 't> {
             base,
             rx: 0,
             tx: 0,
+            tx_pending: 0,
             active: false,
         };
         for i in 0..RX_COUNT {
@@ -221,6 +224,7 @@ impl<'a, 't> Emac<'a, 't> {
     /// Copies a completed, single-descriptor frame, then returns OWN to DMA.
     /// Frame length includes trailing FCS if the MAC supplies it.
     pub fn receive(&mut self, out: &mut [u8; FRAME]) -> Result<Option<usize>, Error> {
+        self.reap_tx()?;
         profile(0, 1);
         let dma_status = read(DMA + 0x14);
         if dma_status & (1 << 13) != 0 {
@@ -238,11 +242,7 @@ impl<'a, 't> Emac<'a, 't> {
         if valid {
             profile(1, 1);
             let started = self.timer.now_us();
-            for (i, byte) in out[..len].iter_mut().enumerate() {
-                *byte = unsafe {
-                    ((self.base + DESCS + self.rx * FRAME + i) as *const u8).read_volatile()
-                };
-            }
+            copy_from_dma(self.base + DESCS + self.rx * FRAME, &mut out[..len]);
             profile(2, self.timer.now_us() - started);
         }
         fence();
@@ -260,34 +260,47 @@ impl<'a, 't> Emac<'a, 't> {
         if !(14..=1514).contains(&frame.len()) {
             return Err(Error::Address);
         }
+        self.reap_tx()?;
         profile(3, 1);
         let desc = self.base + (RX_COUNT + self.tx) * 64;
         let started = self.timer.now_us();
         wait_clear(desc, 1 << 31, self.timer, 10_000).map_err(|_| Error::TransmitTimeout)?;
         profile(5, self.timer.now_us() - started);
+        self.reap_tx()?;
         let started = self.timer.now_us();
-        for (i, byte) in frame.iter().enumerate() {
-            unsafe {
-                ((self.base + DESCS + (RX_COUNT + self.tx) * FRAME + i) as *mut u8)
-                    .write_volatile(*byte);
-            }
-        }
+        copy_to_dma(self.base + DESCS + (RX_COUNT + self.tx) * FRAME, frame);
         profile(4, self.timer.now_us() - started);
         write(desc + 4, frame.len() as u32);
         fence();
         write(desc, (1 << 31) | (1 << 29) | (1 << 28) | (1 << 20));
         fence();
-        write(DMA + 4, 1);
-        let started = self.timer.now_us();
-        wait_clear(desc, 1 << 31, self.timer, 10_000).map_err(|_| Error::TransmitTimeout)?;
-        profile(5, self.timer.now_us() - started);
-        let status = read(desc);
+        self.tx_pending |= 1 << self.tx;
         self.tx = (self.tx + 1) % TX_COUNT;
-        if status & (1 << 15) != 0 {
-            Err(Error::Frame(status))
-        } else {
-            Ok(())
+        write(DMA + 4, 1);
+        Ok(())
+    }
+    // Reclaim only descriptors returned by DMA, checking every completion even
+    // when no further TX is queued. Never inspect a DMA-owned status as final.
+    fn reap_tx(&mut self) -> Result<(), Error> {
+        let dma_status = read(DMA + 0x14);
+        if dma_status & (1 << 13) != 0 {
+            return Err(Error::Dma(dma_status));
         }
+        for i in 0..TX_COUNT {
+            if self.tx_pending & (1 << i) == 0 {
+                continue;
+            }
+            let status = read(self.base + (RX_COUNT + i) * 64);
+            if status & (1 << 31) != 0 {
+                continue;
+            }
+            fence();
+            self.tx_pending &= !(1 << i);
+            if status & (1 << 15) != 0 {
+                return Err(Error::Transmit(status));
+            }
+        }
+        Ok(())
     }
     #[inline(never)]
     fn stop(&mut self) {
@@ -315,8 +328,58 @@ impl Drop for Emac<'_, '_> {
         self.stop();
     }
 }
+// DMA buffers are word-aligned internal SRAM. CPU slices need no alignment.
+// Tail bytes are handled separately: neither path reads/writes past the frame.
+fn copy_from_dma(address: usize, out: &mut [u8]) {
+    let (words, tail) = out.as_chunks_mut::<4>();
+    for (i, word) in words.iter_mut().enumerate() {
+        *word = read(address + i * 4).to_le_bytes();
+    }
+    let offset = words.len() * 4;
+    for (i, byte) in tail.iter_mut().enumerate() {
+        *byte = unsafe { ((address + offset + i) as *const u8).read_volatile() };
+    }
+}
+fn copy_to_dma(address: usize, bytes: &[u8]) {
+    let (words, tail) = bytes.as_chunks::<4>();
+    for (i, word) in words.iter().enumerate() {
+        write(address + i * 4, u32::from_le_bytes(*word));
+    }
+    let offset = words.len() * 4;
+    for (i, byte) in tail.iter().enumerate() {
+        unsafe { ((address + offset + i) as *mut u8).write_volatile(*byte) };
+    }
+}
 fn fence() {
     unsafe {
         core::arch::asm!("fence rw, rw", options(nostack));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn word_copy_handles_unaligned_cpu_slices_and_exact_tails() {
+        for len in [1, 2, 3, 4, 5, 14, 63, 64, 65, 1500, 1514, 1536] {
+            for shift in 0..4 {
+                let mut input = [0u8; 1540];
+                for (i, b) in input.iter_mut().enumerate() {
+                    *b = i as u8;
+                }
+                let mut dma = [0xa5a5a5a5u32; 386];
+                let address = dma.as_mut_ptr() as usize + 4;
+                super::copy_to_dma(address, &input[shift..shift + len]);
+                assert_eq!(dma[0], 0xa5a5a5a5);
+                let raw = unsafe { core::slice::from_raw_parts(address as *const u8, 1540) };
+                assert!(raw[len..].iter().all(|b| *b == 0xa5));
+                let mut output = [0xabu8; 1540];
+                super::copy_from_dma(address, &mut output[shift..shift + len]);
+                assert_eq!(&output[shift..shift + len], &input[shift..shift + len]);
+                assert!(output[..shift]
+                    .iter()
+                    .chain(output[shift + len..].iter())
+                    .all(|b| *b == 0xab));
+            }
+        }
     }
 }
