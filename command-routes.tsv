@@ -35,3 +35,4 @@ wifi default	c6-default	wifi
 net wifi serve	wifi-web	wifi
 wifi raw	c6-raw	wifi,diagnostics
 system irq test	irq-test	diagnostics
+sd benchmark files	sd-files-bench	diagnostics

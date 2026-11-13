@@ -571,3 +571,5 @@ SD PUT/GET32772B exact, JPEG и удаление тестового файла; 
 81 Rust tests passed,2 ignored; Clippy all-features/frontend/packer checks прошли.
 Default CMD53 image прошит, профиль R4-2G-TEST, веб-сервер снова запущен.
 Подробные счётчики и порядок воспроизведения: [wifi.md](wifi.md#sdio-profiling-и-чистый-транспорт).
+
+Профиль записи SD и исправление секторного разбиения HTTP: [storage-write-profile.md](storage-write-profile.md).

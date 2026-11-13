@@ -39,6 +39,9 @@ pub struct Partition<D> {
     pub(super) sectors: u64,
 }
 impl<D: BlockDevice> Partition<D> {
+    pub fn start(&self) -> u64 {
+        self.start
+    }
     pub fn new(device: D, start: u64, sectors: u64) -> Result<Self, Error<D::Error>> {
         if sectors == 0
             || start

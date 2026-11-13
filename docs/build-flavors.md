@@ -122,3 +122,5 @@ wifi/software-jpeg/audio-lab/diagnostics; Clippy default, wifi-only, JPEG-only
 3 clients и чередование файлов прошли. Два PUT завершились при
 удерживаемом GET, четвёртый abort удалён; SHA/root unchanged. Не форматировали SD.
 Проверка features выполнялась без включения Wi-Fi на плате.
+
+Диагностический файловый SD benchmark и append-маршрут: [storage-write-profile.md](storage-write-profile.md).

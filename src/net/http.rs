@@ -163,10 +163,12 @@ pub fn parse(bytes: &[u8]) -> Result<Request, u16> {
     };
     let allowed = match route {
         Route::Index | Route::List | Route::State => matches!(method, Method::Get | Method::Head),
-        Route::File => matches!(
-            method,
-            Method::Get | Method::Head | Method::Put | Method::Delete | Method::Mkcol
-        ),
+        Route::File => {
+            matches!(
+                method,
+                Method::Get | Method::Head | Method::Put | Method::Delete | Method::Mkcol
+            ) || cfg!(feature = "diagnostics") && method == Method::Post
+        }
         Route::Rename | Route::Brightness => method == Method::Post,
         Route::NetTest | Route::Clipboard => {
             matches!(method, Method::Get | Method::Head | Method::Post)
@@ -175,9 +177,18 @@ pub fn parse(bytes: &[u8]) -> Result<Request, u16> {
     if !allowed {
         return Err(405);
     }
+    if route == Route::File && method == Method::Post && length.is_none() {
+        return Err(411);
+    }
+    if route == Route::File && method == Method::Post && length.unwrap_or(0) > 512 {
+        return Err(413);
+    }
+
     if length.unwrap_or(0) != 0
         && !(matches!(route, Route::Clipboard | Route::NetTest) && method == Method::Post
-            || route == Route::File && method == Method::Put)
+            || route == Route::File
+                && (method == Method::Put
+                    || cfg!(feature = "diagnostics") && method == Method::Post))
     {
         return Err(400);
     }
@@ -325,6 +336,30 @@ pub fn json_string(out: &mut impl fmt::Write, s: &str) -> fmt::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn diagnostic_append_requires_bounded_body() {
+        let result = parse(b"POST /fs/LOG.TXT HTTP/1.1\r\nHost: p4\r\nContent-Length: 32\r\n\r\n");
+        assert_eq!(result.is_ok(), cfg!(feature = "diagnostics"));
+        let missing = parse(b"POST /fs/LOG.TXT HTTP/1.1\r\nHost: p4\r\n\r\n");
+        assert_eq!(
+            missing.err(),
+            Some(if cfg!(feature = "diagnostics") {
+                411
+            } else {
+                405
+            })
+        );
+        let large = parse(b"POST /fs/LOG.TXT HTTP/1.1\r\nHost: p4\r\nContent-Length: 513\r\n\r\n");
+        assert_eq!(
+            large.err(),
+            Some(if cfg!(feature = "diagnostics") {
+                413
+            } else {
+                405
+            })
+        );
+    }
+
     #[test]
     fn unicode_paths_and_json_are_utf8_not_escaped_bytes() {
         let r = parse(

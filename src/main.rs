@@ -237,6 +237,42 @@ extern "C" fn rust_main() -> ! {
 
                     #[cfg(not(feature = "wifi"))]
                     let _ = args;
+                } else if line == "sd-files-bench" || line.starts_with("sd-files-bench ") {
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        let mib = line.strip_prefix("sd-files-bench").unwrap().trim();
+                        let mib = if mib.is_empty() {
+                            Some(8)
+                        } else {
+                            mib.parse::<u32>().ok()
+                        };
+                        let Some(mib @ 1..=64) = mib else {
+                            let _ = writeln!(console, "SD FILE BENCH DONE Err(size 1..64 MiB)");
+                            continue;
+                        };
+                        if camera_live || alarm_active || dma_arena.stats().used != 0 {
+                            let _ = writeln!(console, "SD FILE BENCH DONE Err(busy)");
+                            continue;
+                        }
+                        let Some(panel) = display.as_mut() else {
+                            let _ = writeln!(console, "SD FILE BENCH DONE Err(display)");
+                            continue;
+                        };
+                        let result = web_server::run_storage_bench(
+                            mib,
+                            &dma_arena,
+                            &mut timer,
+                            &mut console,
+                            panel,
+                        );
+                        dma_arena.reset();
+                        let _ = writeln!(
+                            console,
+                            "SD FILE BENCH DONE {:?} stack={:?}",
+                            result,
+                            hal::memory::stack_usage()
+                        );
+                    }
                 } else if line == "irq-test" {
                     #[cfg(feature = "diagnostics")]
                     {

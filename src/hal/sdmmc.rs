@@ -1104,6 +1104,40 @@ static mut ASYNC_DESCRIPTORS: AsyncDescriptors =
     AsyncDescriptors([[0; 16]; MAX_TRANSFER / DMA_CHUNK]);
 static ASYNC_ACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static ASYNC_FAULT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Diagnostic counters, microsecond totals wrap after ~71 minutes; reset per test.
+#[cfg(feature = "diagnostics")]
+pub mod profile {
+    use core::sync::atomic::{AtomicU32, Ordering};
+    pub const N: usize = 24;
+    static COUNTERS: [AtomicU32; N] = [const { AtomicU32::new(0) }; N];
+    static DATA_START: AtomicU32 = AtomicU32::new(0);
+    static ROOT_START: AtomicU32 = AtomicU32::new(0);
+    static ROOT_END: AtomicU32 = AtomicU32::new(0);
+    pub fn add(i: usize, n: u64) {
+        COUNTERS[i].fetch_add(n as u32, Ordering::Relaxed);
+    }
+    pub fn snapshot() -> [u32; N] {
+        core::array::from_fn(|i| COUNTERS[i].load(Ordering::Relaxed))
+    }
+    pub fn reset() {
+        for c in &COUNTERS {
+            c.store(0, Ordering::Relaxed);
+        }
+    }
+    pub fn regions(data_start: u32, root_start: u32, root_sectors: u32) {
+        DATA_START.store(data_start, Ordering::Relaxed);
+        ROOT_START.store(root_start, Ordering::Relaxed);
+        ROOT_END.store(root_start.saturating_add(root_sectors), Ordering::Relaxed);
+    }
+    pub fn metadata(lba: u32, len: usize) -> bool {
+        let end = u64::from(lba) + (len / 512) as u64;
+        let data = DATA_START.load(Ordering::Relaxed);
+        data != 0
+            && (end <= u64::from(data)
+                || lba >= ROOT_START.load(Ordering::Relaxed)
+                    && end <= u64::from(ROOT_END.load(Ordering::Relaxed)))
+    }
+}
 pub struct Request {
     cmd: u8,
     arg: u32,
@@ -1114,6 +1148,12 @@ pub struct Request {
     transaction_deadline: u64,
     seen: u32,
     claimed: bool,
+    #[cfg(feature = "diagnostics")]
+    profile_start: u64,
+    #[cfg(feature = "diagnostics")]
+    profile_mark: u64,
+    #[cfg(feature = "diagnostics")]
+    profile_metadata: bool,
 }
 impl Request {
     fn new(cmd: u8, arg: u32, len: usize, writing: bool) -> Self {
@@ -1127,7 +1167,19 @@ impl Request {
             transaction_deadline: 0,
             seen: 0,
             claimed: false,
+            #[cfg(feature = "diagnostics")]
+            profile_start: 0,
+            #[cfg(feature = "diagnostics")]
+            profile_mark: 0,
+            #[cfg(feature = "diagnostics")]
+            profile_metadata: false,
         }
+    }
+    #[cfg(feature = "diagnostics")]
+    fn profile_phase(&mut self, index: usize, timer: &mut Timer) {
+        let now = timer.now_us();
+        profile::add(index, now - self.profile_mark);
+        self.profile_mark = now;
     }
     fn issue(&mut self, cmd: u8, arg: u32, flags: u32, timer: &mut Timer) {
         super::interrupt::events();
@@ -1221,6 +1273,17 @@ impl Sdmmc {
                             return Ok(false);
                         }
                         req.claimed = true;
+                        #[cfg(feature = "diagnostics")]
+                        {
+                            req.profile_start = timer.now_us();
+                            req.profile_mark = req.profile_start;
+                            let lba = if self.info.ocr & (1 << 30) != 0 {
+                                req.arg
+                            } else {
+                                req.arg / 512
+                            };
+                            req.profile_metadata = profile::metadata(lba, req.len);
+                        }
                         req.transaction_deadline = timer.now_us() + 2_000_000;
                         self.activate(timer)?;
                         if req.writing {
@@ -1280,6 +1343,8 @@ impl Sdmmc {
                         write(0x20, req.len as u32);
                         write(0, (1 << 25) | (1 << 5) | (1 << 4));
                         write(0x80, (1 << 7) | (1 << 1) | (2 << 8));
+                        #[cfg(feature = "diagnostics")]
+                        req.profile_phase(4, timer);
                         req.issue(
                             req.cmd,
                             req.arg,
@@ -1315,6 +1380,8 @@ impl Sdmmc {
                         {
                             return Ok(false);
                         }
+                        #[cfg(feature = "diagnostics")]
+                        req.profile_phase(5, timer);
                         req.stop();
                         req.phase = AsyncPhase::Stop;
                     }
@@ -1339,6 +1406,8 @@ impl Sdmmc {
                             }
                         }
                         if req.writing {
+                            #[cfg(feature = "diagnostics")]
+                            req.profile_phase(6, timer);
                             req.phase = AsyncPhase::CardReadyStart;
                         } else {
                             for (i, b) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
@@ -1351,10 +1420,14 @@ impl Sdmmc {
                                 };
                                 *b = v.to_le_bytes();
                             }
+                            #[cfg(feature = "diagnostics")]
+                            req.profile_phase(6, timer);
                             req.phase = AsyncPhase::Done;
                         }
                     }
                     AsyncPhase::CardReadyStart => {
+                        #[cfg(feature = "diagnostics")]
+                        profile::add(16, 1);
                         req.issue(13, u32::from(self.info.rca) << 16, RESPONSE, timer);
                         req.phase = AsyncPhase::CardReady;
                         return Ok(false);
@@ -1372,6 +1445,8 @@ impl Sdmmc {
                             return Err(error(13));
                         }
                         if r & (1 << 8) != 0 && (r >> 9) & 15 == 4 {
+                            #[cfg(feature = "diagnostics")]
+                            req.profile_phase(7, timer);
                             req.phase = AsyncPhase::Done;
                         } else {
                             req.phase = AsyncPhase::CardReadyStart;
@@ -1379,6 +1454,32 @@ impl Sdmmc {
                         }
                     }
                     AsyncPhase::Done => {
+                        #[cfg(feature = "diagnostics")]
+                        {
+                            let us = timer.now_us() - req.profile_start;
+                            profile::add(usize::from(req.writing), 1);
+                            profile::add(2 + usize::from(req.writing), req.len as u64);
+                            profile::add(8 + usize::from(req.writing), us);
+                            let class = if req.profile_metadata { 10 } else { 13 };
+                            profile::add(class, 1);
+                            profile::add(class + 1, req.len as u64);
+                            profile::add(class + 2, us);
+                            if req.len == 512 {
+                                profile::add(18 + usize::from(req.writing), 1);
+                            }
+                            if req.writing {
+                                profile::add(
+                                    match req.len {
+                                        512 => 19,
+                                        1024 => 20,
+                                        2048 => 21,
+                                        4096 => 22,
+                                        _ => 23,
+                                    },
+                                    u64::from(req.len != 512),
+                                );
+                            }
+                        }
                         write(0x24, 0);
                         write(0, read(0) & !(1 << 4));
                         req.claimed = false;
@@ -1394,6 +1495,8 @@ impl Sdmmc {
             Ok(true) => Poll::Ready(Ok(())),
             Ok(false) => Poll::Pending,
             Err(mut e) => {
+                #[cfg(feature = "diagnostics")]
+                profile::add(17, 1);
                 e.interrupts |= req.seen;
                 Poll::Ready(Err(e))
             }

@@ -178,6 +178,15 @@ impl<'a> Stack<'a> {
     pub fn eof(&self, i: usize) -> bool {
         !self.socket(i).may_recv() && self.socket(i).recv_queue() == 0
     }
+    pub fn read_available(&self, i: usize) -> usize {
+        self.socket(i).recv_queue()
+    }
+    pub fn input_finished(&self, i: usize) -> bool {
+        matches!(
+            self.socket(i).state(),
+            State::CloseWait | State::Closed | State::LastAck | State::Closing | State::TimeWait
+        )
+    }
     pub fn read(&mut self, i: usize, out: &mut [u8]) -> usize {
         let n = self.socket_mut(i).recv_slice(out).unwrap_or(0);
         self.stats.rx_consumed += n as u64;

@@ -1,6 +1,8 @@
 //! Board integration for the bounded TCP/HTTP file server. Single cooperative
 //! task owns SD+EMAC. RefCell serializes their access to the sole SYSTIMER handle.
 mod files;
+#[cfg(feature = "diagnostics")]
+mod storage_lab;
 use core::{
     cell::{Cell, RefCell},
     fmt::Write,
@@ -415,6 +417,27 @@ pub fn run(
     console: &mut hal::usb_serial::Console,
     panel: &mut esp32_p4::devices::jd9165::Display,
 ) -> Result<(), web::Error> {
+    run_mode(seconds, arena, timer, console, panel, None)
+}
+#[cfg(feature = "diagnostics")]
+pub fn run_storage_bench(
+    mib: u32,
+    arena: &memory::Arena<'_, memory::Internal>,
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+    panel: &mut esp32_p4::devices::jd9165::Display,
+) -> Result<(), web::Error> {
+    run_mode(600, arena, timer, console, panel, Some(mib))
+}
+#[inline(never)]
+fn run_mode(
+    seconds: u32,
+    arena: &memory::Arena<'_, memory::Internal>,
+    timer: &mut hal::time::Timer,
+    console: &mut hal::usb_serial::Console,
+    panel: &mut esp32_p4::devices::jd9165::Display,
+    benchmark_mib: Option<u32>,
+) -> Result<(), web::Error> {
     let cache = hal::memory::cache_snapshot();
     if cache.l1_bypass & 16 == 0 || cache.l2_size != 0 {
         return Err(web::Error::CacheConfiguration);
@@ -441,7 +464,7 @@ pub fn run(
         unsafe { hal::ethernet::Emac::start(arena, timer, net::MAC) }
             .map_err(|_| web::Error::Transport)?,
     );
-    serve(&port, card, arena, seconds, console, panel)
+    serve(&port, card, arena, seconds, console, panel, benchmark_mib)
 }
 #[cfg(feature = "wifi")]
 pub fn run_wifi(
@@ -463,7 +486,7 @@ pub fn run_wifi(
     let outcome =
         crate::wifi::with_default_link(timer, console, |link, address, timer, console| {
             let port = RefCell::new(crate::wifi::WifiPort::new(link, address, timer));
-            match serve(&port, card, arena, seconds, console, panel) {
+            match serve(&port, card, arena, seconds, console, panel, None) {
                 Ok(()) => Ok(()),
                 Err(e) => {
                     detail = Some(e);
@@ -484,7 +507,10 @@ fn serve<P: Port>(
     seconds: u32,
     console: &mut hal::usb_serial::Console,
     panel: &mut esp32_p4::devices::jd9165::Display,
+    benchmark_mib: Option<u32>,
 ) -> Result<(), web::Error> {
+    #[cfg(not(feature = "diagnostics"))]
+    let _ = benchmark_mib;
     let mut asset = FlashPage::open()?;
     let xid = port.borrow_mut().now_us() as u32;
     let busy = Cell::new(false);
@@ -575,7 +601,8 @@ fn serve<P: Port>(
     let a = network.ip;
     let network = RefCell::new(network);
     let _irq = unsafe { hal::interrupt::Guard::enter() };
-    let partition = esp32_p4::runtime::run(
+    #[allow(unused_mut)]
+    let mut partition = esp32_p4::runtime::run(
         disk::Partition::mbr(
             Card {
                 card,
@@ -587,12 +614,29 @@ fn serve<P: Port>(
         || network.borrow_mut().tick(),
     )?
     .map_err(|_| web::Error::Storage)?;
+    #[cfg(feature = "diagnostics")]
+    storage_lab::configure(&mut partition, &network)?;
     let mut stream = RefCell::new(disk::Stream::new(partition));
     let mut volume = esp32_p4::runtime::run(Volume::mount(&mut stream), || {
         network.borrow_mut().io_tick()
     })?
     .map_err(|_| web::Error::Storage)?;
     let mut fs = FileTable::<_, 5>::new(&mut volume);
+    let mut scratch_allocation = arena
+        .allocate(core::alloc::Layout::from_size_align(8192, 64).unwrap())
+        .map_err(|_| web::Error::Storage)?;
+    let scratch = scratch_allocation.as_mut_slice();
+    #[cfg(feature = "diagnostics")]
+    {
+        if let Some(mib) = benchmark_mib {
+            let result =
+                storage_lab::run(&mut fs, port, network.borrow_mut().console, scratch, mib);
+            let cleanup = esp32_p4::runtime::run(fs.shutdown(), || Ok::<(), web::Error>(()))?
+                .map_err(|_| web::Error::Storage);
+            return result.and(cleanup);
+        }
+        hal::sdmmc::profile::reset();
+    }
     let _ = writeln!(
         network.borrow_mut().console,
         "WEB READY http://{}.{}.{}.{}/ seconds={} FS=async-fat handles=5 metadata={}B parallel-files ESC=stop",
@@ -603,15 +647,18 @@ fn serve<P: Port>(
         seconds,
         core::mem::size_of_val(&fs)
     );
-    let mut scratch_allocation = arena
-        .allocate(core::alloc::Layout::from_size_align(8192, 64).unwrap())
-        .map_err(|_| web::Error::Storage)?;
-    let scratch = scratch_allocation.as_mut_slice();
+
     let mut requests = 0;
     let mut transfers = [files::Transfer::Idle; tcp::SLOTS];
     let mut progress = [port.borrow_mut().now_us(); tcp::SLOTS];
     let mut turn = 0;
     let outcome = 'service: loop {
+        #[cfg(feature = "diagnostics")]
+        if transfers.iter().filter(|t| !t.idle()).count() > 1 {
+            for t in &mut transfers {
+                t.mark_shared();
+            }
+        }
         for offset in 0..tcp::SLOTS {
             let slot = (turn + offset) % tcp::SLOTS;
             if transfers[slot].idle() {
@@ -693,7 +740,7 @@ fn serve<P: Port>(
             if r.route == http::Route::File
                 && matches!(
                     r.method,
-                    http::Method::Get | http::Method::Head | http::Method::Put
+                    http::Method::Get | http::Method::Head | http::Method::Put | http::Method::Post
                 )
             {
                 let _ = writeln!(
@@ -710,13 +757,18 @@ fn serve<P: Port>(
                     buffer: [0; tcp::MSS],
                     used: 0,
                 };
+                #[cfg(feature = "diagnostics")]
+                let trace = storage_lab::HttpTrace::begin(port.borrow_mut().now_us());
                 let result =
                     esp32_p4::runtime::run(files::start(r, &mut fs, &mut connection), || {
                         network.borrow_mut().io_tick()
                     })
                     .and_then(|r| r);
                 match result {
-                    Ok(transfer) => {
+                    #[allow(unused_mut)]
+                    Ok(mut transfer) => {
+                        #[cfg(feature = "diagnostics")]
+                        transfer.set_trace(trace, port.borrow_mut().now_us());
                         transfers[slot] = transfer;
                         progress[slot] = port.borrow_mut().now_us();
                     }

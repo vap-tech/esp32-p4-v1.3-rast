@@ -157,3 +157,46 @@ pub fn file_headers(r: &Request, len: u32, io: &mut impl Transport) -> Result<()
 pub fn created(io: &mut impl Transport) -> Result<(), Error> {
     headers(io, 201, Some(0), "text/plain", "")
 }
+
+/// Keep all intermediate file writes sector-aligned; only the final body tail
+/// may be shorter. Ring-wrap fragments are joined by the caller, not sent to FS.
+pub fn upload_chunk(available: usize, remaining: usize, limit: usize) -> usize {
+    let n = available.min(remaining).min(limit);
+    if n == remaining {
+        n
+    } else {
+        n / crate::storage::SECTOR_SIZE * crate::storage::SECTOR_SIZE
+    }
+}
+#[cfg(feature = "diagnostics")]
+pub fn appended(io: &mut impl Transport) -> Result<(), Error> {
+    headers(io, 204, Some(0), "text/plain", "")
+}
+#[cfg(test)]
+mod chunk_tests {
+    #[test]
+    fn short_rx_and_header_skew_never_force_intermediate_partial_sectors() {
+        for (available, remaining, expected) in [
+            (0, 10000, 0),
+            (511, 10000, 0),
+            (6001, 10000, 5632),
+            (6144, 10000, 6144),
+            (8192, 10000, 8192),
+            (808, 808, 808),
+            (512, 513, 512),
+            (1, 1, 1),
+        ] {
+            assert_eq!(super::upload_chunk(available, remaining, 8192), expected);
+        }
+        let mut left = 100_003;
+        let mut position = 0;
+        while left != 0 {
+            let n = super::upload_chunk(6001, left, 8192);
+            assert!(n > 0);
+            assert_eq!(position % 512, 0);
+            position += n;
+            left -= n;
+        }
+        assert_eq!(position, 100_003);
+    }
+}

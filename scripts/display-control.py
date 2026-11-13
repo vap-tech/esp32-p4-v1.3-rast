@@ -26,6 +26,7 @@ parser.add_argument('--display-clock', choices=['on','off'], help='enable/disabl
 parser.add_argument('--brightness', type=int, choices=range(101), metavar='0..100', help='set backlight percent')
 parser.add_argument('--rtc', metavar='COMMAND', help='RTC read/init/set/config/clear/ram/timer/alarm; see docs/rtc.md')
 parser.add_argument('--rtc-sync', action='store_true', help='explicitly initialize RTC to laptop UTC, resetting settings/alarms/timer')
+parser.add_argument('--sd-files-bench', nargs='?', const=8, type=int, metavar='MiB', help='diagnostics: SRAM to new SD file, verify and remove, 1..64 MiB')
 parser.add_argument('--irq-test', action='store_true', help='20ms scoped core0 CLIC/SYSTIMER IRQ test')
 parser.add_argument('--memory', action='store_true', help='report memory/cache configuration')
 parser.add_argument('--sd-format-info', action='store_true', help='preview whole-card FAT32 geometry without writing')
@@ -207,6 +208,13 @@ try:
             line = receive(b'CACHE DONE', timeout=10)
             if b'Err(' in line:
                 raise SystemExit('Cache transition failed')
+    if args.sd_files_bench is not None:
+        if not 1 <= args.sd_files_bench <= 64:
+            parser.error('--sd-files-bench requires 1..64 MiB')
+        send(fd, (':sd benchmark files ' + str(args.sd_files_bench) + '\n').encode('ascii'))
+        line = receive(b'SD FILE BENCH DONE', timeout=args.sd_files_bench * 20 + 60)
+        if b'Err(' in line or b'guard_ok: false' in line:
+            raise SystemExit('SD file benchmark failed')
     if args.icache:
         send(fd, (':icache ' + args.icache + '\n').encode('ascii'))
         line = receive(b'ICACHE DONE', timeout=10)
