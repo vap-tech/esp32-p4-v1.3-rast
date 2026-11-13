@@ -3,8 +3,8 @@ OUTPUT_ARCH(riscv)
 ENTRY(_start)
 MEMORY {
   ENTRY (rx) : ORIGIN = 0x30100000, LENGTH = 8K
-  DMA_RAM (rw) : ORIGIN = 0x4ff00000, LENGTH = 116K
-  DMA_FIXED (rw) : ORIGIN = 0x4ff1d000, LENGTH = 36K
+  DMA_RAM (rw) : ORIGIN = 0x4ff00000, LENGTH = 136K
+  DMA_FIXED (rw) : ORIGIN = 0x4ff22000, LENGTH = 16K
   BOOT_STACK (rw) : ORIGIN = 0x4ff26000, LENGTH = 8K
   /* 0x4ff28000..0x4ff40000 remains reserved for ROM. */
   UPPER (rwx) : ORIGIN = 0x4ff40000, LENGTH = 448K
@@ -43,7 +43,7 @@ SECTIONS {
   _internal_start = _bss_end;
   _internal_end = ORIGIN(UPPER) + LENGTH(UPPER);
   ASSERT(_boot_stack_top - 8192 == 0x4ff26000, "Retired boot scratch moved")
-  ASSERT(_dma_end == 0x4ff1d000, "DMA pool overlaps fixed workspaces")
+  ASSERT(_dma_end == 0x4ff22000, "DMA pool overlaps fixed workspaces")
   ASSERT(_dma_fixed_end <= 0x4ff26000, "DMA workspaces overlap boot scratch")
   ASSERT(_upper_start >= 0x4ff40000, "Runtime overlaps ROM")
   ASSERT(_internal_start + 32K <= _stack_bottom, "Less than 32KiB working SRAM")

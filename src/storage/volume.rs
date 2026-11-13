@@ -1,5 +1,6 @@
 //! Filesystem-neutral, serialized async API. FAT is the first backend.
-//! There is deliberately no dynamic VFS, heap, or simultaneous writable handles.
+//! Direct cursors hold a volume lease; files::FileTable multiplexes owned contexts.
+//! No dynamic VFS or heap.
 // Filesystem access is serialized by the volume API; this borrow is the IO lease.
 #![allow(clippy::await_holding_refcell_ref)]
 use super::asynchronous::{self as io, BlockDevice, Shared, Stream};
@@ -12,7 +13,7 @@ type Fat<'io, D> = embedded_fatfs::FileSystem<
     embedded_fatfs::DefaultTimeProvider,
     embedded_fatfs::LossyOemCpConverter,
 >;
-type FatFile<'a, 'io, D> = embedded_fatfs::File<
+pub(super) type FatFile<'a, 'io, D> = embedded_fatfs::File<
     'a,
     Shared<'io, D>,
     embedded_fatfs::DefaultTimeProvider,
@@ -31,6 +32,11 @@ pub enum Error<E: core::fmt::Debug> {
     AlreadyExists,
     NotFile,
     NeedsRecovery,
+    InvalidHandle,
+    TooManyOpenFiles,
+    Busy,
+    AccessDenied,
+    GenerationExhausted,
 }
 impl<E: core::fmt::Debug> From<embedded_fatfs::Error<io::Error<E>>> for Error<E> {
     fn from(e: embedded_fatfs::Error<io::Error<E>>) -> Self {
@@ -57,22 +63,22 @@ pub enum Volume<'io, D: BlockDevice> {
     Fat(FatVolume<'io, D>),
 }
 pub struct FatVolume<'io, D: BlockDevice> {
-    fs: Fat<'io, D>,
-    stream: &'io RefCell<Stream<D>>,
-    poisoned: Cell<bool>,
-    dirty_at_mount: bool,
+    pub(super) fs: Fat<'io, D>,
+    pub(super) stream: &'io RefCell<Stream<D>>,
+    pub(super) poisoned: Cell<bool>,
+    pub(super) dirty_at_mount: bool,
 }
-struct Mutation<'a>(&'a Cell<bool>);
+pub(super) struct Mutation<'a>(&'a Cell<bool>);
 impl<'a> Mutation<'a> {
-    fn begin(flag: &'a Cell<bool>) -> Self {
+    pub(super) fn begin(flag: &'a Cell<bool>) -> Self {
         flag.set(true);
         Self(flag)
     }
-    fn commit(self) {
+    pub(super) fn commit(self) {
         self.0.set(false);
     }
 }
-fn path<E: core::fmt::Debug>(p: &str) -> Result<&str, Error<E>> {
+pub(super) fn path<E: core::fmt::Debug>(p: &str) -> Result<&str, Error<E>> {
     let p = p.trim_start_matches('/');
     if p.len() > PATH_BYTES
         || p.split('/').any(|c| {
@@ -97,7 +103,11 @@ impl<'io, D: BlockDevice> Volume<'io, D> {
             .seek(SeekFrom::Start(0))
             .await
             .map_err(embedded_fatfs::Error::Io)?;
-        let fs = Fat::new(Shared(stream), embedded_fatfs::FsOptions::new()).await?;
+        let fs = Fat::new(
+            Shared(stream),
+            embedded_fatfs::FsOptions::new().update_accessed_date(false),
+        )
+        .await?;
         let flags = fs.read_status_flags().await?;
         Ok(Self::Fat(FatVolume {
             fs,
@@ -106,7 +116,7 @@ impl<'io, D: BlockDevice> Volume<'io, D> {
             dirty_at_mount: flags.dirty() || flags.io_error(),
         }))
     }
-    fn fat(&self) -> &FatVolume<'io, D> {
+    pub(super) fn fat(&self) -> &FatVolume<'io, D> {
         match self {
             Self::Fat(f) => f,
         }
@@ -117,14 +127,14 @@ impl<'io, D: BlockDevice> Volume<'io, D> {
     pub fn needs_recovery(&self) -> bool {
         self.fat().dirty_at_mount || self.fat().poisoned.get()
     }
-    fn readable(&self) -> Result<(), Error<D::Error>> {
+    pub(super) fn readable(&self) -> Result<(), Error<D::Error>> {
         if self.fat().poisoned.get() {
             Err(Error::NeedsRecovery)
         } else {
             Ok(())
         }
     }
-    fn writable(&self) -> Result<(), Error<D::Error>> {
+    pub(super) fn writable(&self) -> Result<(), Error<D::Error>> {
         if self.needs_recovery() {
             Err(Error::NeedsRecovery)
         } else {
@@ -548,6 +558,223 @@ mod tests {
                     .unwrap();
                 file.write_all(&b).unwrap();
             }
+        }
+    }
+    #[test]
+    fn five_handles_interleave_images_logs_and_readers_without_stale_reuse() {
+        use crate::storage::files::{FileTable, OpenMode};
+        let mut stream = RefCell::new(Stream::new(run(io::Partition::mbr(disk(), 0)).unwrap()));
+        run(async {
+            let mut volume = Volume::mount(&mut stream).await.unwrap();
+            let mut source = volume.create_new("/Исходная картинка.bin").await.unwrap();
+            source.write(b"0123456789").await.unwrap();
+            source.finish().await.unwrap();
+            let alias = {
+                let entry = volume
+                    .fat()
+                    .fs
+                    .root_dir()
+                    .open_meta("Исходная картинка.bin")
+                    .await
+                    .unwrap();
+                std::string::String::from_utf8(entry.short_file_name_as_bytes().into()).unwrap()
+            };
+            let mut files = FileTable::<_, 5>::new(&mut volume);
+            assert_eq!(files.capacity(), 5);
+            assert!(files
+                .open("/missing/child.bin", OpenMode::CreateNew)
+                .await
+                .is_err());
+            assert!(!files.needs_recovery());
+            let a = files
+                .open("/image-a.bin", OpenMode::CreateNew)
+                .await
+                .unwrap();
+            let b = files
+                .open("/image-b.bin", OpenMode::CreateNew)
+                .await
+                .unwrap();
+            let temp = files
+                .open("/temperature.log", OpenMode::Append)
+                .await
+                .unwrap();
+            let errors = files.open("/errors.log", OpenMode::Append).await.unwrap();
+            let read = files
+                .open("/Исходная картинка.bin", OpenMode::Read)
+                .await
+                .unwrap();
+            assert_eq!(files.open_count(), 5);
+            assert!(matches!(
+                files.open("/extra.bin", OpenMode::CreateNew).await,
+                Err(Error::TooManyOpenFiles)
+            ));
+            assert!(matches!(
+                files.write(read, b"wrong").await,
+                Err(Error::AccessDenied)
+            ));
+            assert!(matches!(
+                files.seek(temp, 0).await,
+                Err(Error::AccessDenied)
+            ));
+            let block = [0xa7; 16384];
+            for _ in 0..12 {
+                assert_eq!(files.write(a, &block).await.unwrap(), 8192);
+                assert_eq!(files.write(b, &block[..1003]).await.unwrap(), 1003);
+                files.write(temp, b"23.5\n").await.unwrap();
+                files.write(errors, b"alert\n").await.unwrap();
+                let mut byte = [0];
+                files.read(read, &mut byte).await.unwrap();
+            }
+            files.seek(read, 3).await.unwrap();
+            let mut part = [0; 4];
+            assert_eq!(files.read(read, &mut part).await.unwrap(), 4);
+            assert_eq!(&part, b"3456");
+            files.close(b).await.unwrap();
+            let second_reader = files.open(&alias, OpenMode::Read).await.unwrap();
+            let mut first = [0];
+            files.read(second_reader, &mut first).await.unwrap();
+            assert_eq!(&first, b"0");
+            assert_eq!(files.info(read).unwrap().position, 7);
+            files.close(second_reader).await.unwrap();
+            assert!(matches!(
+                files.open(&alias, OpenMode::Append).await,
+                Err(Error::Busy)
+            ));
+            assert!(matches!(
+                files.open("/ERRORS.LOG", OpenMode::Read).await,
+                Err(Error::Busy)
+            ));
+            files.sync(temp).await.unwrap();
+            assert!(matches!(
+                files.rename("/image-a.bin", "/moved.bin").await,
+                Err(Error::Busy)
+            ));
+            assert_eq!(files.info(a).unwrap().len, 12 * 8192);
+            files.close(a).await.unwrap();
+            let replacement = files.open("/new.bin", OpenMode::CreateNew).await.unwrap();
+            assert!(matches!(files.info(a), Err(Error::InvalidHandle)));
+            files.abort(replacement).await.unwrap();
+            files.close(temp).await.unwrap();
+            files.close(errors).await.unwrap();
+            files.close(read).await.unwrap();
+            assert_eq!(files.open_count(), 0);
+            let reopened = files
+                .open("/temperature.log", OpenMode::Append)
+                .await
+                .unwrap();
+            assert_eq!(files.info(reopened).unwrap().position, 60);
+            files.write(reopened, b"24.0\n").await.unwrap();
+            files.close(reopened).await.unwrap();
+            drop(files);
+            let mut one = FileTable::<_, 1>::new(&mut volume);
+            let fresh = one.open("/temperature.log", OpenMode::Read).await.unwrap();
+            assert!(matches!(
+                one.read(read, &mut part).await,
+                Err(Error::InvalidHandle)
+            ));
+            one.close(fresh).await.unwrap();
+            drop(one);
+            assert!(volume.open("/extra.bin").await.is_err());
+            assert!(volume.open("/new.bin").await.is_err());
+            let mut f = volume.open("/temperature.log").await.unwrap();
+            let mut out = [0; 65];
+            let mut n = 0;
+            while n < out.len() {
+                n += f.read(&mut out[n..]).await.unwrap();
+            }
+            assert_eq!(&out[60..], b"24.0\n");
+            drop(f);
+            assert_eq!(volume.open("/image-b.bin").await.unwrap().len(), 12 * 1003);
+            drop(volume);
+            assert!(!Volume::mount(&mut stream).await.unwrap().needs_recovery());
+        });
+        let partition = stream.into_inner().into_inner();
+        std::fs::create_dir_all("target/storage").unwrap();
+        let mut image = std::fs::File::create("target/storage/multifile-fat32.img").unwrap();
+        use std::io::{Seek, SeekFrom, Write};
+        image.set_len(partition.sectors * 512).unwrap();
+        for (lba, bytes) in partition.device.blocks {
+            if lba >= partition.start && lba < partition.start + partition.sectors {
+                image
+                    .seek(SeekFrom::Start((lba - partition.start) * 512))
+                    .unwrap();
+                image.write_all(&bytes).unwrap();
+            }
+        }
+    }
+    #[test]
+    fn directory_alias_locks_and_unrelated_metadata_with_active_writer() {
+        use crate::storage::files::{FileTable, OpenMode};
+        let mut stream = RefCell::new(Stream::new(run(io::Partition::mbr(disk(), 0)).unwrap()));
+        run(async {
+            let mut volume = Volume::mount(&mut stream).await.unwrap();
+            volume.create_dir("/Длинная папка").await.unwrap();
+            volume.create_dir("/Длинная папка/child").await.unwrap();
+            let alias = {
+                let e = volume
+                    .fat()
+                    .fs
+                    .root_dir()
+                    .open_meta("Длинная папка")
+                    .await
+                    .unwrap();
+                std::string::String::from_utf8(e.short_file_name_as_bytes().into()).unwrap()
+            };
+            let mut files = FileTable::<_, 3>::new(&mut volume);
+            let log = files
+                .open("/Длинная папка/log.txt", OpenMode::Append)
+                .await
+                .unwrap();
+            files.write(log, b"log record").await.unwrap();
+            let other = files.open("/other.bin", OpenMode::CreateNew).await.unwrap();
+            files.write(other, b"unrelated").await.unwrap();
+            files.close(other).await.unwrap();
+            files.rename("/other.bin", "/renamed.bin").await.unwrap();
+            files.remove("/renamed.bin").await.unwrap();
+            assert!(matches!(files.remove(&alias).await, Err(Error::Busy)));
+            assert!(matches!(
+                files.rename(&alias, "/moved").await,
+                Err(Error::Busy)
+            ));
+            files.close(log).await.unwrap();
+            assert!(matches!(
+                files.rename(&alias, "/Длинная папка/child/cycle").await,
+                Err(Error::InvalidPath)
+            ));
+            assert!(!files.is_poisoned());
+            drop(files);
+            assert_eq!(
+                volume.open("/Длинная папка/log.txt").await.unwrap().len(),
+                10
+            );
+        });
+    }
+    #[test]
+    fn open_writer_keeps_dirty_flag_and_cancelled_operation_poisoned() {
+        use crate::storage::files::{FileTable, OpenMode};
+        for cancel in [false, true] {
+            let mut stream = RefCell::new(Stream::new(run(io::Partition::mbr(disk(), 0)).unwrap()));
+            run(async {
+                let mut volume = Volume::mount(&mut stream).await.unwrap();
+                let mut files = FileTable::<_, 2>::new(&mut volume);
+                let a = files.open("/a.bin", OpenMode::CreateNew).await.unwrap();
+                let b = files.open("/b.bin", OpenMode::CreateNew).await.unwrap();
+                files.write(a, b"first").await.unwrap();
+                files.write(b, b"second").await.unwrap();
+                files.close(a).await.unwrap();
+                files.sync(b).await.unwrap();
+                if cancel {
+                    let mut op = core::pin::pin!(files.write(b, b"cancel"));
+                    assert!(op
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending());
+                }
+                drop(files);
+                assert!(volume.needs_recovery());
+                drop(volume);
+                assert!(Volume::mount(&mut stream).await.unwrap().needs_recovery());
+            });
         }
     }
     #[test]

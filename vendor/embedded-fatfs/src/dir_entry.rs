@@ -564,6 +564,9 @@ pub struct DirEntry<'a, IO: ReadWriteSeek, TP, OCC> {
 
 #[allow(clippy::len_without_is_empty)]
 impl<'a, IO: ReadWriteSeek, TP, OCC: OemCpConverter> DirEntry<'a, IO, TP, OCC> {
+    /// Directory entry identity, stable until removal or rename.
+    pub fn entry_position(&self) -> u64 { self.entry_pos }
+
     /// Returns short file name.
     ///
     /// Non-ASCII characters are replaced by the replacement character (U+FFFD).

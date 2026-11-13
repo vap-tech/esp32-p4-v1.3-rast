@@ -1,9 +1,9 @@
-# Named command	internal action (never accepted as a wire key)
+# Named command	internal action (never accepted as a wire key)	required features (optional, comma=AND)
 help	?
 display status	q
 display errors	e
 display scanline	L
-display test bist	B
+display test bist	B	diagnostics
 display pattern vertical	v
 display pattern horizontal	h
 display pattern ber	b
@@ -35,8 +35,8 @@ display reset software	r
 display reset hardware	R
 display brightness up	+
 display brightness down	-
-display test rgb	Q
-display test chart	E
+display test rgb	Q	diagnostics
+display test chart	E	diagnostics
 display screenshot	W
 display thumbnail	H
 display framebuffer start	F
@@ -50,18 +50,18 @@ camera gain analogue down	{
 camera exposure up	>
 camera exposure down	<
 camera start	V
-camera start-test	G
+camera start-test	G	diagnostics
 camera stop	O
 camera info	a
-camera capture-test	A
+camera capture-test	A	diagnostics
 camera scene	o
-audio tone	p
-sd config-create	!
-sd list	Z
+audio tone	p	diagnostics
+sd config-create	!	diagnostics
+sd list	Z	diagnostics
 sd capabilities	Y
-sd probe	M
-sd benchmark read	m
-sd test multi-write	#
-sd test write	@
-memory psram-test	P
+sd probe	M	diagnostics
+sd benchmark read	m	diagnostics
+sd test multi-write	#	diagnostics
+sd test write	@	diagnostics
+memory psram-test	P	diagnostics
 display idle off	J

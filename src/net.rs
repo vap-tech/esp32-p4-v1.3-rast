@@ -1,5 +1,6 @@
 //! Bounded Ethernet/IPv4 packet logic for bring-up and the local file server.
 //! DHCP client (one lease), ARP reply and ICMP echo. No allocations or fragments.
+#[cfg(feature = "wifi")]
 pub mod hosted;
 pub mod http;
 pub mod tcp;

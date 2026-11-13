@@ -36,6 +36,13 @@ pub struct FileContext {
     pub(crate) entry: Option<DirEntryEditor>,
 }
 
+impl FileContext {
+    /// Stable directory-entry identity while the file remains open and unrenamed.
+    pub fn entry_position(&self) -> Option<u64> {
+        self.entry.as_ref().map(|entry| entry.pos())
+    }
+}
+
 /// An extent containing a file's data on disk.
 ///
 /// This is created by the `extents` method on `File`, and represents
@@ -102,6 +109,23 @@ impl<'a, IO: ReadWriteSeek, TP, OCC> File<'a, IO, TP, OCC> {
 
     pub(crate) fn from_context(context: FileContext, fs: &'a FileSystem<IO, TP, OCC>) -> Self {
         File { context, fs }
+    }
+
+    /// Suspend without flushing. Retains the cursor and dirty directory entry.
+    /// The owner must eventually resume and close/flush this context. Losing a
+    /// writable context can leave allocated clusters unreferenced on disk.
+    pub fn suspend(mut self) -> FileContext {
+        let context = self.context.clone();
+        self.context.entry = None;
+        context
+    }
+
+    /// Resume a context managed by an exclusive filesystem owner, without disk
+    /// validation or IO. It must belong to this filesystem; its entry/chain must
+    /// not have been removed, renamed, truncated or modified by another writer.
+    /// Unlike new_from_context this also accepts an unflushed suspended context.
+    pub fn resume_exclusive(context: FileContext, fs: &'a FileSystem<IO, TP, OCC>) -> Self {
+        Self::from_context(context, fs)
     }
 
     /// Truncate file in current position.

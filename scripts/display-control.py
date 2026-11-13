@@ -75,10 +75,19 @@ if any(not c or not c.isascii() or any(x in c for x in '\r\n') for c in args.com
     parser.error('commands must be ASCII names without line breaks; hold must be nonnegative')
 
 def registry(filename):
-    return dict(line.split('\t') for line in (Path(__file__).resolve().parent.parent / filename).read_text().splitlines() if line and not line.startswith('#'))
+    return dict(line.split('\t')[:2] for line in (Path(__file__).resolve().parent.parent / filename).read_text().splitlines() if line and not line.startswith('#'))
 
 actions = registry('commands.tsv')
 routes = registry('command-routes.tsv')
+requirements = {}
+for filename in ('commands.tsv', 'command-routes.tsv'):
+    for row in (Path(__file__).resolve().parent.parent / filename).read_text().splitlines():
+        if row and not row.startswith('#'):
+            fields = row.split('\t')
+            requirements[fields[0]] = fields[2] if len(fields) > 2 else ''
+available_commands = set()
+capabilities_known = False
+
 for command in args.commands:
     if command not in actions:
         parser.error('unknown action: ' + command + '; use named actions from commands.tsv or the dedicated options')
@@ -93,6 +102,14 @@ def send(fd, payload):
                 if line == internal or line.startswith(internal + ' '):
                     line = public + line[len(internal):]
                     break
+        candidates = [name for name in (*actions, *routes)
+                      if line == name or name in routes and line.startswith(name + ' ')]
+        if candidates and capabilities_known:
+            name = max(candidates, key=len)
+            if name not in available_commands:
+                feature = requirements.get(name, '')
+                hint = ('; rebuild with --features ' + feature) if feature else ''
+                raise SystemExit('Firmware does not advertise ' + name + hint)
         payload = ('\n:' + line + '\n').encode('ascii')
     view = memoryview(payload)
     deadline = time.monotonic() + 5
@@ -161,6 +178,9 @@ try:
                 while b'\n' in pending:
                     line, _, tail = pending.partition(b'\n')
                     pending[:] = tail
+                    if until == b'CONSOLE HELP END' and line.startswith(b'  '):
+                        name = line.strip().decode('ascii').removesuffix(' [arguments]')
+                        available_commands.add(name)
                     if line.startswith(b'COMMAND ERROR'):
                         raise RuntimeError(line.decode('ascii', errors='replace'))
                     if until is not None and until in line:
@@ -173,6 +193,7 @@ try:
         receive(b'MEDIA PLAY DONE', timeout=5)
     send(fd, b':help\n')
     receive(b'CONSOLE HELP END', timeout=20)
+    capabilities_known = True
     for command in args.commands:
         print('HOST -> ' + command, flush=True)
         send(fd, (':' + command + '\n').encode('ascii'))

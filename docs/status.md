@@ -1,6 +1,37 @@
 # Состояние проекта — обновлено 2026-11-13
 
 
+## Default без labs, Wi-Fi и программного JPEG
+
+Добавлены diagnostics/wifi/software-jpeg features, default пустой. Код/профили
+сохранены, optional configurations собираются. Help/dispatch фильтруются при
+сборке из TSV; helper проверяет capability до отправки выключенной команды.
+Default payload около255KiB,work около189KiB; нижний DMA pool136KiB/fixed16KiB,
+с wifi автоматически возвращается116/36KiB. Ethernet, SD/FileTable и параллельные
+файлы проверены на плате. [Сборка и восстановление](build-flavors.md).
+
+## Аудит размера runtime
+
+Изолированные offline-сборки: экспериментальные команды удерживают26.6KiB;
+второй web/FS generic backend стоит37.2KiB в контрольной пробе удаления одной
+точки входа. Это ориентир для объединения двух транспортов, а не выполненный
+фикс. Legacy FAT пока нужен media/recorder/alarm. Обнаружено, что обычный JPEG
+по-прежнему выбирает Matrix, тогда как Loeffler включается явно в тестах.
+[Размеры, методика, ограничения и план уборки](memory-audit.md).
+
+## Таблица файлов и параллельные HTTP-передачи
+
+FileTable<const N> с slot/generation handles, сейчас5 slots /4408B метаданных.
+Read/CreateNew/Append, независимые курсоры, явные sync/close/abort, alias-safe locks.
+GET/PUT файлов чередуются по8KiB на четырёх TCP sockets с одним shared buffer.
+Два PUT завершились при удерживаемом GET; четвёртый aborted PUT удалён. SHA256
+и root listing совпали. ESC с двумя активными PUT завершился штатно, после
+remount файлы отсутствуют;stack52868/65536B,guard intact. Host90 pass,Clippy clean,
+экспорт FAT32 прошёл fsck. Release=z,smoltcp=s:payload371732B,work82368B.
+Финальный RAM4MiB:4.93MiB/s GET,5.30MiB/s POST;SD1MiB:3.43/0.64MiB/s.
+Это другие размеры и профиль сборки, не прямой A/B с прежним64MiB замером.
+[Контракт, ограничения и проверенные сценарии](file-handles.md).
+
 ## Ethernet TX pipeline и копирование кадров
 
 Проводной RAM HTTP после word copy/TX ring: 5.19–5.25 MiB/s GET и

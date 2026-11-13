@@ -15,3 +15,11 @@ Local changes:
 - Dir::rename resolves destination relative to dst_dir and passes the resolved
   directory into rename_internal. Upstream computed e_dst but discarded it,
   moving a nested rename into the original destination directory instead.
+- FileContext/DirEntry expose directory-entry position for alias-safe open-file
+  identity and ancestor locks. Contexts remain private to our file table.
+- File::suspend/resume_exclusive preserve cursor and dirty entry without IO;
+  the wrapper exclusively owns the volume, enforces writer/reader exclusions,
+  protects open entries/ancestors from rename/remove, and disables atime.
+  Close/sync explicitly flush; aborted create flushes first cluster before unlink.
+- FileSystem::flush_preserving_dirty saves FSInfo while unfinished writers remain;
+  ordinary flush still clears the dirty flag as before.

@@ -1,7 +1,7 @@
 //! Line-framed console: only ':' at start of line and a complete LF/CRLF frame
 //! can dispatch. Noise, echo, invalid bytes, overflow and stale fragments are dropped.
-pub const COMMANDS: &str = include_str!("../commands.tsv");
-pub const ROUTES: &str = include_str!("../command-routes.tsv");
+pub const COMMANDS: &str = include_str!(concat!(env!("OUT_DIR"), "/commands.tsv"));
+pub const ROUTES: &str = include_str!(concat!(env!("OUT_DIR"), "/command-routes.tsv"));
 pub struct Input {
     bytes: [u8; 256],
     len: usize,
@@ -121,7 +121,11 @@ mod tests {
         let mut buffer = [0; 256];
         assert_eq!(
             route("wifi connect 4142 3132333435363738 60", &mut buffer),
-            Some("c6-connect 4142 3132333435363738 60")
+            if cfg!(feature = "wifi") {
+                Some("c6-connect 4142 3132333435363738 60")
+            } else {
+                None
+            }
         );
     }
     #[test]
@@ -156,6 +160,39 @@ mod tests {
         assert_eq!(input.feed(b'\n', 4_000_000), Some(Ok("help")));
     }
     #[test]
+    fn optional_commands_match_build_features() {
+        let mut buffer = [0; 256];
+        assert_eq!(
+            route("net wifi serve 60", &mut buffer).is_some(),
+            cfg!(feature = "wifi")
+        );
+        assert_eq!(
+            route("wifi raw rx 1", &mut buffer).is_some(),
+            cfg!(all(feature = "wifi", feature = "diagnostics"))
+        );
+        assert_eq!(
+            route("display image HOME.JPG", &mut buffer).is_some(),
+            cfg!(feature = "software-jpeg")
+        );
+        assert_eq!(
+            route("jpeg profile HOME.JPG", &mut buffer).is_some(),
+            cfg!(all(feature = "software-jpeg", feature = "diagnostics"))
+        );
+        assert_eq!(action("sd probe").is_some(), cfg!(feature = "diagnostics"));
+        assert_eq!(
+            action("display test bist").is_some(),
+            cfg!(feature = "diagnostics")
+        );
+        assert_eq!(
+            route("audio test loopback", &mut buffer).is_some(),
+            cfg!(feature = "audio-lab")
+        );
+        assert!(route("net web serve 60", &mut buffer).is_some());
+        assert!(route("audio play SATIE.WAV", &mut buffer).is_some());
+        assert!(route("audio record TEST.WAV 1", &mut buffer).is_some());
+        assert!(route("rtc read", &mut buffer).is_some());
+    }
+    #[test]
     fn registry_is_unambiguous_and_routes_by_word() {
         for (i, (name, key)) in entries(COMMANDS).enumerate() {
             assert_eq!(key.len(), 1);
@@ -168,7 +205,11 @@ mod tests {
         let mut b = [0; 96];
         assert_eq!(
             route("display image HOME.JPG", &mut b),
-            Some("image HOME.JPG")
+            if cfg!(feature = "software-jpeg") {
+                Some("image HOME.JPG")
+            } else {
+                None
+            }
         );
         assert!(route("display images HOME.JPG", &mut b).is_none());
         assert!(route("B", &mut b).is_none());

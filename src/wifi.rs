@@ -336,6 +336,7 @@ fn open(
     Ok(link)
 }
 /// Pure SDIO transport test. No Wi-Fi association, IP/TCP, SD card or C6 Flash writes.
+#[cfg(feature = "diagnostics")]
 pub fn raw(
     args: &str,
     timer: &mut hal::time::Timer,

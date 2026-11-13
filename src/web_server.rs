@@ -1,5 +1,6 @@
 //! Board integration for the bounded TCP/HTTP file server. Single cooperative
 //! task owns SD+EMAC. RefCell serializes their access to the sole SYSTIMER handle.
+mod files;
 use core::{
     cell::{Cell, RefCell},
     fmt::Write,
@@ -9,12 +10,14 @@ use esp32_p4::{
     net::{self, http, tcp},
     storage::{
         asynchronous::{self as disk},
+        files::FileTable,
         volume::Volume,
     },
     web::{self, Asset, Transport},
 };
 /// One owner serializes controller I/O and lends its sole timer to SD.
 pub(crate) trait Port {
+    #[cfg(feature = "wifi")]
     fn diagnostics(&self) -> Option<crate::wifi::Stats> {
         None
     }
@@ -288,6 +291,15 @@ struct Network<'a, 'c, P: Port> {
     busy: &'a Cell<bool>,
 }
 impl<P: Port> Network<'_, '_, P> {
+    // Complete the current bounded FS operation before honoring ESC/deadline.
+    // Cancelling its DMA halfway through would quarantine the shared controller.
+    fn io_tick(&mut self) -> Result<(), web::Error> {
+        match self.tick() {
+            Err(_) if self.stop || self.port.borrow_mut().now_us() >= self.deadline => Ok(()),
+            result => result,
+        }
+    }
+    #[inline(never)]
     fn tick(&mut self) -> Result<(), web::Error> {
         if self.console.read_byte() == Some(27) {
             self.stop = true;
@@ -431,6 +443,7 @@ pub fn run(
     );
     serve(&port, card, arena, seconds, console, panel)
 }
+#[cfg(feature = "wifi")]
 pub fn run_wifi(
     seconds: u32,
     arena: &memory::Arena<'_, memory::Internal>,
@@ -575,24 +588,81 @@ fn serve<P: Port>(
     )?
     .map_err(|_| web::Error::Storage)?;
     let mut stream = RefCell::new(disk::Stream::new(partition));
-    let mut fs =
-        esp32_p4::runtime::run(Volume::mount(&mut stream), || network.borrow_mut().tick())?
-            .map_err(|_| web::Error::Storage)?;
+    let mut volume = esp32_p4::runtime::run(Volume::mount(&mut stream), || {
+        network.borrow_mut().io_tick()
+    })?
+    .map_err(|_| web::Error::Storage)?;
+    let mut fs = FileTable::<_, 5>::new(&mut volume);
     let _ = writeln!(
         network.borrow_mut().console,
-        "WEB READY http://{}.{}.{}.{}/ seconds={} FS=async-fat ESC=stop",
+        "WEB READY http://{}.{}.{}.{}/ seconds={} FS=async-fat handles=5 metadata={}B parallel-files ESC=stop",
         a[0],
         a[1],
         a[2],
         a[3],
-        seconds
+        seconds,
+        core::mem::size_of_val(&fs)
     );
     let mut scratch_allocation = arena
         .allocate(core::alloc::Layout::from_size_align(8192, 64).unwrap())
         .map_err(|_| web::Error::Storage)?;
     let scratch = scratch_allocation.as_mut_slice();
     let mut requests = 0;
-    let outcome = loop {
+    let mut transfers = [files::Transfer::Idle; tcp::SLOTS];
+    let mut progress = [port.borrow_mut().now_us(); tcp::SLOTS];
+    let mut turn = 0;
+    let outcome = 'service: loop {
+        for offset in 0..tcp::SLOTS {
+            let slot = (turn + offset) % tcp::SLOTS;
+            if transfers[slot].idle() {
+                continue;
+            }
+            let operation = if port.borrow_mut().now_us() - progress[slot] > 30_000_000 {
+                Err(web::Error::Transport)
+            } else {
+                esp32_p4::runtime::run(
+                    files::step(&mut transfers[slot], slot, &mut fs, &network, scratch),
+                    || network.borrow_mut().io_tick(),
+                )
+                .and_then(|r| r)
+            };
+            match operation {
+                Ok(files::Step::Progress) => progress[slot] = port.borrow_mut().now_us(),
+                Ok(files::Step::Waiting) => {}
+                Ok(files::Step::Done) => {
+                    requests += 1;
+                    let _ = writeln!(
+                        network.borrow_mut().console,
+                        "WEB FILE DONE slot={} requests={}",
+                        slot,
+                        requests
+                    );
+                }
+                Err(error) => {
+                    let cleanup = esp32_p4::runtime::run(
+                        files::cancel(&mut transfers[slot], &mut fs),
+                        || network.borrow_mut().io_tick(),
+                    )
+                    .and_then(|r| r);
+                    {
+                        let mut net = network.borrow_mut();
+                        net.tcp.abort(slot);
+                        net.tcp.release(slot);
+                    }
+                    requests += 1;
+                    let _ = writeln!(
+                        network.borrow_mut().console,
+                        "WEB FILE ERROR slot={} {:?}",
+                        slot,
+                        error
+                    );
+                    if cleanup.is_err() || fs.is_poisoned() {
+                        break 'service Err(web::Error::Storage);
+                    }
+                }
+            }
+        }
+        turn = (turn + 1) % tcp::SLOTS;
         let (slot, request) = {
             let mut net = network.borrow_mut();
             if let Err(error) = net.tick() {
@@ -619,6 +689,51 @@ fn serve<P: Port>(
             }
             (slot, request)
         };
+        if let Ok(ref r) = request {
+            if r.route == http::Route::File
+                && matches!(
+                    r.method,
+                    http::Method::Get | http::Method::Head | http::Method::Put
+                )
+            {
+                let _ = writeln!(
+                    network.borrow_mut().console,
+                    "WEB FILE START slot={} {:?} {} bytes={}",
+                    slot,
+                    r.method,
+                    r.path(),
+                    r.length
+                );
+                let mut connection = Connection {
+                    network: &network,
+                    slot,
+                    buffer: [0; tcp::MSS],
+                    used: 0,
+                };
+                let result =
+                    esp32_p4::runtime::run(files::start(r, &mut fs, &mut connection), || {
+                        network.borrow_mut().io_tick()
+                    })
+                    .and_then(|r| r);
+                match result {
+                    Ok(transfer) => {
+                        transfers[slot] = transfer;
+                        progress[slot] = port.borrow_mut().now_us();
+                    }
+                    Err(error) => {
+                        let mut net = network.borrow_mut();
+                        net.tcp.abort(slot);
+                        net.tcp.release(slot);
+                        let _ = writeln!(net.console, "WEB FILE START ERROR {:?}", error);
+                        if fs.is_poisoned() {
+                            break 'service Err(web::Error::Storage);
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+        #[cfg(feature = "wifi")]
         let diagnostics = if request
             .as_ref()
             .is_ok_and(|r| r.route == http::Route::NetTest)
@@ -678,14 +793,14 @@ fn serve<P: Port>(
                     let mut controls = Controls {
                         panel,
                         uptime: port.borrow_mut().now_us(),
-                        capacity: fs.capacity(),
+                        capacity: fs.volume_capacity(),
                     };
                     let clipboard = unsafe { &mut *core::ptr::addr_of_mut!(CLIPBOARD) };
                     web::serve_control(r, &mut connection, scratch, clipboard, &mut controls)
                 } else {
                     esp32_p4::runtime::run(
                         web::asyncfs::serve(r, &mut fs, &mut connection, &mut asset, scratch),
-                        || network.borrow_mut().tick(),
+                        || network.borrow_mut().io_tick(),
                     )
                     .and_then(|r| r)
                 }
@@ -710,6 +825,7 @@ fn serve<P: Port>(
                 );
             }
         }
+        #[cfg(feature = "wifi")]
         if let Some(before) = diagnostics {
             let after = port.borrow().diagnostics().unwrap();
             let elapsed = port.borrow_mut().now_us() - request_started;
@@ -728,6 +844,15 @@ fn serve<P: Port>(
             requests
         );
     };
+    let cleanup = esp32_p4::runtime::run(fs.shutdown(), || network.borrow_mut().io_tick())
+        .and_then(|r| r.map_err(|_| web::Error::Storage));
+    for (slot, transfer) in transfers.iter().enumerate() {
+        if !transfer.idle() {
+            let mut n = network.borrow_mut();
+            n.tcp.abort(slot);
+            n.tcp.release(slot);
+        }
+    }
     let mut net = network.borrow_mut();
     let net = &mut *net;
     let _ = writeln!(
@@ -739,5 +864,5 @@ fn serve<P: Port>(
         hal::interrupt::stats(),
         port.borrow().status()
     );
-    outcome
+    outcome.and(cleanup)
 }

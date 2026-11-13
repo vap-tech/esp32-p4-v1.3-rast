@@ -4,14 +4,17 @@ use crate::{
     net::http::{self, Method, Request, Route, Text},
     storage::{
         asynchronous::BlockDevice,
-        volume::{Error as FsError, Kind, Volume, PATH_BYTES},
+        files::FileTable,
+        volume::{Error as FsError, Kind, PATH_BYTES},
     },
 };
 use core::fmt::Write;
-fn status<E: core::fmt::Debug>(e: &FsError<E>) -> u16 {
+pub fn status<E: core::fmt::Debug>(e: &FsError<E>) -> u16 {
     use embedded_fatfs::Error::*;
     match e {
-        FsError::NeedsRecovery => 503,
+        FsError::NeedsRecovery | FsError::TooManyOpenFiles | FsError::GenerationExhausted => 503,
+        FsError::InvalidHandle | FsError::AccessDenied => 400,
+        FsError::Busy => 409,
         FsError::InvalidPath => 400,
         FsError::NotFile => 404,
         FsError::AlreadyExists => 409,
@@ -28,9 +31,9 @@ fn status<E: core::fmt::Debug>(e: &FsError<E>) -> u16 {
         },
     }
 }
-pub async fn serve<D: BlockDevice>(
+pub async fn serve<D: BlockDevice, const N: usize>(
     r: &Request,
-    fs: &mut Volume<'_, D>,
+    fs: &mut FileTable<'_, '_, D, N>,
     io: &mut impl Transport,
     asset: &mut impl Asset,
     scratch: &mut [u8],
@@ -56,44 +59,6 @@ pub async fn serve<D: BlockDevice>(
                     at += n as u32;
                 }
             }
-        }
-        Route::File if r.method == Method::Put => {
-            let mut writer = match fs.create_new(r.path()).await {
-                Ok(w) => w,
-                Err(e) => return error(io, status(&e), false),
-            };
-            if r.expect {
-                if let Err(e) = io
-                    .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
-                    .and_then(|_| io.flush())
-                {
-                    let _ = writer.abort().await;
-                    return Err(e);
-                }
-            }
-            let mut remaining = r.length;
-            while remaining != 0 {
-                let want = scratch.len().min(remaining as usize);
-                let n = match io.read(&mut scratch[..want]) {
-                    Ok(n) if n > 0 => n,
-                    _ => {
-                        let _ = writer.abort().await;
-                        return Err(Error::Transport);
-                    }
-                };
-                if let Err(e) = writer.write(&scratch[..n]).await {
-                    let code = status(&e);
-                    if code == 507 {
-                        let _ = writer.abort().await;
-                    }
-                    return error(io, code, false);
-                }
-                remaining -= n as u32;
-            }
-            if let Err(e) = writer.finish().await {
-                return error(io, status(&e), false);
-            }
-            headers(io, 201, Some(0), "text/plain", "")?;
         }
         Route::File if matches!(r.method, Method::Mkcol | Method::Delete) => {
             let result = if r.method == Method::Mkcol {
@@ -126,33 +91,6 @@ pub async fn serve<D: BlockDevice>(
                 return error(io, status(&e), false);
             }
             headers(io, 204, Some(0), "text/plain", "")?;
-        }
-        Route::File => {
-            let mut file = match fs.open(r.path()).await {
-                Ok(f) => f,
-                Err(e) => return error(io, status(&e), head),
-            };
-            let len = u32::try_from(file.len()).map_err(|_| Error::Format)?;
-            headers(
-                io,
-                200,
-                Some(len),
-                mime_type(r.path()),
-                if r.download {
-                    "Content-Disposition: attachment\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: sandbox\r\n"
-                } else {
-                    "Content-Disposition: inline\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: sandbox\r\n"
-                },
-            )?;
-            if !head {
-                loop {
-                    let n = file.read(scratch).await.map_err(|_| Error::Storage)?;
-                    if n == 0 {
-                        break;
-                    }
-                    io.write_all(&scratch[..n])?;
-                }
-            }
         }
         Route::List => {
             let mut dir = match fs.read_dir(r.path()).await {
@@ -200,4 +138,22 @@ pub async fn serve<D: BlockDevice>(
         _ => return error(io, 501, head),
     }
     io.flush()
+}
+
+/// Shared response metadata for cooperatively streamed file transfers.
+pub fn file_headers(r: &Request, len: u32, io: &mut impl Transport) -> Result<(), Error> {
+    headers(
+        io,
+        200,
+        Some(len),
+        mime_type(r.path()),
+        if r.download {
+            "Content-Disposition: attachment\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: sandbox\r\n"
+        } else {
+            "Content-Disposition: inline\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: sandbox\r\n"
+        },
+    )
+}
+pub fn created(io: &mut impl Transport) -> Result<(), Error> {
+    headers(io, 201, Some(0), "text/plain", "")
 }

@@ -30,8 +30,8 @@
 | Диапазон | Назначение |
 |---|---|
 | `30100000..30102000` | SPM bootstrap и резидентные cache-control routines |
-| `4ff00000..4ff1d000` | Scoped DMA arena, **116 KiB** |
-| `4ff1d000..4ff26000` | Fixed SD/Wi-Fi/I2S DMA workspaces, **36 KiB** |
+| `4ff00000..4ff22000` | Default scoped DMA arena, **136 KiB** |
+| `4ff22000..4ff26000` | Default fixed SD/I2S DMA workspaces, **16 KiB** |
 | `4ff26000..4ff28000` | Boot stack; после переключения SP — прежний legacy SD CPU scratch |
 | `4ff28000..4ff40000` | ROM-reserved 96 KiB, не трогаем |
 | `4ff40000.._upper_load_end` | Загружаемые text / rodata / initialized data |
@@ -125,3 +125,6 @@ SPM failure path не вызывает Rust: `!H` header/layout, `!R` ROM Flash 
 Снятие питания отдельно не проверялось; тестировались download/hard-reset пути.
 JPEG/camera качество, длительный audio stress и XIP/PSRAM execution заново не
 измерялись. Это loader статически слинкованного runtime, не overlay/unload manager.
+
+Без wifi используются136/16KiB нижних регионов; с wifi build.rs/HAL возвращают
+116/36KiB по прежним адресам. [Текущий состав и размеры](build-flavors.md).

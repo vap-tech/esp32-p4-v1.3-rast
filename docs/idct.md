@@ -1,5 +1,8 @@
 # Loeffler IDCT: отдельная реализация и сравнение с матричным эталоном
 
+> Программный JPEG теперь optional: feature software-jpeg; benchmarks дополнительно diagnostics.
+> [Состав сборок](build-flavors.md). Код и результаты ниже сохранены.
+
 Проверено на ESP32-P4 rev1.3, около 160 MHz, **все кеши обходятся, L2 size=0**,
 PSRAM x16 DDR 80 MHz, LCD 1024×600 active. Кеши, частота, DMA и периферия в этом
 эксперименте не менялись. Entropy/dequant и RGB565 conversion сохранены.

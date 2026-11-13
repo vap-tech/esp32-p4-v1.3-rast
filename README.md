@@ -3,7 +3,11 @@
 # ESP32-P4 rev 1.3 — свой минимальный runtime
 
 Rust `no_std` / `no_main`, собственный HAL без ESP-IDF и RTOS.
+Default: Ethernet и рабочие устройства; labs/Wi-Fi/software JPEG — отдельные features.
+[Состав сборок и команды восстановления](docs/build-flavors.md).
 TCP/IP — smoltcp; веб-ФС — embedded-fatfs. Всё без `std`/heap; HTTP и HAL собственные.
+Аудит размера кода и кандидаты на уборку: [docs/memory-audit.md](docs/memory-audit.md).
+Несколько файлов и append: [docs/file-handles.md](docs/file-handles.md).
 Асинхронное SD/ФС и границы миграции: [docs/async-storage.md](docs/async-storage.md).
 Target: `riscv32imafc-unknown-none-elf`, стабильный Rust.
 
@@ -98,10 +102,11 @@ Native microSD SDMMC slot 0, SDIO PLL200, 4-bit/25 MHz и High Speed 50 MHz,
 PA_CTRL=GPIO11, слышимый тон подтверждён пользователем; цифровой loopback
 через GPIO48 тоже проверен. WAV с SD проверен на четырёхблочном DMA-кольце:
 60 секунд без DMA errors, underrun останавливает канал и позволяет новый запуск.
-Аналоговое качество WAV в этом тесте ещё требует подтверждения слушателем. Запись микрофона не реализована.
+Аналоговое качество WAV в этом тесте ещё требует подтверждения слушателем. Запись микрофона поддерживается; см. ниже и docs/recorder.md.
 [docs/audio.md](docs/audio.md).
 
-JPEG и WAV с карты включаются только командами, без автозапуска:
+Для JPEG нужна сборка с `software-jpeg`, для JPEG benchmarks — ещё `diagnostics`.
+WAV остаётся в default. Примеры команд:
 
 ```sh
 python3 scripts/display-control.py --image HOME.JPG
@@ -152,15 +157,16 @@ GPIO9 RX sample comparison and ring latency bounds. Both I-only and I+D passed
 minute runs; the detector catches an injected repeated frame without DMA error.
 Default DAC volume is now **-21 dB** (+3 dB). [Results and build](docs/wav-lab.md).
 
-Веб-файлы Flashbox: `python3 scripts/display-control.py --icache on --dcache off --web-run 3600`.
-Адрес печатается в `WEB READY`: страница из Flash, список/скачивание/последовательный
-PUT на SD. Без перезаписи существующих файлов, поддержаны Unicode LFN. Свободно около
-42 KiB work SRAM; отдельно DMA arena116 KiB и fixed DMA36 KiB. [API и проверки](docs/web.md).
+Веб-файлы Flashbox: `python3 scripts/display-control.py --web-run 3600`.
+Адрес печатается в `WEB READY`: страница из Flash, список, чередующиеся GET/PUT
+на SD через таблицу файлов. Без перезаписи существующих файлов, поддержаны Unicode LFN. Свободно
+около 189 KiB work SRAM; отдельно DMA arena136 KiB и fixed DMA16 KiB. [API и проверки](docs/web.md).
 
 Консоль принимает только полные строки `:command [args]` + Enter; одиночные буквы больше не выполняются. Общий список — [docs/console.md](docs/console.md), в скрипте: `python3 scripts/display-control.py help`.
 
 Запись микрофона: `python3 scripts/display-control.py --record REC0004.WAV --record-seconds 30`. Новый WAV на SD, STOP/ESC завершает файл; [проверки и ограничения](docs/recorder.md).
 
+Для следующих Wi-Fi-команд нужна сборка с feature `wifi`; код и настройки сохранены.
 Wi-Fi сопроцессор C6: `python3 scripts/display-control.py --wifi-probe`
 читает версию, `--wifi-scan` сканирует до8 AP без подключения. Проверено с
 существующим ESP-Hosted3.0.9/IDFv6.1, SDIO slot1 4bit/25MHz. Подробности и

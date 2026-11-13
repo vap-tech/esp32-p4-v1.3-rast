@@ -15,6 +15,7 @@ unsafe fn wake(_: *const ()) {
 }
 unsafe fn drop_waker(_: *const ()) {}
 static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake, drop_waker);
+#[inline(never)]
 pub fn run<F: Future, E>(
     future: F,
     mut idle: impl FnMut() -> Result<(), E>,

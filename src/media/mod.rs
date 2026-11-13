@@ -1,4 +1,5 @@
 //! Small allocation-free media readers. No filesystem or transport policy.
+#[cfg(feature = "software-jpeg")]
 pub mod jpeg;
 pub mod wav;
 
@@ -91,5 +92,7 @@ pub(crate) mod tests {
     }
 }
 
+#[cfg(feature = "software-jpeg")]
 pub mod idct;
+#[cfg(feature = "software-jpeg")]
 mod loeffler;

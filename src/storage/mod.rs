@@ -1,6 +1,7 @@
 //! Filesystems over bounded sector I/O. No allocator, hardware or runtime required.
 pub mod asynchronous;
 pub mod fat32;
+pub mod files;
 pub mod format;
 pub mod sd;
 pub mod volume;

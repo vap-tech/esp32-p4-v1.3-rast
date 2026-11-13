@@ -31,7 +31,11 @@ pub fn cache_snapshot() -> CacheSnapshot {
 
 pub const UPPER_BASE: usize = 0x4ff4_0000;
 pub const DMA_START: usize = 0x4ff0_0000;
-pub const DMA_END: usize = 0x4ff1_d000;
+pub const DMA_END: usize = if cfg!(feature = "wifi") {
+    0x4ff1_d000
+} else {
+    0x4ff2_2000
+};
 pub const DMA_FIXED_END: usize = 0x4ff2_6000;
 
 #[cfg(target_arch = "riscv32")]

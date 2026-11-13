@@ -619,9 +619,14 @@ impl<IO: ReadWriteSeek, TP, OCC> FileSystem<IO, TP, OCC> {
     /// Updates the FS Information Sector if needed and clears
     /// the dirty flag.
     pub async fn flush(&self) -> Result<(), Error<IO::Error>> {
-        self.flush_fs_info().await?;
+        self.flush_preserving_dirty().await?;
         self.set_dirty_flag(false).await?;
         Ok(())
+    }
+
+    /// Save metadata without marking a volume with unfinished writers clean.
+    pub async fn flush_preserving_dirty(&self) -> Result<(), Error<IO::Error>> {
+        self.flush_fs_info().await
     }
 
     async fn flush_fs_info(&self) -> Result<(), Error<IO::Error>> {

@@ -188,6 +188,9 @@ impl<'a> Stack<'a> {
         self.stats.tx_queued += n as u64;
         n
     }
+    pub fn write_capacity(&self, i: usize) -> usize {
+        self.socket(i).send_capacity() - self.socket(i).send_queue()
+    }
     pub fn flushed(&self, i: usize) -> bool {
         self.socket(i).send_queue() == 0
     }

@@ -1,37 +1,37 @@
-# Public prefix	internal handler
+# Public prefix	internal handler	required features (optional, comma=AND)
 rtc	rtc
 net web serve	web-run
 net ethernet run	eth-run
 net ethernet probe	eth-probe
 sd format	format-sd
-audio test loopback	wav-lab
-audio test underrun	wav-lab-stall
-audio test control	wav-lab-control
-audio test repeat	wav-lab-repeat
-system test mixed	mixed-stress
-sd test dma	sd-stress
-system cache l2-probe	l2-probe
-system cache data	dcache
-system cache instruction	icache
-system cache l2	l2
+audio test loopback	wav-lab	audio-lab
+audio test underrun	wav-lab-stall	audio-lab
+audio test control	wav-lab-control	audio-lab
+audio test repeat	wav-lab-repeat	audio-lab
+system test mixed	mixed-stress	diagnostics,software-jpeg
+sd test dma	sd-stress	diagnostics
+system cache l2-probe	l2-probe	diagnostics
+system cache data	dcache	diagnostics
+system cache instruction	icache	diagnostics
+system cache l2	l2	diagnostics
 system clock	clock
 memory status	memory
-memory benchmark	memory-bench
-memory test	memory-test
-display image	image
-jpeg benchmark idct	jpeg-idct-bench
-jpeg profile	jpeg-profile
-jpeg benchmark output	jpeg-bench
+memory benchmark	memory-bench	diagnostics
+memory test	memory-test	diagnostics
+display image	image	software-jpeg
+jpeg benchmark idct	jpeg-idct-bench	diagnostics,software-jpeg
+jpeg profile	jpeg-profile	diagnostics,software-jpeg
+jpeg benchmark output	jpeg-bench	diagnostics,software-jpeg
 audio play	play
-audio test play-stall	play-stall
+audio test play-stall	play-stall	diagnostics
 display brightness	brightness
 display clock	clock-ui
 audio record	record
-memory arbitration	arbitration
-wifi probe	c6-probe
-wifi scan	c6-scan
-wifi connect	c6-connect
-wifi default	c6-default
-net wifi serve	wifi-web
-wifi raw	c6-raw
-system irq test	irq-test
+memory arbitration	arbitration	diagnostics
+wifi probe	c6-probe	wifi
+wifi scan	c6-scan	wifi
+wifi connect	c6-connect	wifi
+wifi default	c6-default	wifi
+net wifi serve	wifi-web	wifi
+wifi raw	c6-raw	wifi,diagnostics
+system irq test	irq-test	diagnostics

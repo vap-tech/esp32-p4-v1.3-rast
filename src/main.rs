@@ -13,10 +13,13 @@ use esp32_p4::{
 #[cfg(feature = "audio-lab")]
 mod audio_lab;
 
+#[cfg(feature = "diagnostics")]
 mod arbitration_lab;
 mod recorder;
 mod web_server;
+#[cfg(feature = "wifi")]
 mod wifi;
+#[cfg(feature = "wifi")]
 mod wifi_profile;
 
 use core::{arch::global_asm, fmt::Write, panic::PanicInfo};
@@ -192,115 +195,148 @@ extern "C" fn rust_main() -> ! {
                     continue;
                 };
                 if let Some(seconds) = line.strip_prefix("c6-default ") {
-                    if camera_live || alarm_active || dma_arena.stats().used != 0 {
-                        let _ = writeln!(console, "C6 DONE Err(busy)");
-                        continue;
+                    #[cfg(feature = "wifi")]
+                    {
+                        if camera_live || alarm_active || dma_arena.stats().used != 0 {
+                            let _ = writeln!(console, "C6 DONE Err(busy)");
+                            continue;
+                        }
+                        let result = seconds
+                            .parse::<u32>()
+                            .map_err(|_| "seconds 1..3600")
+                            .and_then(|seconds| {
+                                wifi::connect_default(seconds, &mut timer, &mut console)
+                            });
+                        let _ = writeln!(
+                            console,
+                            "C6 DONE {:?} stack={:?}",
+                            result,
+                            hal::memory::stack_usage()
+                        );
                     }
-                    let result = seconds
-                        .parse::<u32>()
-                        .map_err(|_| "seconds 1..3600")
-                        .and_then(|seconds| {
-                            wifi::connect_default(seconds, &mut timer, &mut console)
-                        });
-                    let _ = writeln!(
-                        console,
-                        "C6 DONE {:?} stack={:?}",
-                        result,
-                        hal::memory::stack_usage()
-                    );
+
+                    #[cfg(not(feature = "wifi"))]
+                    let _ = seconds;
                 } else if let Some(args) = line.strip_prefix("c6-connect ") {
-                    if camera_live || alarm_active || dma_arena.stats().used != 0 {
-                        let _ = writeln!(console, "C6 DONE Err(busy)");
-                        continue;
+                    #[cfg(feature = "wifi")]
+                    {
+                        if camera_live || alarm_active || dma_arena.stats().used != 0 {
+                            let _ = writeln!(console, "C6 DONE Err(busy)");
+                            continue;
+                        }
+                        let result = wifi::connect(args, &mut timer, &mut console);
+                        normalized.fill(0);
+                        command_input.clear();
+                        let _ = writeln!(
+                            console,
+                            "C6 DONE {:?} stack={:?}",
+                            result,
+                            hal::memory::stack_usage()
+                        );
                     }
-                    let result = wifi::connect(args, &mut timer, &mut console);
-                    normalized.fill(0);
-                    command_input.clear();
-                    let _ = writeln!(
-                        console,
-                        "C6 DONE {:?} stack={:?}",
-                        result,
-                        hal::memory::stack_usage()
-                    );
+
+                    #[cfg(not(feature = "wifi"))]
+                    let _ = args;
                 } else if line == "irq-test" {
-                    let guard = unsafe { hal::interrupt::Guard::enter() };
-                    timer.delay_us(20_000);
-                    let stats = hal::interrupt::stats();
-                    drop(guard);
-                    let _ = writeln!(
-                        console,
-                        "IRQ TEST DONE {:?} stack={:?}",
-                        stats,
-                        hal::memory::stack_usage()
-                    );
-                } else if let Some(args) = line.strip_prefix("c6-raw ") {
-                    if camera_live || alarm_active || dma_arena.stats().used != 0 {
-                        let _ = writeln!(console, "C6 RAW DONE Err(busy)");
-                        continue;
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        let guard = unsafe { hal::interrupt::Guard::enter() };
+                        timer.delay_us(20_000);
+                        let stats = hal::interrupt::stats();
+                        drop(guard);
+                        let _ = writeln!(
+                            console,
+                            "IRQ TEST DONE {:?} stack={:?}",
+                            stats,
+                            hal::memory::stack_usage()
+                        );
                     }
-                    let result = wifi::raw(args, &mut timer, &mut console);
-                    let _ = writeln!(
-                        console,
-                        "C6 RAW DONE {:?} stack={:?}",
-                        result,
-                        hal::memory::stack_usage()
-                    );
+                } else if let Some(args) = line.strip_prefix("c6-raw ") {
+                    #[cfg(all(feature = "wifi", feature = "diagnostics"))]
+                    {
+                        if camera_live || alarm_active || dma_arena.stats().used != 0 {
+                            let _ = writeln!(console, "C6 RAW DONE Err(busy)");
+                            continue;
+                        }
+                        let result = wifi::raw(args, &mut timer, &mut console);
+                        let _ = writeln!(
+                            console,
+                            "C6 RAW DONE {:?} stack={:?}",
+                            result,
+                            hal::memory::stack_usage()
+                        );
+                    }
+
+                    #[cfg(not(all(feature = "wifi", feature = "diagnostics")))]
+                    let _ = args;
                 } else if matches!(
                     line,
                     "c6-probe" | "c6-probe high" | "c6-probe low" | "c6-scan"
                 ) {
-                    if camera_live || alarm_active || dma_arena.stats().used != 0 {
-                        let _ = writeln!(console, "C6 DONE Err(busy)");
-                        continue;
-                    }
-                    let result = wifi::probe(
-                        &mut timer,
-                        &mut console,
-                        line.ends_with(" high"),
-                        line == "c6-scan",
-                    );
-                    let _ = writeln!(
-                        console,
-                        "C6 DONE {:?} stack={:?}",
-                        result,
-                        hal::memory::stack_usage()
-                    );
-                } else if line == "arbitration status" {
-                    let _ = writeln!(
-                        console,
-                        "ARBITRATION STATE {:x?}",
-                        hal::arbitration::snapshot()
-                    );
-                    let _ = writeln!(
-                        console,
-                        "ARBITRATION REGULATORS {:x?}",
-                        hal::arbitration::regulator_snapshot()
-                    );
-                    let _ = writeln!(console, "ARBITRATION DONE Ok(())");
-                } else if let Some(args) = line.strip_prefix("arbitration bench ") {
-                    if camera_live
-                        || !scanout_active
-                        || alarm_active
-                        || internal_arena.stats().used != 0
-                        || large_arena.as_ref().is_none_or(|a| a.stats().used != 0)
+                    #[cfg(feature = "wifi")]
                     {
-                        let _=writeln!(console,"ARBITRATION DONE Err(requires idle arenas, active LCD, camera/alarm off)");
-                        continue;
+                        if camera_live || alarm_active || dma_arena.stats().used != 0 {
+                            let _ = writeln!(console, "C6 DONE Err(busy)");
+                            continue;
+                        }
+                        let result = wifi::probe(
+                            &mut timer,
+                            &mut console,
+                            line.ends_with(" high"),
+                            line == "c6-scan",
+                        );
+                        let _ = writeln!(
+                            console,
+                            "C6 DONE {:?} stack={:?}",
+                            result,
+                            hal::memory::stack_usage()
+                        );
                     }
-                    let result = arbitration_lab::run(
-                        args,
-                        arbitration_lab::Context {
-                            fb: framebuffer.as_mut().unwrap(),
-                            panel: display.as_mut().unwrap(),
-                            timer: &mut timer,
-                            console: &mut console,
-                            internal: &internal_arena,
-                            external: large_arena.as_ref().unwrap(),
-                        },
-                    );
-                    internal_arena.reset();
-                    large_arena.as_mut().unwrap().reset();
-                    let _ = writeln!(console, "ARBITRATION DONE {:?}", result);
+                } else if line == "arbitration status" {
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        let _ = writeln!(
+                            console,
+                            "ARBITRATION STATE {:x?}",
+                            hal::arbitration::snapshot()
+                        );
+                        let _ = writeln!(
+                            console,
+                            "ARBITRATION REGULATORS {:x?}",
+                            hal::arbitration::regulator_snapshot()
+                        );
+                        let _ = writeln!(console, "ARBITRATION DONE Ok(())");
+                    }
+                } else if let Some(args) = line.strip_prefix("arbitration bench ") {
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        if camera_live
+                            || !scanout_active
+                            || alarm_active
+                            || internal_arena.stats().used != 0
+                            || large_arena.as_ref().is_none_or(|a| a.stats().used != 0)
+                        {
+                            let _=writeln!(console,"ARBITRATION DONE Err(requires idle arenas, active LCD, camera/alarm off)");
+                            continue;
+                        }
+                        let result = arbitration_lab::run(
+                            args,
+                            arbitration_lab::Context {
+                                fb: framebuffer.as_mut().unwrap(),
+                                panel: display.as_mut().unwrap(),
+                                timer: &mut timer,
+                                console: &mut console,
+                                internal: &internal_arena,
+                                external: large_arena.as_ref().unwrap(),
+                            },
+                        );
+                        internal_arena.reset();
+                        large_arena.as_mut().unwrap().reset();
+                        let _ = writeln!(console, "ARBITRATION DONE {:?}", result);
+                    }
+
+                    #[cfg(not(feature = "diagnostics"))]
+                    let _ = args;
                 } else if let Some(args) = line.strip_prefix("record ") {
                     let mut words = args.split_ascii_whitespace();
                     let path = words.next().unwrap_or("");
@@ -373,31 +409,37 @@ extern "C" fn rust_main() -> ! {
                     }
                     let _ = writeln!(console, "RTC DONE {:?}", result.map(|_| ()));
                 } else if let Some(seconds) = line.strip_prefix("wifi-web ") {
-                    if let Ok(seconds @ 1..=3600) = seconds.parse::<u32>() {
-                        if camera_live || alarm_active || dma_arena.stats().used != 0 {
-                            let _ = writeln!(console, "WEB RUN DONE Err(busy)");
-                            continue;
+                    #[cfg(feature = "wifi")]
+                    {
+                        if let Ok(seconds @ 1..=3600) = seconds.parse::<u32>() {
+                            if camera_live || alarm_active || dma_arena.stats().used != 0 {
+                                let _ = writeln!(console, "WEB RUN DONE Err(busy)");
+                                continue;
+                            }
+                            let Some(panel) = display.as_mut() else {
+                                continue;
+                            };
+                            let result = web_server::run_wifi(
+                                seconds,
+                                &dma_arena,
+                                &mut timer,
+                                &mut console,
+                                panel,
+                            );
+                            dma_arena.reset();
+                            let _ = writeln!(
+                                console,
+                                "WEB RUN DONE {:?} stack={:?}",
+                                result,
+                                hal::memory::stack_usage()
+                            );
+                        } else {
+                            let _ = writeln!(console, "WEB RUN DONE Err(seconds)");
                         }
-                        let Some(panel) = display.as_mut() else {
-                            continue;
-                        };
-                        let result = web_server::run_wifi(
-                            seconds,
-                            &dma_arena,
-                            &mut timer,
-                            &mut console,
-                            panel,
-                        );
-                        dma_arena.reset();
-                        let _ = writeln!(
-                            console,
-                            "WEB RUN DONE {:?} stack={:?}",
-                            result,
-                            hal::memory::stack_usage()
-                        );
-                    } else {
-                        let _ = writeln!(console, "WEB RUN DONE Err(seconds)");
                     }
+
+                    #[cfg(not(feature = "wifi"))]
+                    let _ = seconds;
                 } else if let Some(seconds) = line.strip_prefix("web-run ") {
                     if let Ok(seconds @ 1..=86400) = seconds.parse::<u32>() {
                         if camera_live || dma_arena.stats().used != 0 {
@@ -463,102 +505,121 @@ extern "C" fn rust_main() -> ! {
                     || line == "wav-lab-control"
                     || line == "wav-lab-repeat"
                 {
-                    #[cfg(feature = "audio-lab")]
+                    #[cfg(feature = "diagnostics")]
                     {
-                        if camera_live || !scanout_active || dma_arena.stats().used != 0 {
-                            let _ = writeln!(console, "WAV LAB DONE Err(state)");
+                        #[cfg(feature = "audio-lab")]
+                        {
+                            if camera_live || !scanout_active || dma_arena.stats().used != 0 {
+                                let _ = writeln!(console, "WAV LAB DONE Err(state)");
+                                continue;
+                            }
+                            let result = audio_lab::run(
+                                framebuffer.as_mut().unwrap(),
+                                &dma_arena,
+                                &mut i2c,
+                                &mut timer,
+                                &mut console,
+                                line,
+                            );
+                            dma_arena.reset();
+                            let _ = writeln!(
+                                console,
+                                "WAV LAB DONE {:?} guards={} stack={:?}",
+                                result,
+                                framebuffer.as_ref().unwrap().guards_ok(),
+                                hal::memory::stack_usage()
+                            );
+                        }
+                        #[cfg(not(feature = "audio-lab"))]
+                        {
+                            let _ = writeln!(console, "WAV LAB DONE Err(build audio-lab)");
+                        }
+                    }
+                } else if line == "mixed-stress" {
+                    #[cfg(all(feature = "diagnostics", feature = "software-jpeg"))]
+                    {
+                        if camera_live || !scanout_active {
+                            let _ = writeln!(console, "MIXED DONE Err(state)");
                             continue;
                         }
-                        let result = audio_lab::run(
-                            framebuffer.as_mut().unwrap(),
-                            &dma_arena,
-                            &mut i2c,
-                            &mut timer,
-                            &mut console,
-                            line,
-                        );
-                        dma_arena.reset();
+                        let result =
+                            mixed_stress(framebuffer.as_mut().unwrap(), &mut timer, &mut console);
                         let _ = writeln!(
                             console,
-                            "WAV LAB DONE {:?} guards={} stack={:?}",
+                            "MIXED DONE {:?} guards={} stack={:?}",
                             result,
                             framebuffer.as_ref().unwrap().guards_ok(),
                             hal::memory::stack_usage()
                         );
                     }
-                    #[cfg(not(feature = "audio-lab"))]
-                    {
-                        let _ = writeln!(console, "WAV LAB DONE Err(build audio-lab)");
-                    }
-                } else if line == "mixed-stress" {
-                    if camera_live || !scanout_active {
-                        let _ = writeln!(console, "MIXED DONE Err(state)");
-                        continue;
-                    }
-                    let result =
-                        mixed_stress(framebuffer.as_mut().unwrap(), &mut timer, &mut console);
-                    let _ = writeln!(
-                        console,
-                        "MIXED DONE {:?} guards={} stack={:?}",
-                        result,
-                        framebuffer.as_ref().unwrap().guards_ok(),
-                        hal::memory::stack_usage()
-                    );
                 } else if line == "sd-stress" {
-                    if camera_live || !scanout_active {
-                        let _ = writeln!(console, "SD STRESS DONE Err(state)");
-                        continue;
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        if camera_live || !scanout_active {
+                            let _ = writeln!(console, "SD STRESS DONE Err(state)");
+                            continue;
+                        }
+                        if dma_arena.stats().used != 0 {
+                            let _ = writeln!(console, "SD STRESS DONE Err(arena busy)");
+                            continue;
+                        }
+                        let result = sd_stress(&dma_arena, &mut timer, &mut console);
+                        dma_arena.reset();
+                        let _ = writeln!(
+                            console,
+                            "SD STRESS DONE {:?} guards={} stack={:?}",
+                            result,
+                            framebuffer.as_ref().unwrap().guards_ok(),
+                            hal::memory::stack_usage()
+                        );
                     }
-                    if dma_arena.stats().used != 0 {
-                        let _ = writeln!(console, "SD STRESS DONE Err(arena busy)");
-                        continue;
-                    }
-                    let result = sd_stress(&dma_arena, &mut timer, &mut console);
-                    dma_arena.reset();
-                    let _ = writeln!(
-                        console,
-                        "SD STRESS DONE {:?} guards={} stack={:?}",
-                        result,
-                        framebuffer.as_ref().unwrap().guards_ok(),
-                        hal::memory::stack_usage()
-                    );
                 } else if line == "l2-probe" {
-                    if camera_live || framebuffer.is_none() {
-                        let _ = writeln!(console, "L2 PROBE DONE Err(state)");
-                        continue;
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        if camera_live || framebuffer.is_none() {
+                            let _ = writeln!(console, "L2 PROBE DONE Err(state)");
+                            continue;
+                        }
+                        let result = unsafe { hal::memory::probe_l2() };
+                        let _ = writeln!(console, "L2 PROBE DONE {:?}", result);
                     }
-                    let result = unsafe { hal::memory::probe_l2() };
-                    let _ = writeln!(console, "L2 PROBE DONE {:?}", result);
                 } else if line == "dcache on"
                     || line == "dcache off"
                     || line == "l2 on"
                     || line == "l2 off"
                 {
-                    if camera_live {
-                        let _ = writeln!(console, "CACHE DONE Err(camera active)");
-                        continue;
-                    }
-                    let result = unsafe {
-                        if line.starts_with("dcache") {
-                            hal::memory::set_data_cache(line == "dcache on")
-                        } else {
-                            hal::memory::set_l2_cache(line == "l2 on")
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        if camera_live {
+                            let _ = writeln!(console, "CACHE DONE Err(camera active)");
+                            continue;
                         }
-                    };
-                    let _ = writeln!(
-                        console,
-                        "CACHE DONE {:?} {:?}",
-                        result,
-                        hal::memory::cache_snapshot()
-                    );
+                        let result = unsafe {
+                            if line.starts_with("dcache") {
+                                hal::memory::set_data_cache(line == "dcache on")
+                            } else {
+                                hal::memory::set_l2_cache(line == "l2 on")
+                            }
+                        };
+                        let _ = writeln!(
+                            console,
+                            "CACHE DONE {:?} {:?}",
+                            result,
+                            hal::memory::cache_snapshot()
+                        );
+                    }
                 } else if line == "icache on" || line == "icache off" {
-                    let result = unsafe { hal::memory::set_instruction_cache(line == "icache on") };
-                    let _ = writeln!(
-                        console,
-                        "ICACHE DONE {:?} {:?}",
-                        result,
-                        hal::memory::cache_snapshot()
-                    );
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        let result =
+                            unsafe { hal::memory::set_instruction_cache(line == "icache on") };
+                        let _ = writeln!(
+                            console,
+                            "ICACHE DONE {:?} {:?}",
+                            result,
+                            hal::memory::cache_snapshot()
+                        );
+                    }
                 } else if line == "clock" {
                     clock_audit("runtime", &mut timer, &mut console);
                     let _ = writeln!(console, "CLOCK DONE Ok(())");
@@ -573,223 +634,259 @@ extern "C" fn rust_main() -> ! {
                     }
                     let _ = writeln!(console, "MEMORY DONE Ok(())");
                 } else if line == "memory-bench" {
-                    // Initialize/split PSRAM without enabling display scanout.
-                    if large_arena.is_none() {
-                        let memory = match psram.take() {
-                            Some(memory) => Ok(memory),
-                            None => unsafe { hal::psram::Psram::new(&mut timer) },
-                        };
-                        match memory {
-                            Ok(memory) => {
-                                let (display_memory, arena) = memory.split();
-                                large_arena = Some(arena);
-                                framebuffer =
-                                    Some(esp32_p4::devices::framebuffer::Framebuffer::new(
-                                        display_memory,
-                                    ));
-                            }
-                            Err(error) => {
-                                let _ = writeln!(console, "MEMORY DONE Err({:?})", error);
-                                continue;
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        // Initialize/split PSRAM without enabling display scanout.
+                        if large_arena.is_none() {
+                            let memory = match psram.take() {
+                                Some(memory) => Ok(memory),
+                                None => unsafe { hal::psram::Psram::new(&mut timer) },
+                            };
+                            match memory {
+                                Ok(memory) => {
+                                    let (display_memory, arena) = memory.split();
+                                    large_arena = Some(arena);
+                                    framebuffer =
+                                        Some(esp32_p4::devices::framebuffer::Framebuffer::new(
+                                            display_memory,
+                                        ));
+                                }
+                                Err(error) => {
+                                    let _ = writeln!(console, "MEMORY DONE Err({:?})", error);
+                                    continue;
+                                }
                             }
                         }
+                        let before_hash = framebuffer.as_ref().unwrap().checksum();
+                        let result = memory_bench(
+                            &internal_arena,
+                            large_arena.as_ref().unwrap(),
+                            &mut timer,
+                            &mut console,
+                        );
+                        // No outstanding allocations: reclaim both scratch arenas.
+                        internal_arena.reset();
+                        large_arena.as_mut().unwrap().reset();
+                        let after_hash = framebuffer.as_ref().unwrap().checksum();
+                        let result = result.and(
+                            if before_hash == after_hash
+                                && framebuffer.as_ref().unwrap().guards_ok()
+                            {
+                                Ok(())
+                            } else {
+                                Err(hal::memory::Error::Mismatch {
+                                    address: esp32_p4::devices::framebuffer::CPU_ADDRESS,
+                                    expected: before_hash,
+                                    actual: after_hash,
+                                })
+                            },
+                        );
+                        let _ = writeln!(
+                            console,
+                            "MEMORY FRAMEBUFFER hash_before={:08x} hash_after={:08x} unchanged={}",
+                            before_hash,
+                            after_hash,
+                            before_hash == after_hash
+                        );
+                        let _ = writeln!(
+                            console,
+                            "MEMORY DONE {:?} display_active={} guards={} stack={:?}",
+                            result,
+                            scanout_active,
+                            framebuffer.as_ref().unwrap().guards_ok(),
+                            hal::memory::stack_usage()
+                        );
                     }
-                    let before_hash = framebuffer.as_ref().unwrap().checksum();
-                    let result = memory_bench(
-                        &internal_arena,
-                        large_arena.as_ref().unwrap(),
-                        &mut timer,
-                        &mut console,
-                    );
-                    // No outstanding allocations: reclaim both scratch arenas.
-                    internal_arena.reset();
-                    large_arena.as_mut().unwrap().reset();
-                    let after_hash = framebuffer.as_ref().unwrap().checksum();
-                    let result = result.and(
-                        if before_hash == after_hash && framebuffer.as_ref().unwrap().guards_ok() {
-                            Ok(())
-                        } else {
-                            Err(hal::memory::Error::Mismatch {
-                                address: esp32_p4::devices::framebuffer::CPU_ADDRESS,
-                                expected: before_hash,
-                                actual: after_hash,
-                            })
-                        },
-                    );
-                    let _ = writeln!(
-                        console,
-                        "MEMORY FRAMEBUFFER hash_before={:08x} hash_after={:08x} unchanged={}",
-                        before_hash,
-                        after_hash,
-                        before_hash == after_hash
-                    );
-                    let _ = writeln!(
-                        console,
-                        "MEMORY DONE {:?} display_active={} guards={} stack={:?}",
-                        result,
-                        scanout_active,
-                        framebuffer.as_ref().unwrap().guards_ok(),
-                        hal::memory::stack_usage()
-                    );
                 } else if line == "memory-test" {
-                    if framebuffer.is_some() {
-                        let _ = writeln!(
-                            console,
-                            "MEMORY DONE Err(display owns PSRAM; reset before full test)"
-                        );
-                        continue;
-                    }
-                    if psram.is_none() {
-                        match unsafe { hal::psram::Psram::new(&mut timer) } {
-                            Ok(memory) => psram = Some(memory),
-                            Err(error) => {
-                                let _ = writeln!(console, "MEMORY DONE Err({:?})", error);
-                                continue;
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        if framebuffer.is_some() {
+                            let _ = writeln!(
+                                console,
+                                "MEMORY DONE Err(display owns PSRAM; reset before full test)"
+                            );
+                            continue;
+                        }
+                        if psram.is_none() {
+                            match unsafe { hal::psram::Psram::new(&mut timer) } {
+                                Ok(memory) => psram = Some(memory),
+                                Err(error) => {
+                                    let _ = writeln!(console, "MEMORY DONE Err({:?})", error);
+                                    continue;
+                                }
                             }
                         }
-                    }
-                    let memory = psram.as_mut().unwrap();
-                    let _ = writeln!(
-                        console,
-                        "MEMORY PSRAM full test bytes={} {:?}",
-                        memory.info.bytes, memory.info
-                    );
-                    let start = timer.now_us();
-                    let result = memory.check_all(|pass, offset| {
+                        let memory = psram.as_mut().unwrap();
                         let _ = writeln!(
                             console,
-                            "MEMORY TEST pass={} checked_MiB={}",
-                            pass + 1,
-                            offset / (1024 * 1024)
+                            "MEMORY PSRAM full test bytes={} {:?}",
+                            memory.info.bytes, memory.info
                         );
-                    });
-                    let _ = writeln!(
-                        console,
-                        "MEMORY DONE {:?} elapsed_us={} stack={:?}",
-                        result,
-                        timer.now_us().wrapping_sub(start) & ((1 << 48) - 1),
-                        hal::memory::stack_usage()
-                    );
+                        let start = timer.now_us();
+                        let result = memory.check_all(|pass, offset| {
+                            let _ = writeln!(
+                                console,
+                                "MEMORY TEST pass={} checked_MiB={}",
+                                pass + 1,
+                                offset / (1024 * 1024)
+                            );
+                        });
+                        let _ = writeln!(
+                            console,
+                            "MEMORY DONE {:?} elapsed_us={} stack={:?}",
+                            result,
+                            timer.now_us().wrapping_sub(start) & ((1 << 48) - 1),
+                            hal::memory::stack_usage()
+                        );
+                    }
                 } else if let Some(path) = line.strip_prefix("image ") {
-                    clock_enabled = false;
-                    if camera_live {
-                        let _ = writeln!(
-                            console,
-                            "MEDIA IMAGE DONE Err(camera active; use :camera stop)"
-                        );
-                        continue;
-                    }
-                    if display.is_none() {
-                        let _ = writeln!(console, "MEDIA IMAGE DONE Err(display unavailable)");
-                        continue;
-                    }
-                    if framebuffer.is_none() {
-                        let memory = match psram.take() {
-                            Some(memory) => Ok(memory),
-                            None => unsafe { hal::psram::Psram::new(&mut timer) },
-                        };
-                        match memory {
-                            Ok(mut memory) => {
-                                if let Err(error) = memory.check() {
+                    #[cfg(feature = "software-jpeg")]
+                    {
+                        clock_enabled = false;
+                        if camera_live {
+                            let _ = writeln!(
+                                console,
+                                "MEDIA IMAGE DONE Err(camera active; use :camera stop)"
+                            );
+                            continue;
+                        }
+                        if display.is_none() {
+                            let _ = writeln!(console, "MEDIA IMAGE DONE Err(display unavailable)");
+                            continue;
+                        }
+                        if framebuffer.is_none() {
+                            let memory = match psram.take() {
+                                Some(memory) => Ok(memory),
+                                None => unsafe { hal::psram::Psram::new(&mut timer) },
+                            };
+                            match memory {
+                                Ok(mut memory) => {
+                                    if let Err(error) = memory.check() {
+                                        let _ =
+                                            writeln!(console, "MEDIA IMAGE DONE Err({:?})", error);
+                                        continue;
+                                    }
+                                    let (display_memory, arena) = memory.split();
+                                    large_arena = Some(arena);
+                                    framebuffer =
+                                        Some(esp32_p4::devices::framebuffer::Framebuffer::new(
+                                            display_memory,
+                                        ));
+                                }
+                                Err(error) => {
                                     let _ = writeln!(console, "MEDIA IMAGE DONE Err({:?})", error);
                                     continue;
                                 }
-                                let (display_memory, arena) = memory.split();
-                                large_arena = Some(arena);
-                                framebuffer =
-                                    Some(esp32_p4::devices::framebuffer::Framebuffer::new(
-                                        display_memory,
-                                    ));
-                            }
-                            Err(error) => {
-                                let _ = writeln!(console, "MEDIA IMAGE DONE Err({:?})", error);
-                                continue;
                             }
                         }
+                        let fb = framebuffer.as_mut().unwrap();
+                        let result = sd_image(path, fb, &mut timer, &mut console);
+                        if result.is_ok() && !scanout_active {
+                            let result = unsafe {
+                                display.as_mut().unwrap().start_framebuffer(
+                                    esp32_p4::devices::framebuffer::DMA_ADDRESS,
+                                    &mut timer,
+                                )
+                            };
+                            scanout_active = result.is_ok();
+                            let _ = writeln!(console, "MEDIA SCANOUT {:?}", result);
+                        }
+                        let _ = writeln!(
+                            console,
+                            "MEDIA IMAGE DONE {:?} active={} guards={}",
+                            result,
+                            scanout_active,
+                            fb.guards_ok()
+                        );
                     }
-                    let fb = framebuffer.as_mut().unwrap();
-                    let result = sd_image(path, fb, &mut timer, &mut console);
-                    if result.is_ok() && !scanout_active {
-                        let result = unsafe {
-                            display.as_mut().unwrap().start_framebuffer(
-                                esp32_p4::devices::framebuffer::DMA_ADDRESS,
-                                &mut timer,
-                            )
-                        };
-                        scanout_active = result.is_ok();
-                        let _ = writeln!(console, "MEDIA SCANOUT {:?}", result);
-                    }
-                    let _ = writeln!(
-                        console,
-                        "MEDIA IMAGE DONE {:?} active={} guards={}",
-                        result,
-                        scanout_active,
-                        fb.guards_ok()
-                    );
+
+                    #[cfg(not(feature = "software-jpeg"))]
+                    let _ = path;
                 } else if let Some(path) = line.strip_prefix("jpeg-idct-bench ") {
-                    if camera_live || !scanout_active || framebuffer.is_none() {
-                        let _=writeln!(console,"JPEG IDCT DONE Err(requires active framebuffer, camera off; use --image first)");
-                        continue;
+                    #[cfg(all(feature = "diagnostics", feature = "software-jpeg"))]
+                    {
+                        if camera_live || !scanout_active || framebuffer.is_none() {
+                            let _=writeln!(console,"JPEG IDCT DONE Err(requires active framebuffer, camera off; use --image first)");
+                            continue;
+                        }
+                        let result = jpeg_idct_bench(
+                            path,
+                            framebuffer.as_mut().unwrap(),
+                            &mut timer,
+                            &mut console,
+                        );
+                        let _ = writeln!(
+                            console,
+                            "JPEG IDCT DONE {:?} guards={} stack={:?}",
+                            result,
+                            framebuffer.as_ref().unwrap().guards_ok(),
+                            hal::memory::stack_usage()
+                        );
                     }
-                    let result = jpeg_idct_bench(
-                        path,
-                        framebuffer.as_mut().unwrap(),
-                        &mut timer,
-                        &mut console,
-                    );
-                    let _ = writeln!(
-                        console,
-                        "JPEG IDCT DONE {:?} guards={} stack={:?}",
-                        result,
-                        framebuffer.as_ref().unwrap().guards_ok(),
-                        hal::memory::stack_usage()
-                    );
+
+                    #[cfg(not(all(feature = "diagnostics", feature = "software-jpeg")))]
+                    let _ = path;
                 } else if let Some(path) = line.strip_prefix("jpeg-profile ") {
-                    if camera_live || !scanout_active || framebuffer.is_none() {
-                        let _=writeln!(console,"JPEG PROFILE DONE Err(requires active framebuffer, camera off; use --image first)");
-                        continue;
+                    #[cfg(all(feature = "diagnostics", feature = "software-jpeg"))]
+                    {
+                        if camera_live || !scanout_active || framebuffer.is_none() {
+                            let _=writeln!(console,"JPEG PROFILE DONE Err(requires active framebuffer, camera off; use --image first)");
+                            continue;
+                        }
+                        let result = jpeg_profile(
+                            path,
+                            framebuffer.as_mut().unwrap(),
+                            &mut timer,
+                            &mut console,
+                        );
+                        let _ = writeln!(
+                            console,
+                            "JPEG PROFILE DONE {:?} guards={} stack={:?}",
+                            result,
+                            framebuffer.as_ref().unwrap().guards_ok(),
+                            hal::memory::stack_usage()
+                        );
                     }
-                    let result = jpeg_profile(
-                        path,
-                        framebuffer.as_mut().unwrap(),
-                        &mut timer,
-                        &mut console,
-                    );
-                    let _ = writeln!(
-                        console,
-                        "JPEG PROFILE DONE {:?} guards={} stack={:?}",
-                        result,
-                        framebuffer.as_ref().unwrap().guards_ok(),
-                        hal::memory::stack_usage()
-                    );
+
+                    #[cfg(not(all(feature = "diagnostics", feature = "software-jpeg")))]
+                    let _ = path;
                 } else if let Some(path) = line.strip_prefix("jpeg-bench ") {
-                    if camera_live || !scanout_active || framebuffer.is_none() {
-                        let _=writeln!(console,"JPEG BENCH DONE Err(requires active framebuffer, camera off; use --image first)");
-                        continue;
+                    #[cfg(all(feature = "diagnostics", feature = "software-jpeg"))]
+                    {
+                        if camera_live || !scanout_active || framebuffer.is_none() {
+                            let _=writeln!(console,"JPEG BENCH DONE Err(requires active framebuffer, camera off; use --image first)");
+                            continue;
+                        }
+                        let result = jpeg_bench(
+                            path,
+                            framebuffer.as_mut().unwrap(),
+                            &mut timer,
+                            &mut console,
+                        );
+                        let _ = writeln!(
+                            console,
+                            "JPEG BENCH DONE {:?} guards={} stack={:?}",
+                            result,
+                            framebuffer.as_ref().unwrap().guards_ok(),
+                            hal::memory::stack_usage()
+                        );
                     }
-                    let result = jpeg_bench(
-                        path,
-                        framebuffer.as_mut().unwrap(),
-                        &mut timer,
-                        &mut console,
-                    );
-                    let _ = writeln!(
-                        console,
-                        "JPEG BENCH DONE {:?} guards={} stack={:?}",
-                        result,
-                        framebuffer.as_ref().unwrap().guards_ok(),
-                        hal::memory::stack_usage()
-                    );
-                } else if let Some(path) = line
-                    .strip_prefix("play ")
-                    .or_else(|| line.strip_prefix("play-stall "))
-                {
+
+                    #[cfg(not(all(feature = "diagnostics", feature = "software-jpeg")))]
+                    let _ = path;
+                } else if let Some(path) = line.strip_prefix("play ").or_else(|| {
+                    if cfg!(feature = "diagnostics") {
+                        line.strip_prefix("play-stall ")
+                    } else {
+                        None
+                    }
+                }) {
                     let result = sd_audio(
                         path,
                         &mut i2c,
                         &mut timer,
                         &mut console,
-                        line.starts_with("play-stall "),
+                        cfg!(feature = "diagnostics") && line.starts_with("play-stall "),
                         if clock_enabled && scanout_active && !camera_live {
                             framebuffer.as_mut().map(|fb| (fb, &mut clock_face))
                         } else {
@@ -885,8 +982,13 @@ extern "C" fn rust_main() -> ! {
                 }
                 camera_live = false;
                 use esp32_p4::devices::ov02c10 as sensor;
-                let configured =
-                    sensor::configure_window(&mut i2c, &mut timer, 1024, 600, command == b'G');
+                let configured = sensor::configure_window(
+                    &mut i2c,
+                    &mut timer,
+                    1024,
+                    600,
+                    cfg!(feature = "diagnostics") && command == b'G',
+                );
                 if let Err(error) = configured {
                     let _ = sensor::stream(&mut i2c, &mut timer, false);
                     let _ = writeln!(
@@ -945,83 +1047,110 @@ extern "C" fn rust_main() -> ! {
                 camera_live = false;
                 let _ = writeln!(console, "COMMAND camera stop camera stopped");
             } else if command == b'p' {
-                let result = audio_tone(&mut i2c, &mut timer, &mut console);
-                let _ = writeln!(console, "COMMAND audio tone {:?}", result);
+                #[cfg(feature = "diagnostics")]
+                {
+                    let result = audio_tone(&mut i2c, &mut timer, &mut console);
+                    let _ = writeln!(console, "COMMAND audio tone {:?}", result);
+                }
             } else if command == b'!' {
-                let result = sd_config_probe(&mut timer, &mut console);
-                let _ = writeln!(console, "COMMAND sd config-create {:?}", result);
+                #[cfg(feature = "diagnostics")]
+                {
+                    let result = sd_config_probe(&mut timer, &mut console);
+                    let _ = writeln!(console, "COMMAND sd config-create {:?}", result);
+                }
             } else if command == b'Z' {
-                let result = sd_fat_probe(&mut timer, &mut console);
-                let _ = writeln!(console, "COMMAND sd list {:?}", result);
+                #[cfg(feature = "diagnostics")]
+                {
+                    let result = sd_fat_probe(&mut timer, &mut console);
+                    let _ = writeln!(console, "COMMAND sd list {:?}", result);
+                }
             } else if command == b'Y' {
                 let result = sdmmc_info(&mut timer, &mut console);
                 let _ = writeln!(console, "COMMAND sd capabilities {:?}", result);
             } else if command == b'#' {
-                let result = sdmmc_multi_write_probe(&mut timer, &mut console);
-                let _ = writeln!(console, "COMMAND sd test multi-write {:?}", result);
+                #[cfg(feature = "diagnostics")]
+                {
+                    let result = sdmmc_multi_write_probe(&mut timer, &mut console);
+                    let _ = writeln!(console, "COMMAND sd test multi-write {:?}", result);
+                }
             } else if command == b'@' {
-                let result = sdmmc_write_probe(&mut timer, &mut console);
-                let _ = writeln!(console, "COMMAND sd test write {:?}", result);
+                #[cfg(feature = "diagnostics")]
+                {
+                    let result = sdmmc_write_probe(&mut timer, &mut console);
+                    let _ = writeln!(console, "COMMAND sd test write {:?}", result);
+                }
             } else if command == b'm' {
-                let result = sdmmc_multi_probe(&mut timer, &mut console);
-                let _ = writeln!(console, "COMMAND sd benchmark read {:?}", result);
+                #[cfg(feature = "diagnostics")]
+                {
+                    let result = sdmmc_multi_probe(&mut timer, &mut console);
+                    let _ = writeln!(console, "COMMAND sd benchmark read {:?}", result);
+                }
             } else if command == b'M' {
-                let result = sdmmc_probe(&mut timer, &mut console);
-                let _ = writeln!(console, "COMMAND sd probe {:?}", result);
+                #[cfg(feature = "diagnostics")]
+                {
+                    let result = sdmmc_probe(&mut timer, &mut console);
+                    let _ = writeln!(console, "COMMAND sd probe {:?}", result);
+                }
             } else if command == b'Q' {
-                if let (Some(fb), Some(panel)) = (framebuffer.as_mut(), display.as_mut()) {
-                    if camera_live {
-                        csi.as_mut().unwrap().stop();
-                        let _ = esp32_p4::devices::ov02c10::stream(&mut i2c, &mut timer, false);
-                        camera_live = false;
-                    }
-                    for color in [0x0000, 0xf800, 0x07e0, 0x001f, 0xffff] {
-                        fb.fill_rgb565(color);
-                        timer.delay_us(100_000);
+                #[cfg(feature = "diagnostics")]
+                {
+                    if let (Some(fb), Some(panel)) = (framebuffer.as_mut(), display.as_mut()) {
+                        if camera_live {
+                            csi.as_mut().unwrap().stop();
+                            let _ = esp32_p4::devices::ov02c10::stream(&mut i2c, &mut timer, false);
+                            camera_live = false;
+                        }
+                        for color in [0x0000, 0xf800, 0x07e0, 0x001f, 0xffff] {
+                            fb.fill_rgb565(color);
+                            timer.delay_us(100_000);
+                            let _ = writeln!(
+                                console,
+                                "COLOR_PROBE memory={:04x} panel={:?}",
+                                color,
+                                panel.first_pixel(&mut timer)
+                            );
+                        }
+                        for color in [0x0000, 0xf800, 0x07e0, 0x001f, 0xffff] {
+                            fb.fill_rgb565_halfwords(color);
+                            timer.delay_us(100_000);
+                            let _ = writeln!(
+                                console,
+                                "COLOR_PROBE16 memory={:04x} panel={:?}",
+                                color,
+                                panel.first_pixel(&mut timer)
+                            );
+                        }
+                        fb.color_check();
+                        let _ = writeln!(console, "COMMAND display test rgb color probe done");
+                    } else {
                         let _ = writeln!(
                             console,
-                            "COLOR_PROBE memory={:04x} panel={:?}",
-                            color,
-                            panel.first_pixel(&mut timer)
+                            "COMMAND display test rgb use :display framebuffer start first"
                         );
                     }
-                    for color in [0x0000, 0xf800, 0x07e0, 0x001f, 0xffff] {
-                        fb.fill_rgb565_halfwords(color);
-                        timer.delay_us(100_000);
-                        let _ = writeln!(
-                            console,
-                            "COLOR_PROBE16 memory={:04x} panel={:?}",
-                            color,
-                            panel.first_pixel(&mut timer)
-                        );
-                    }
-                    fb.color_check();
-                    let _ = writeln!(console, "COMMAND display test rgb color probe done");
-                } else {
-                    let _ = writeln!(
-                        console,
-                        "COMMAND display test rgb use :display framebuffer start first"
-                    );
                 }
             } else if command == b'E' {
-                if let Some(fb) = framebuffer.as_mut() {
-                    if camera_live {
-                        csi.as_mut().unwrap().stop();
-                        let _ = esp32_p4::devices::ov02c10::stream(&mut i2c, &mut timer, false);
-                        camera_live = false;
+                #[cfg(feature = "diagnostics")]
+                {
+                    if let Some(fb) = framebuffer.as_mut() {
+                        if camera_live {
+                            csi.as_mut().unwrap().stop();
+                            let _ = esp32_p4::devices::ov02c10::stream(&mut i2c, &mut timer, false);
+                            camera_live = false;
+                        }
+                        fb.color_check();
+                        let _ = writeln!(
+                            console,
+                            "COMMAND display test chart color-check active={} guards={}",
+                            scanout_active,
+                            fb.guards_ok()
+                        );
+                    } else {
+                        let _ = writeln!(
+                            console,
+                            "COMMAND display test chart use :display framebuffer start first"
+                        );
                     }
-                    fb.color_check();
-                    let _ = writeln!(
-                        console,
-                        "COMMAND display test chart color-check active={} guards={}",
-                        scanout_active,
-                        fb.guards_ok()
-                    );
-                } else {
-                    let _ = writeln!(
-                        console,
-                        "COMMAND display test chart use :display framebuffer start first"
-                    );
                 }
             } else if command == b'F' {
                 if camera_live {
@@ -1170,33 +1299,36 @@ extern "C" fn rust_main() -> ! {
                     "COMMAND display framebuffer stop patterns restored"
                 );
             } else if command == b'P' {
-                if framebuffer.is_some() {
-                    let _ = writeln!(
-                        console,
-                        "COMMAND memory psram-test framebuffer owns PSRAM; test skipped"
-                    );
-                    continue;
-                }
+                #[cfg(feature = "diagnostics")]
+                {
+                    if framebuffer.is_some() {
+                        let _ = writeln!(
+                            console,
+                            "COMMAND memory psram-test framebuffer owns PSRAM; test skipped"
+                        );
+                        continue;
+                    }
 
-                let _ = writeln!(console, "PSRAM initialize: register40MHz / AXI80MHz");
-                if psram.is_none() {
-                    match unsafe { hal::psram::Psram::new(&mut timer) } {
-                        Ok(memory) => {
-                            let _ = writeln!(console, "PSRAM {:?}", memory.info);
-                            psram = Some(memory);
-                        }
-                        Err(error) => {
-                            let _ = writeln!(console, "COMMAND memory psram-test {:?}", error);
-                            continue;
+                    let _ = writeln!(console, "PSRAM initialize: register40MHz / AXI80MHz");
+                    if psram.is_none() {
+                        match unsafe { hal::psram::Psram::new(&mut timer) } {
+                            Ok(memory) => {
+                                let _ = writeln!(console, "PSRAM {:?}", memory.info);
+                                psram = Some(memory);
+                            }
+                            Err(error) => {
+                                let _ = writeln!(console, "COMMAND memory psram-test {:?}", error);
+                                continue;
+                            }
                         }
                     }
+                    let _ = writeln!(console, "PSRAM memory check 4MiB");
+                    let _ = writeln!(
+                        console,
+                        "COMMAND memory psram-test {:?}",
+                        psram.as_mut().unwrap().check()
+                    );
                 }
-                let _ = writeln!(console, "PSRAM memory check 4MiB");
-                let _ = writeln!(
-                    console,
-                    "COMMAND memory psram-test {:?}",
-                    psram.as_mut().unwrap().check()
-                );
             } else if matches!(command, b'a' | b'A' | b'o') {
                 if camera_live && command != b'a' {
                     let _ = writeln!(
@@ -1382,6 +1514,14 @@ extern "C" fn rust_main() -> ! {
 fn display_help(console: &mut hal::usb_serial::Console) {
     let _ = writeln!(
         console,
+        "BUILD diagnostics={} wifi={} software-jpeg={} audio-lab={}",
+        cfg!(feature = "diagnostics"),
+        cfg!(feature = "wifi"),
+        cfg!(feature = "software-jpeg"),
+        cfg!(feature = "audio-lab")
+    );
+    let _ = writeln!(
+        console,
         "CONSOLE v1: :command [arguments] + newline; ESC stops active jobs"
     );
     for (name, _) in esp32_p4::console::entries(esp32_p4::console::COMMANDS) {
@@ -1403,6 +1543,7 @@ fn display_command(
     use hal::dsi::{LaneRate, PixelFormat};
     use jd9165::{ColorOrder, Fill, Reset, TearEffect};
     let result = match command {
+        #[cfg(feature = "diagnostics")]
         b'B' => {
             let _ = writeln!(
                 console,
@@ -1533,7 +1674,9 @@ fn camera_command(
         "CAMERA capture 64x32 RAW10 pattern={}",
         command == b'A'
     );
-    if let Err(error) = camera::configure_crop(bus, timer, command == b'A') {
+    if let Err(error) =
+        camera::configure_crop(bus, timer, cfg!(feature = "diagnostics") && command == b'A')
+    {
         let _ = camera::stream(bus, timer, false);
         let _ = writeln!(
             console,
@@ -1664,6 +1807,7 @@ extern "C" fn rust_trap(cause: u32, pc: u32, value: u32) -> ! {
 }
 
 // A periodic 1kHz sine at 16kHz, duplicated to both PCM16 slots, peak -18dBFS.
+#[cfg(feature = "diagnostics")]
 static AUDIO_TONE: [u32; 512] = {
     let sine: [i16; 16] = [
         0, 1567, 2896, 3784, 4096, 3784, 2896, 1567, 0, -1567, -2896, -3784, -4096, -3784, -2896,
@@ -1693,6 +1837,7 @@ impl core::fmt::Debug for AudioError {
 }
 
 #[inline(never)]
+#[cfg(feature = "diagnostics")]
 fn audio_tone(
     bus: &mut hal::i2c::I2c,
     timer: &mut hal::time::Timer,
@@ -1773,6 +1918,7 @@ fn audio_tone(
 type FsProbeError =
     esp32_p4::storage::Error<esp32_p4::storage::Error<esp32_p4::storage::sd::Error>>;
 
+#[cfg(feature = "diagnostics")]
 const BOARD_CONFIG: &[u8] = b"# ESP32-P4 board configuration\n[display]\nbrightness_percent=25\n[camera]\nenabled=false\n[storage]\nbus_width=4\nclock_hz=50000000\n";
 
 #[inline(never)]
@@ -1840,6 +1986,7 @@ fn sd_format(
         "SD FORMAT metadata_us={}",
         timer.now_us() - started
     );
+    #[cfg(feature = "diagnostics")]
     if !sd_config_probe(timer, console)? {
         return Err(Error::Invalid("formatted CONFIG.TXT verification"));
     }
@@ -1847,6 +1994,7 @@ fn sd_format(
 }
 
 #[inline(never)]
+#[cfg(feature = "diagnostics")]
 fn sd_config_probe(
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
@@ -1889,6 +2037,7 @@ fn sd_config_probe(
 }
 
 #[inline(never)]
+#[cfg(feature = "diagnostics")]
 fn sd_fat_probe(
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
@@ -2024,6 +2173,7 @@ fn sd_fat_probe(
 }
 
 // Fixed-size formatting buffer for an 8.3 path; no heap and no dependencies.
+#[cfg(feature = "diagnostics")]
 mod short_path {
     pub struct Path {
         bytes: [u8; 26],
@@ -2053,6 +2203,7 @@ mod short_path {
 }
 
 #[inline(never)]
+#[cfg(feature = "diagnostics")]
 fn sdmmc_probe(
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
@@ -2157,6 +2308,7 @@ unsafe fn sd_probe_buffer() -> &'static mut [u8; hal::sdmmc::MAX_TRANSFER] {
 }
 
 #[inline(never)]
+#[cfg(feature = "diagnostics")]
 fn sdmmc_multi_probe(
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
@@ -2208,6 +2360,7 @@ fn sdmmc_multi_probe(
 }
 
 #[inline(never)]
+#[cfg(feature = "diagnostics")]
 fn sdmmc_multi_write_probe(
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
@@ -2258,6 +2411,7 @@ fn sdmmc_multi_write_probe(
 }
 
 #[inline(never)]
+#[cfg(feature = "diagnostics")]
 fn sdmmc_write_probe(
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
@@ -2342,6 +2496,7 @@ fn sdmmc_info(
 }
 
 #[inline(never)]
+#[cfg(feature = "software-jpeg")]
 fn sd_image(
     path: &str,
     fb: &mut esp32_p4::devices::framebuffer::Framebuffer,
@@ -2625,6 +2780,7 @@ fn sd_audio(
 }
 
 #[inline(never)]
+#[cfg(feature = "diagnostics")]
 fn memory_bench(
     internal: &esp32_p4::memory::Arena<'_, esp32_p4::memory::Internal>,
     external: &esp32_p4::memory::Arena<'_, esp32_p4::memory::External>,
@@ -2668,6 +2824,7 @@ fn memory_bench(
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(all(feature = "diagnostics", feature = "software-jpeg"))]
 struct JpegTrial {
     decode_us: u64,
     total_us: u64,
@@ -2682,6 +2839,7 @@ struct JpegTrial {
 // A and B enter the same decoder instantiation and callback, selected by a
 // runtime flag. Both consume/hash every RGB565 pixel. Timed code never logs.
 #[inline(never)]
+#[cfg(all(feature = "diagnostics", feature = "software-jpeg"))]
 fn jpeg_trial(
     path: &str,
     fb: &mut esp32_p4::devices::framebuffer::Framebuffer,
@@ -2762,6 +2920,7 @@ fn jpeg_trial(
 }
 
 #[inline(never)]
+#[cfg(all(feature = "diagnostics", feature = "software-jpeg"))]
 fn jpeg_bench(
     path: &str,
     fb: &mut esp32_p4::devices::framebuffer::Framebuffer,
@@ -2829,6 +2988,7 @@ fn cycle_calibration(timer: &mut hal::time::Timer) -> (u64, u64) {
 }
 
 #[inline(never)]
+#[cfg(all(feature = "diagnostics", feature = "software-jpeg"))]
 fn jpeg_profile(
     path: &str,
     fb: &mut esp32_p4::devices::framebuffer::Framebuffer,
@@ -2926,6 +3086,7 @@ fn clock_audit(
 }
 
 #[inline(never)]
+#[cfg(all(feature = "diagnostics", feature = "software-jpeg"))]
 fn jpeg_idct_bench(
     path: &str,
     fb: &mut esp32_p4::devices::framebuffer::Framebuffer,
@@ -2983,6 +3144,7 @@ fn jpeg_idct_bench(
 }
 
 #[inline(never)]
+#[cfg(feature = "diagnostics")]
 fn sd_stress(
     arena: &esp32_p4::memory::Arena<'_, esp32_p4::memory::Internal>,
     timer: &mut hal::time::Timer,
@@ -3059,6 +3221,7 @@ fn sd_stress(
 }
 
 // Owns the AHB DMA channel and all producer state; no global callback pointers.
+#[cfg(all(feature = "diagnostics", feature = "software-jpeg"))]
 struct AudioWork {
     tx: hal::i2s::Tx,
     frames: [u32; 512],
@@ -3068,6 +3231,7 @@ struct AudioWork {
     max_gap: u64,
     failed: bool,
 }
+#[cfg(all(feature = "diagnostics", feature = "software-jpeg"))]
 impl AudioWork {
     fn poll(&mut self) {
         let now = hal::time::cycle_count();
@@ -3098,6 +3262,7 @@ impl AudioWork {
     }
 }
 #[inline(never)]
+#[cfg(all(feature = "diagnostics", feature = "software-jpeg"))]
 fn mixed_stress(
     fb: &mut esp32_p4::devices::framebuffer::Framebuffer,
     timer: &mut hal::time::Timer,

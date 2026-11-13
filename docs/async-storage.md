@@ -4,6 +4,9 @@
 Источник и локальные исправления: [UPSTREAM.md](../vendor/embedded-fatfs/UPSTREAM.md).
 Файловый интерфейс отделён от конкретной ФС; exFAT пока не реализована.
 
+> Текущая таблица handles и параллельные файловые HTTP transfers:
+> [file-handles.md](file-handles.md). Ниже описание исходного async этапа.
+
 ## Слои
 
 - `storage::asynchronous::BlockDevice`: async read/write/sync, LBA и размеры u64.

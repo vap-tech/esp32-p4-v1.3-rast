@@ -1,5 +1,8 @@
 # ESP32-C6: ESP-Hosted без SDK на P4
 
+> Сейчас Wi-Fi не входит в default. Вернуть: `./scripts/image.sh --features wifi`.
+> Для raw mode добавить diagnostics. [Полная инструкция и сохранённые зависимости](build-flavors.md).
+
 2026-11-13. Работают SDIO transport, startup, RPC v2, scan и STA + DHCP/ARP/ping.
 P4 остаётся bare-metal Rust, без heap, RTOS, Cargo-зависимостей или линковки IDF.
 Используется установленная пользователем сопроцессорная прошивка C6.

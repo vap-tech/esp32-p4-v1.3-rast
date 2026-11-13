@@ -16,6 +16,7 @@ struct DmaBuffer([u32; MAX_TRANSFER / 4]);
 // Static SRAM avoids placing an 8 KiB bounce buffer on the small boot stack.
 #[link_section = ".dma.fixed"]
 static mut DMA_BUFFER: DmaBuffer = DmaBuffer([0; MAX_TRANSFER / 4]);
+#[cfg(feature = "wifi")]
 static mut COMMAND_LEVELS: [u32; 2] = [u32::MAX, 0];
 const RESPONSE: u32 = (1 << 6) | (1 << 8);
 const ERRORS: u32 = (1 << 1)
@@ -384,12 +385,14 @@ impl Sdmmc {
                 | u32::from(cmd),
         );
         let start = timer.now_us();
+        #[cfg(feature = "wifi")]
         if self.slot == 1 {
             unsafe {
                 COMMAND_LEVELS = [u32::MAX, 0];
             }
         }
         loop {
+            #[cfg(feature = "wifi")]
             if self.slot == 1 {
                 let value = unsafe { read_at(0x500e_003c) };
                 unsafe {
@@ -820,11 +823,13 @@ const fn card_clock_hz(divider: u32) -> u32 {
 
 /// SDIO function access for the board's C6. Owns the whole host until dropped.
 /// No storage commands (CMD17/24 etc.) are sent to the SD card slot.
+#[cfg(feature = "wifi")]
 pub struct Sdio {
     host: Sdmmc,
     pub ocr: u32,
     pub cccr: [u8; 24],
 }
+#[cfg(feature = "wifi")]
 impl Sdio {
     /// # Safety
     /// Initialization exclusively owns SDMMC, GPIO14..19, C6 reset GPIO54 and DMA workspace.
@@ -1002,6 +1007,7 @@ impl Sdio {
         self.host.registers()
     }
 }
+#[cfg(any(feature = "wifi", test))]
 fn cmd52_arg(writing: bool, function: u8, address: u32, data: u8) -> Option<u32> {
     if function > 7 || address > 0x1ffff {
         return None;
@@ -1011,6 +1017,7 @@ fn cmd52_arg(writing: bool, function: u8, address: u32, data: u8) -> Option<u32>
     )
 }
 
+#[cfg(feature = "wifi")]
 pub fn sdio_debug() -> ([u32; 14], [u32; 6], [u32; 6], [u32; 6]) {
     let mut all = u32::MAX;
     let mut any = 0;
@@ -1043,6 +1050,7 @@ pub fn sdio_debug() -> ([u32; 14], [u32; 6], [u32; 6], [u32; 6]) {
 }
 
 /// CMD53 byte-mode, incrementing address. Count zero encodes 512 bytes.
+#[cfg(any(feature = "wifi", test))]
 fn cmd53_bytes_arg(function: u8, address: u32, len: usize) -> Option<u32> {
     if function > 7
         || len == 0

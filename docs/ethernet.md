@@ -206,3 +206,21 @@ RX advertised window0 при POST всё ещё регулярно встреч�
 Host87 tests pass,Clippy clean,payload411504B.
 Capture и логи: target/network-capture/p4-eth-ring.pcap и p4-eth-ring-live.log.
 31 HTTP requests completed,rx_errors0;stack44144/65536B,guard intact.
+
+### Реальный файл64MiB на SD
+
+Сначала ожидали завершения/отмены пользовательского MKV: HTTP file service
+последовательный. После отмены MKV (ожидаемый Err(Transport)) сервер продолжил
+обслуживание без перезапуска. Тестовый новый E38902AD.BIN,67108864B,
+разные данные с индексами блоков, create-new PUT; исходные файлы не менялись.
+PUT130.934s /0.489MiB/s; GET20.055s /3.191MiB/s.
+SHA256 исходного и скачанного файла совпал:
+`a9111106564e12ea226c245c52cc5c349b947d0e4d5c941d61d1b7b96744176b`.
+Тестовый файл удалён; root listing до/после совпал. Во время PUT Linux TCP_INFO
+показывал rwnd_limited~99.8%, без retransmissions в отображённом снимке;
+это ожидание приёмного окна борды, не само по себе диагноз скорости SD PHY.
+Показатели — полный HTTP+FAT+SD тракт, не прямой benchmark карты. Медленную
+запись нужно отдельно разложить на SD data/busy, FAT metadata и обслуживание TCP.
+Веб оставлен активным. Перерисовка часов во время сервера пока не обслуживается;
+пользователь подтвердил, что на этом этапе оставляем так.
+Артефакты target/network-capture/p4-sd64-{result.json,test.log,test.py}.

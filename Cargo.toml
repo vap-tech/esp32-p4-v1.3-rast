@@ -4,12 +4,19 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+default = []
+# Optional laboratory commands; absent from the normal image and help.
+diagnostics = []
+# Preserve C6/ESP-Hosted support without compiling it into the normal image.
+wifi = []
+# Temporary software decoder; future hardware JPEG work is independent.
+software-jpeg = []
 # Controlled SDIO comparison: legacy four CMD52 reads per 32-bit register.
-sdio-reg-cmd52 = []
+sdio-reg-cmd52 = ["wifi"]
 # Experimental rev1.x layout; not a runtime memory-size toggle.
-l2-128 = []
+l2-128 = ["diagnostics"]
 # Optional continuous I2S RX capture diagnostics.
-audio-lab = []
+audio-lab = ["diagnostics", "software-jpeg"]
 
 [dependencies]
 atomic-waker = { version = "1.1.2", default-features = false }
@@ -26,6 +33,10 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
-opt-level = "s"
+opt-level = "z"
 lto = true
 codegen-units = 1
+
+# Keep TCP packet/checksum loops fast while minimizing the rest of the runtime.
+[profile.release.package.smoltcp]
+opt-level = "s"
