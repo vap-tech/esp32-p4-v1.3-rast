@@ -28,3 +28,10 @@ display brightness	brightness
 display clock	clock-ui
 audio record	record
 memory arbitration	arbitration
+wifi probe	c6-probe
+wifi scan	c6-scan
+wifi connect	c6-connect
+wifi default	c6-default
+net wifi serve	wifi-web
+wifi raw	c6-raw
+system irq test	irq-test

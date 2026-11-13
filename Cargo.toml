@@ -4,12 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+# Controlled SDIO comparison: legacy four CMD52 reads per 32-bit register.
+sdio-reg-cmd52 = []
 # Experimental rev1.x layout; not a runtime memory-size toggle.
 l2-128 = []
 # Optional continuous I2S RX capture diagnostics.
 audio-lab = []
 
 [dependencies]
+atomic-waker = { version = "1.1.2", default-features = false }
+embedded-fatfs = { path = "vendor/embedded-fatfs", default-features = false, features = ["lfn", "unicode"] }
+embedded-io-async = { version = "0.7.0", default-features = false }
+smoltcp = { version = "0.14.0", default-features = false, features = ["medium-ethernet", "proto-ipv4", "socket-tcp", "socket-tcp-reno", "auto-icmp-echo-reply"] }
 
 [[bin]]
 name = "esp32-p4"

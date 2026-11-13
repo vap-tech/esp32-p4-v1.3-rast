@@ -14,7 +14,7 @@
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--bg); color: var(--ink);
       font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-    button, input { font: inherit; }
+    button, input, select, textarea { font: inherit; }
     button { cursor: pointer; }
     button:disabled { opacity: .55; cursor: wait; }
     :focus-visible { outline: 3px solid #9eb0ff; outline-offset: 3px; }
@@ -51,7 +51,7 @@
       font-weight: 600; }
     .crumbs button:last-child { color: var(--ink); }
     .crumbs .separator { color: #b1b9c7; }
-    .actions { display: flex; gap: 9px; flex-shrink: 0; }
+    .actions { flex-wrap: wrap; display: flex; gap: 9px; flex-shrink: 0; }
     .btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px;
       min-height: 39px; padding: 9px 14px; border: 1px solid var(--line);
       border-radius: 10px; background: var(--surface); color: #3f4b61;
@@ -87,7 +87,22 @@
     .file-action { justify-self: end; padding: 6px 0; border: 0;
       background: none; color: var(--accent); font-weight: 650;
       text-decoration: none; }
-    .file-action:hover { text-decoration: underline; }
+    .action-menu { width: 48px; min-height: 40px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font-size: 20px; cursor: pointer; }
+    .file-actions { justify-self: end; }
+    .file-popup { position: fixed; inset: auto; margin: 0; padding: 5px; min-width: 180px;
+      border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink);
+      box-shadow: 0 12px 32px #17254426; }
+    .file-popup button { display: block; width: 100%; padding: 10px 12px; border: 0;
+      border-radius: 7px; background: none; color: inherit; text-align: left; cursor: pointer; }
+    .file-popup button:hover, .file-popup button:focus-visible { background: var(--accent-light); }
+    .file-popup button:last-child { color: #c13f4a; }
+    .board-tools { margin-top: 20px; padding: 20px; }
+    .board-tools summary { cursor: pointer; font-weight: 650; }
+    .board-tools textarea { display: block; width: 100%; min-height: 100px; margin: 12px 0; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+    .board-tools input { width: 75px; }
+    .board-tools p { color: var(--muted); }
+    a.file-name { text-decoration: none; }
+
     .empty { padding: 58px 20px; text-align: center; color: var(--muted); }
     .empty strong { display: block; margin-bottom: 4px; color: var(--ink); font-size: 16px; }
     .panel-foot { display: flex; justify-content: space-between; gap: 15px;
@@ -149,6 +164,9 @@
         <div class="actions">
           <button class="btn" id="refresh" type="button">↻ &nbsp;Обновить</button>
           <label class="btn primary" for="picker">＋ &nbsp;Загрузить</label>
+          <button class="btn" id="mkdir" type="button">Новая папка</button>
+          <label class="btn" for="folderpicker">Загрузить папку</label>
+          <input id="folderpicker" type="file" webkitdirectory multiple hidden>
           <input id="picker" type="file" multiple aria-label="Выбрать файлы">
         </div>
       </div>
@@ -157,6 +175,24 @@
       <div id="files" role="list"></div>
       <div class="panel-foot"><span id="counter">0 элементов</span><span>HTTP · без внешних зависимостей</span></div>
     </section>
+    <details class="panel board-tools">
+      <summary>Управление бордой</summary>
+      <p id="board-state" role="status">Запросите состояние устройства.</p>
+      <button class="btn" id="state-refresh" type="button">Состояние</button>
+      <label>Яркость, % <input id="brightness" type="number" min="0" max="100" value="25"></label>
+      <button class="btn" id="brightness-set" type="button">Применить</button>
+      <p>Текстовый буфер борды · до 1024 байт UTF-8 · до перезагрузки. Текст не выполняется как команда.</p>
+      <textarea id="clipboard" aria-label="Текст для борды"></textarea>
+      <button class="btn" id="clip-send" type="button">Передать текст</button>
+      <button class="btn" id="clip-read" type="button">Прочитать буфер</button>
+      <p id="clip-status" role="status"></p>
+      <hr>
+      <p>Тест сети без SD: данные из RAM → браузер, затем браузер → RAM. Измеряет TCP/HTTP вместе с Wi-Fi, не скорость радио PHY.</p>
+      <label>Объём в каждую сторону <select id="net-size"><option value="262144">256 КиБ</option><option value="1048576">1 МиБ</option><option value="4194304">4 МиБ</option></select></label>
+      <button class="btn" id="net-test" type="button">Тест скорости сети</button>
+      <button class="btn" id="net-stop" type="button" disabled>Отмена</button>
+      <p id="net-status" role="status" style="white-space: pre-line"></p>
+    </details>
     <p class="footnote">Минимальный интерфейс · HTML + CSS + JavaScript</p>
   </main>
   <script>
@@ -228,9 +264,10 @@
         const icon = document.createElement('span'); icon.className = 'file-icon' + (dir ? ' folder' : '');
         icon.setAttribute('aria-hidden', 'true');
         const stack = document.createElement('div'); stack.className = 'file-stack';
-        const name = document.createElement(dir ? 'button' : 'span');
+        const name = document.createElement(dir ? 'button' : 'a');
         name.className = 'file-name'; name.textContent = entry.name; name.title = entry.name;
         if (dir) { name.type = 'button'; name.onclick = () => go(path); }
+        else { name.href = fileURL(path); name.target = '_blank'; name.rel = 'noopener'; }
         const sub = document.createElement('span'); sub.className = 'file-sub';
         sub.textContent = dir ? 'Папка' : size(entry.size);
         stack.append(name, sub); main.append(icon, stack);
@@ -238,10 +275,7 @@
         bytes.textContent = dir ? '—' : size(entry.size);
         const modified = document.createElement('span'); modified.className = 'meta';
         modified.textContent = date(entry.modified);
-        const action = document.createElement(dir ? 'button' : 'a');
-        action.className = 'file-action'; action.textContent = dir ? 'Открыть' : 'Скачать';
-        if (dir) { action.type = 'button'; action.onclick = () => go(path); }
-        else { action.href = fileURL(path); action.download = entry.name; }
+        const action = actionMenu(entry, path);
         row.append(main, bytes, modified, action); frag.append(row);
       }
       list.append(frag);
@@ -266,18 +300,19 @@
     }
     const uploadQueue = [];
     let uploadRunning = false;
-    function shortName(name) {
-      const parts = name.split('.');
-      return parts.length <= 2 && parts[0].length >= 1 && parts[0].length <= 8
-        && (parts.length === 1 || (parts[1].length >= 1 && parts[1].length <= 3))
-        && Array.from(name).every(c => c === '.' || (c.charCodeAt(0) >= 33 && c.charCodeAt(0) <= 126
-          && !'"*+,/:;<=>?[\\]|'.includes(c)));
+    function validName(name) {
+      return name.length >= 1 && name.length <= 255 && !/^[. ]+$/.test(name)
+        && !/[. ]$/.test(name) && !/[\u0000-\u001f\u007f-\u009f\ufffe\uffff"*\/:<>?\\|]/u.test(name);
+    }
+    function queueJobs(jobs) {
+      uploadQueue.push(...jobs);
+      if (!uploadRunning && !mutating && uploadQueue.length) return drainUploads();
     }
     function upload(files) {
-      // Capture the destination now; navigation must not redirect queued files.
-      for (const file of Array.from(files)) uploadQueue.push({file, dir: current});
-      $('picker').value = '';
-      if (!uploadRunning && uploadQueue.length) return drainUploads();
+      const dir = current;
+      const jobs = Array.from(files).map(file => ({file, dir, relative: file.webkitRelativePath || file.name}));
+      $('picker').value = ''; $('folderpicker').value = '';
+      return queueJobs(jobs);
     }
     async function drainUploads() {
       uploadRunning = true;
@@ -286,12 +321,17 @@
       try {
         do {
           while (uploadQueue.length) {
-            const {file, dir} = uploadQueue.shift();
-            status('Загрузка: ' + join(dir, file.name) + ' · в очереди: ' + uploadQueue.length);
+            const {file, dir, relative, directory} = uploadQueue.shift();
+            status('Загрузка: ' + join(dir, relative) + ' · в очереди: ' + uploadQueue.length);
             try {
-              if (!shortName(file.name)) throw Error(file.name + ' — нужно короткое имя: 1–8 ASCII-символов и расширение до 3 символов, без пробелов');
-              if (file.size > 0xffffffff) throw Error(file.name + ' — размер превышает предел FAT32 (4 ГиБ − 1 байт)');
-              const res = await fetch(fileURL(join(dir, file.name)), {
+              const parts = relative.split('/');
+              if (!parts.every(validName)) throw Error(relative + ' — недопустимое имя (до 255 символов UTF-16)');
+              if (new TextEncoder().encode(join(dir, relative)).length > 768) throw Error('Путь длиннее 768 байт UTF-8');
+              if (!directory && file.size > 0xffffffff) throw Error(file.name + ' — размер превышает предел FAT32 (4 ГиБ − 1 байт)');
+              let parent = dir;
+              for (const component of parts.slice(0, directory ? parts.length : -1)) { parent = join(parent, component); await ensureDirectory(parent); }
+              if (directory) continue;
+              const res = await fetch(fileURL(join(dir, relative)), {
                 method: 'PUT', headers: {'Content-Type': 'application/octet-stream'}, body: file
               });
               if (!res.ok) throw Error(file.name + ' — HTTP ' + res.status);
@@ -309,6 +349,161 @@
         $('refresh').disabled = false;
       }
     }
+    async function api(method, url, body) {
+      const res = await fetch(url, {method, body, cache: 'no-store'});
+      if (!res.ok) throw Error('HTTP ' + res.status + (res.status === 409 ? ' — имя занято или папка непустая' : ''));
+      return res;
+    }
+    let mutating = false;
+    async function mutate(action) {
+      if (uploadRunning || mutating) { status('Дождитесь окончания очереди загрузки.', true); return; }
+      mutating = true;
+      try { await action(); await load(); } catch (e) { status(e.message, true); }
+      finally { mutating = false; if (uploadQueue.length && !uploadRunning) drainUploads(); }
+    }
+    async function removeTree(path, dir) {
+      if (dir) {
+        const res = await api('GET', '/api/list?path=' + encodeURIComponent(path));
+        const data = await res.json();
+        for (const child of data.entries) await removeTree(join(path, child.name), child.dir);
+      }
+      await api('DELETE', fileURL(path));
+    }
+    function actionMenu(entry, path) {
+      const wrapper = document.createElement('div'); wrapper.className = 'file-actions';
+      const trigger = document.createElement('button');
+      trigger.type = 'button'; trigger.className = 'file-action action-menu'; trigger.textContent = '⋮';
+      trigger.setAttribute('aria-label', 'Действия: ' + entry.name);
+      trigger.setAttribute('aria-expanded', 'false');
+      const popup = document.createElement('div'); popup.className = 'file-popup';
+      popup.setAttribute('popover', 'auto');
+      popup.setAttribute('aria-label', 'Действия: ' + entry.name);
+      popup.addEventListener('toggle', event => trigger.setAttribute('aria-expanded', String(event.newState === 'open')));
+      trigger.onclick = () => {
+        const rect = trigger.getBoundingClientRect();
+        popup.style.left = Math.max(8, Math.min(rect.right - 190, window.innerWidth - 198)) + 'px';
+        popup.style.top = Math.max(8, Math.min(rect.bottom + 5, window.innerHeight - 210)) + 'px';
+        popup.togglePopover();
+      };
+      for (const [action, label] of [['open', 'Открыть'], ...(!entry.dir ? [['download', 'Скачать']] : []), ['rename', 'Переименовать'], ['delete', 'Удалить']]) {
+        const item = document.createElement('button'); item.type = 'button'; item.textContent = label;
+        item.onclick = () => {
+          popup.hidePopover();
+        if (action === 'open') {
+          if (entry.dir) go(path); else window.open(fileURL(path), '_blank', 'noopener');
+        } else if (action === 'download') {
+          const link = document.createElement('a'); link.href = fileURL(path) + '?download=1'; link.download = entry.name; link.click();
+        } else if (action === 'rename') {
+          const name = prompt('Новое имя:', entry.name);
+          if (name === null || name === entry.name) return;
+          if (!validName(name)) { status('Имя до 255 символов, без служебных знаков и точки/пробела в конце.', true); return; }
+          mutate(() => api('POST', '/api/rename?path=' + encodeURIComponent(path) + '&name=' + encodeURIComponent(name)));
+        } else if (action === 'delete' && confirm('Удалить ' + path + (entry.dir ? ' со всем содержимым?' : '?'))) {
+          mutate(() => removeTree(path, entry.dir));
+        }
+        };
+        popup.append(item);
+      }
+      wrapper.append(trigger, popup);
+      return wrapper;
+    }
+    async function ensureDirectory(path) {
+      const res = await fetch(fileURL(path), {method: 'MKCOL'});
+      if (res.ok) return;
+      // 409 can also mean a file with this name. Confirm that it is a directory.
+      if (res.status === 409) { await api('GET', '/api/list?path=' + encodeURIComponent(path)); return; }
+      throw Error(path + ' — HTTP ' + res.status);
+    }
+    async function walkEntry(entry, parent, jobs) {
+      const path = parent ? parent + '/' + entry.name : entry.name;
+      if (entry.isFile) {
+        const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+        jobs.push({file, relative: path});
+      } else if (entry.isDirectory) {
+        jobs.push({relative: path, directory: true});
+        const reader = entry.createReader();
+        for (;;) {
+          const children = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+          if (!children.length) break;
+          for (const child of children) await walkEntry(child, path, jobs);
+        }
+      }
+    }
+    async function dropItems(data) {
+      const dir = current; // Capture before asynchronous directory enumeration.
+      const entries = Array.from(data.items || []).map(i => i.webkitGetAsEntry ? i.webkitGetAsEntry() : null).filter(Boolean);
+      if (!entries.length) return upload(data.files);
+      try {
+        const jobs = [];
+        for (const entry of entries) await walkEntry(entry, '', jobs);
+        return queueJobs(jobs.map(job => ({...job, dir})));
+      } catch (e) { status('Не удалось прочитать папку: ' + e.message, true); }
+    }
+    $('mkdir').onclick = () => {
+      const dir = current, name = prompt('Имя папки:');
+      if (name === null) return;
+      if (!validName(name)) { status('Имя до 255 символов, без служебных знаков и точки/пробела в конце.', true); return; }
+      mutate(() => ensureDirectory(join(dir, name)));
+    };
+    $('folderpicker').onchange = e => upload(e.target.files);
+    $('state-refresh').onclick = async () => {
+      try {
+        const res = await api('GET', '/api/state'), state = await res.json();
+        $('board-state').textContent = 'Работает ' + Math.floor(state.uptime_us / 1000000) + ' с · SD: ' + size(state.capacity_bytes);
+        $('brightness').value = state.brightness;
+      } catch (e) { $('board-state').textContent = e.message; }
+    };
+    $('brightness-set').onclick = async () => {
+      try { await api('POST', '/api/brightness?value=' + encodeURIComponent($('brightness').value)); $('board-state').textContent = 'Яркость установлена'; }
+      catch (e) { $('board-state').textContent = e.message; }
+    };
+    $('clip-send').onclick = async () => {
+      try {
+        const text = $('clipboard').value;
+        if (new TextEncoder().encode(text).length > 1024) throw Error('Максимум 1024 байта UTF-8');
+        await api('POST', '/api/clipboard', text); $('clip-status').textContent = 'Текст передан в буфер борды';
+      } catch (e) { $('clip-status').textContent = e.message; }
+    };
+    $('clip-read').onclick = async () => {
+      try { const res = await api('GET', '/api/clipboard'); $('clipboard').value = await res.text(); $('clip-status').textContent = 'Буфер прочитан'; }
+      catch (e) { $('clip-status').textContent = e.message; }
+    };
+    let netAbort;
+    $('net-stop').onclick = () => netAbort?.abort();
+    $('net-test').onclick = async () => {
+      if (netAbort || uploadRunning || mutating) { $('net-status').textContent = 'Дождитесь завершения файловой операции.'; return; }
+      const bytes = Number($('net-size').value), results = [];
+      const source = new Uint8Array(bytes);
+      for (let i = 0; i < bytes; i++) source[i] = i & 255;
+      netAbort = new AbortController();
+      $('net-test').disabled = true; $('net-stop').disabled = false;
+      const report = (label, count, ms) => label + ': ' + (count / 1024 / (ms / 1000)).toFixed(1) + ' КиБ/с · ' + (count * 8 / 1e6 / (ms / 1000)).toFixed(2) + ' Мбит/с · ' + (ms / 1000).toFixed(2) + ' с';
+      try {
+        $('net-status').textContent = 'Скачивание из RAM… 0 / ' + bytes + ' байт';
+        let start = performance.now();
+        const response = await fetch('/api/net-test?bytes=' + bytes, {cache: 'no-store', signal: netAbort.signal});
+        if (!response.ok) throw Error('HTTP ' + response.status);
+        const reader = response.body.getReader(); let received = 0, update = start;
+        while (true) {
+          const {done, value} = await reader.read(); if (done) break;
+          // Match the repeated SRAM pattern; count verified bytes, no retained file.
+          for (let i = 0; i < value.length; i++) if (value[i] !== ((received + i) & 255)) throw Error('Данные теста повреждены');
+          received += value.length;
+          if (performance.now() - update > 200) { $('net-status').textContent = 'Скачивание из RAM… ' + received + ' / ' + bytes + ' байт'; update = performance.now(); }
+        }
+        if (received !== bytes) throw Error('Неполный ответ');
+        results.push(report('Борда → браузер', received, performance.now() - start));
+        $('net-status').textContent = results.join('\n') + '\nОтправка в RAM…';
+        start = performance.now();
+        const upload = await fetch('/api/net-test?bytes=' + bytes, {method: 'POST', body: source, cache: 'no-store', signal: netAbort.signal});
+        if (!upload.ok) throw Error('HTTP ' + upload.status);
+        const reply = await upload.json();
+        if (reply.received !== bytes) throw Error('Борда приняла не весь объём');
+        results.push(report('Браузер → борда', bytes, performance.now() - start));
+        $('net-status').textContent = results.join('\n') + '\nГотово. SD не использовалась. Время включает запрос и ответ HTTP.';
+      } catch (e) { $('net-status').textContent = [...results, e.name === 'AbortError' ? 'Тест отменён.' : e.message].join('\n'); }
+      finally { netAbort = null; $('net-test').disabled = false; $('net-stop').disabled = true; }
+    };
     $('refresh').onclick = () => load();
     $('picker').onchange = e => upload(e.target.files);
     const panel = $('panel');
@@ -317,7 +512,7 @@
       if (!panel.contains(e.relatedTarget)) panel.classList.remove('dragover');
     });
     panel.addEventListener('drop', e => {
-      e.preventDefault(); panel.classList.remove('dragover'); upload(e.dataTransfer.files);
+      e.preventDefault(); panel.classList.remove('dragover'); dropItems(e.dataTransfer);
     });
     window.addEventListener('popstate', () => {
       current = normalize(new URLSearchParams(location.search).get('path') || '/'); load();

@@ -2,7 +2,9 @@
 
 # ESP32-P4 rev 1.3 — свой минимальный runtime
 
-Rust `no_std` / `no_main`, без Cargo-зависимостей, ESP-IDF, RTOS и готового HAL.
+Rust `no_std` / `no_main`, собственный HAL без ESP-IDF и RTOS.
+TCP/IP — smoltcp; веб-ФС — embedded-fatfs. Всё без `std`/heap; HTTP и HAL собственные.
+Асинхронное SD/ФС и границы миграции: [docs/async-storage.md](docs/async-storage.md).
 Target: `riscv32imafc-unknown-none-elf`, стабильный Rust.
 
 Первый запуск дисплея, DSI и тестовые полосы: [docs/display.md](docs/display.md).
@@ -42,7 +44,8 @@ python scripts/monitor.py /dev/ttyACM0
 настраивает L2MEM как SRAM. Затем собственный bootstrap читает runtime payload
 из Flash, проверяет CRC32 и только после этого запускает Rust из верхней SRAM.
 Код/константы/статика начинаются с `0x4FF40000`; рабочая арена динамически идёт
-за ними. Нижние **152 KiB** выделены отдельной DMA-арене, runtime stack — **16 KiB**,
+за ними. Нижние **152 KiB** разделены на арену **116 KiB** и fixed DMA **36 KiB**;
+runtime stack — **64 KiB**,
 область ROM сохранена. Полного destructive SRAM test при старте больше нет.
 PSRAM остаётся 32 MiB uncached: 4 MiB display/screenshot + 28 MiB bulk arena.
 [Актуальная загрузка и карта](docs/stage2-boot.md), [история экспериментов](docs/memory.md).
@@ -151,9 +154,25 @@ Default DAC volume is now **-21 dB** (+3 dB). [Results and build](docs/wav-lab.m
 
 Веб-файлы Flashbox: `python3 scripts/display-control.py --icache on --dcache off --web-run 3600`.
 Адрес печатается в `WEB READY`: страница из Flash, список/скачивание/последовательный
-PUT на SD. Без перезаписи существующих файлов, пока ASCII 8.3. Свободно около
-265 KiB work SRAM + 152 KiB DMA pool до запуска EMAC. [API и проверки](docs/web.md).
+PUT на SD. Без перезаписи существующих файлов, поддержаны Unicode LFN. Свободно около
+42 KiB work SRAM; отдельно DMA arena116 KiB и fixed DMA36 KiB. [API и проверки](docs/web.md).
 
 Консоль принимает только полные строки `:command [args]` + Enter; одиночные буквы больше не выполняются. Общий список — [docs/console.md](docs/console.md), в скрипте: `python3 scripts/display-control.py help`.
 
 Запись микрофона: `python3 scripts/display-control.py --record REC0004.WAV --record-seconds 30`. Новый WAV на SD, STOP/ESC завершает файл; [проверки и ограничения](docs/recorder.md).
+
+Wi-Fi сопроцессор C6: `python3 scripts/display-control.py --wifi-probe`
+читает версию, `--wifi-scan` сканирует до8 AP без подключения. Проверено с
+существующим ESP-Hosted3.0.9/IDFv6.1, SDIO slot1 4bit/25MHz. Подробности и
+ограничения совместной работы с SD: [docs/wifi.md](docs/wifi.md).
+
+Подключение Wi-Fi в RAM: `python3 scripts/display-control.py --wifi-connect YOUR_SSID --wifi-seconds 300`;
+пароль вводится без echo. Работают свой DHCP/ARP/ping; HTTP и SD одновременно
+с Wi-Fi пока не обслуживаются. По завершении окна радио отключается.
+
+Встроенная сеть владельца: `python3 scripts/display-control.py --wifi-default --wifi-seconds 300`.
+Профиль включён во Flash P4 с явного разрешения, пароль больше не запрашивается.
+Автоподключение при загрузке не включено.
+
+Веб-файлы по Wi-Fi: `python3 scripts/display-control.py --wifi-web 3600`
+(встроенный профиль, URL из WEB READY; [подробности](docs/wifi.md)).

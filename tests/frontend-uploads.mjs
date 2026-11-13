@@ -24,7 +24,7 @@ for (const page of ['index.html', 'demo.html']) {
   const sandbox = vm.createContext({
     document: {getElementById: get, createElement: element, createDocumentFragment: element},
     window: {addEventListener() {}}, location: {search: '', pathname: '/'},
-    history: {pushState() {}}, URL, URLSearchParams,
+    history: {pushState() {}}, URL, URLSearchParams, TextEncoder,
     fetch(url, opts = {}) {
       if (opts.method !== 'PUT') {
         const response = {ok: true, json: async () => ({entries: []})};
@@ -71,14 +71,14 @@ for (const page of ['index.html', 'demo.html']) {
   assert.equal(get('refresh').disabled, false);
   assert.match(get('status').textContent, /Загружено файлов: 3.*Ошибок: 1/);
   const good = file('GOOD.BIN');
-  drop([file('too-long-name.txt'), {name: 'HUGE.BIN', size: 0x100000000}, good]);
+  drop([file('bad:name.txt'), {name: 'HUGE.BIN', size: 0x100000000}, good]);
   assert.equal(requests.length, 5); // Invalid files never send their body.
   assert.equal(requests[4].opts.body, good);
   pending.shift()(201); await flush();
   assert.match(get('status').textContent, /Загружено файлов: 1.*Ошибок: 2/);
-  for (const [name, expected] of [['a.txt', true], ['$ABC_1.A', true], ['long-name.txt', false],
-    ['a..b', false], ['x.', false], ['a b.txt', false], ['файл.txt', false], ['a\\b.txt', false]]) {
-    assert.equal(vm.runInContext('shortName(' + JSON.stringify(name) + ')', sandbox), expected, name);
+  for (const [name, expected] of [['a.txt', true], ['$ABC_1.A', true], ['long-name.txt', true],
+    ['a..b', true], ['x.', false], ['a b.txt', true], ['файл.txt', true], ['a\\b.txt', false]]) {
+    assert.equal(vm.runInContext('validName(' + JSON.stringify(name) + ')', sandbox), expected, name);
   }
   console.log(page + ': sequential PUT, captured paths, error continuation, refresh race, FAT32 limits OK');
 }

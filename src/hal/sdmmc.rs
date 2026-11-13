@@ -1,4 +1,4 @@
-//! Native SDMMC slot 0, P4 rev1.x. Polling internal IDMAC, no interrupts or SDK runtime.
+//! Native SDMMC slot 0, P4 rev1.x. Internal IDMAC, blocking and IRQ-driven async paths; no SDK runtime.
 //! GPIO39..42 D0..3, GPIO43 CLK, GPIO44 CMD. SDSC (CSD v1), SDHC/SDXC (CSD v2).
 //! Register sequences adapted from ESP-IDF v6.1 SDMMC LL (Apache-2.0).
 use super::time::Timer;
@@ -14,7 +14,9 @@ const DMA_CHUNK: usize = 4096;
 struct DmaBuffer([u32; MAX_TRANSFER / 4]);
 // The unsafe constructor grants exclusive controller AND workspace ownership.
 // Static SRAM avoids placing an 8 KiB bounce buffer on the small boot stack.
+#[link_section = ".dma.fixed"]
 static mut DMA_BUFFER: DmaBuffer = DmaBuffer([0; MAX_TRANSFER / 4]);
+static mut COMMAND_LEVELS: [u32; 2] = [u32::MAX, 0];
 const RESPONSE: u32 = (1 << 6) | (1 << 8);
 const ERRORS: u32 = (1 << 1)
     | (1 << 6)
@@ -50,6 +52,8 @@ pub struct Info {
 }
 pub struct Sdmmc {
     pub info: Info,
+    slot: u8,
+    divider: u32,
     _exclusive: PhantomData<*mut ()>,
 }
 unsafe fn read_at(address: usize) -> u32 {
@@ -97,10 +101,12 @@ fn wait_clear(offset: usize, bits: u32, timer: &mut Timer, command: u8) -> Resul
     Ok(())
 }
 impl Sdmmc {
+    /// Initialize host only, no memory-card commands. Controller ownership includes both slots.
     /// # Safety
-    /// Exclusive SDMMC controller/slot0, GPIO39..44 and static DMA workspace ownership. Card uses 3.3V;
-    /// LDO4 supplies the SD pad domain at the 3.3V rail; no UHS voltage switch.
-    pub unsafe fn new(timer: &mut Timer) -> Result<Self, Error> {
+    /// Exclusive SDMMC controller/workspace and selected pads, other slot idle.
+    unsafe fn host(slot: u8, timer: &mut Timer) -> Result<Self, Error> {
+        ASYNC_FAULT.store(false, core::sync::atomic::Ordering::Release);
+        ASYNC_ACTIVE.store(false, core::sync::atomic::Ordering::Release);
         unsafe {
             // Board VDDPST_5 / native SD pads are powered from VO4, ext_ldo[4].
             // Software ownership, 3.3V rail bypass, power on. Not LDO2/3.
@@ -129,18 +135,42 @@ impl Sdmmc {
             );
             modify_at(0x500e_6038, 0, 1 << 8);
             modify_at(0x500e_6038, 1 << 8, 0);
-            for pin in 39..=44usize {
-                // Native IOMUX function 0, input enabled, pullup CMD/DAT, drive=3.
-                modify_at(
-                    0x500e_1004 + pin * 4,
-                    (7 << 12) | (1 << 7) | (1 << 8) | (3 << 10),
-                    (1 << 9) | (3 << 10) | if pin == 43 { 0 } else { 1 << 8 },
-                );
-                modify_at(0x500e_0558 + pin * 4, (1 << 10) | (1 << 9), 0);
+            if slot == 0 {
+                for pin in 39..=44usize {
+                    // Native IOMUX function 0, input enabled, pullup CMD/DAT, drive=3.
+                    modify_at(
+                        0x500e_1004 + pin * 4,
+                        (7 << 12) | (1 << 7) | (1 << 8) | (3 << 10),
+                        (1 << 9) | (3 << 10) | if pin == 43 { 0 } else { 1 << 8 },
+                    );
+                    modify_at(0x500e_0558 + pin * 4, (1 << 10) | (1 << 9), 0);
+                }
+                // No physical card-detect/write-protect pins. GPIO matrix constants.
+                write_at(0x500e_0158 + 126 * 4, 0x3e | (1 << 7)); // CD_N low.
+                write_at(0x500e_0158 + 130 * 4, 0x3e | (1 << 7)); // WP low.
+            } else {
+                for (pin, signal) in [
+                    (18usize, 0usize),
+                    (19, 1),
+                    (14, 2),
+                    (15, 3),
+                    (16, 4),
+                    (17, 5),
+                ] {
+                    modify_at(
+                        0x500e_1004 + pin * 4,
+                        (7 << 12) | (1 << 7) | (1 << 8) | (3 << 10),
+                        (1 << 12) | (1 << 9) | (3 << 10) | if pin == 18 { 0 } else { 1 << 8 },
+                    );
+                    modify_at(0x500e_0074 + pin * 4, 1 << 2, 0);
+                    // Peripheral output-enable, not a permanently driven GPIO output.
+                    write_at(0x500e_0558 + pin * 4, signal as u32);
+                    write_at(0x500e_0158 + signal * 4, pin as u32 | (1 << 7));
+                    modify_at(0x500e_0020, 0, 1 << pin);
+                }
+                write_at(0x500e_0158 + 127 * 4, 0x3e | (1 << 7));
+                write_at(0x500e_0158 + 131 * 4, 0x3e | (1 << 7));
             }
-            // No physical card-detect/write-protect pins. GPIO matrix constants.
-            write_at(0x500e_0154 + 126 * 4, 0x38 | (1 << 7)); // CD_N low.
-            write_at(0x500e_0154 + 130 * 4, 0x38 | (1 << 7)); // WP low.
         }
         write(0, 7); // Controller, FIFO, internal DMA reset.
         wait_clear(0, 7, timer, 0xfe)?;
@@ -149,7 +179,7 @@ impl Sdmmc {
         write(0x14, u32::MAX); // Response/data timeout, also bounded in software.
         write(0x18, 0); // Start 1-bit native SD.
         write(0x4c, (15 << 16) | 15); // FIFO thresholds, 16 words.
-        let mut this = Self {
+        let this = Self {
             info: Info {
                 ocr: 0,
                 rca: 0,
@@ -161,8 +191,18 @@ impl Sdmmc {
                 high_speed: false,
                 clock_source_hz: SDIO_PLL_HZ,
             },
+            slot,
+            divider: 125,
             _exclusive: PhantomData,
         };
+        Ok(this)
+    }
+    /// # Safety
+    /// Initialization exclusively owns SDMMC controller, GPIO39..44 and DMA workspace.
+    /// Idle slot1 handles may coexist only if all operations share one exclusive Timer. Card uses 3.3V;
+    /// LDO4 supplies the SD pad domain at the 3.3V rail; no UHS voltage switch.
+    pub unsafe fn new(timer: &mut Timer) -> Result<Self, Error> {
+        let mut this = unsafe { Self::host(0, timer) }?;
         this.set_clock(125, timer)?;
         timer.delay_us(2_000);
         this.command(0, 0, 1 << 15, timer)?;
@@ -217,7 +257,7 @@ impl Sdmmc {
         if r1 & 0xfdff_e008 != 0 {
             return Err(error(6));
         }
-        write(0x18, 1);
+        write(0x18, read(0x18) | (1 << self.slot));
         self.info.width = 4;
         self.set_clock(2, timer)?; // PLL200 / 2 / (2*2) = 25MHz, default-speed SD.
         Ok(())
@@ -274,20 +314,44 @@ impl Sdmmc {
         self.app_prefix(timer)?;
         self.command(cmd, arg, RESPONSE, timer)
     }
+    fn activate(&mut self, timer: &mut Timer) -> Result<(), Error> {
+        let slot = u32::from(self.slot);
+        let bit = 1 << slot;
+        let width = if self.info.width == 4 { bit } else { 0 };
+        if read(0x18) & bit != width {
+            write(0x18, (read(0x18) & !bit) | width);
+        }
+        let shift = slot * 8;
+        if read(0x10) & bit == 0
+            || (read(8) >> shift) & 255 != self.divider
+            || (read(0xc) >> (slot * 2)) & 3 != slot
+        {
+            self.set_clock(self.divider, timer)?;
+        }
+        Ok(())
+    }
     fn set_clock(&mut self, divider: u32, timer: &mut Timer) -> Result<(), Error> {
-        write(0x10, 0);
+        let slot = u32::from(self.slot);
+        write(0x10, read(0x10) & !(1 << slot));
         self.update_clock(timer)?;
-        write(8, divider);
-        write(0xc, 0);
+        write(
+            8,
+            (read(8) & !(255 << (slot * 8))) | (divider << (slot * 8)),
+        );
+        write(0xc, (read(0xc) & !(3 << (slot * 2))) | (slot << (slot * 2)));
         self.update_clock(timer)?;
-        write(0x10, 1);
+        write(0x10, read(0x10) | (1 << slot));
         self.update_clock(timer)?;
+        self.divider = divider;
         self.info.clock_hz = card_clock_hz(divider);
         Ok(())
     }
     fn update_clock(&mut self, timer: &mut Timer) -> Result<(), Error> {
         write(0x44, u32::MAX);
-        write(0x2c, (1 << 31) | (1 << 29) | (1 << 21) | (1 << 13));
+        write(
+            0x2c,
+            (1 << 31) | (1 << 29) | (1 << 21) | (1 << 13) | (u32::from(self.slot) << 16),
+        );
         wait_clear(0x2c, 1 << 31, timer, 0xfd)?;
         if read(0x44) & (1 << 12) != 0 {
             return Err(error(0xfd));
@@ -301,6 +365,12 @@ impl Sdmmc {
         flags: u32,
         timer: &mut Timer,
     ) -> Result<[u32; 4], Error> {
+        if ASYNC_ACTIVE.load(core::sync::atomic::Ordering::Acquire)
+            || ASYNC_FAULT.load(core::sync::atomic::Ordering::Acquire)
+        {
+            return Err(error(cmd));
+        }
+        self.activate(timer)?;
         wait_clear(0x2c, 1 << 31, timer, cmd)?;
         write(0x44, u32::MAX);
         write(0x28, arg);
@@ -310,10 +380,23 @@ impl Sdmmc {
                 | (1 << 29)
                 | if cmd == 12 { 1 << 14 } else { 1 << 13 }
                 | flags
+                | (u32::from(self.slot) << 16)
                 | u32::from(cmd),
         );
         let start = timer.now_us();
+        if self.slot == 1 {
+            unsafe {
+                COMMAND_LEVELS = [u32::MAX, 0];
+            }
+        }
         loop {
+            if self.slot == 1 {
+                let value = unsafe { read_at(0x500e_003c) };
+                unsafe {
+                    COMMAND_LEVELS[0] &= value;
+                    COMMAND_LEVELS[1] |= value;
+                }
+            }
             let ints = read(0x44);
             if ints & ERRORS != 0 {
                 return Err(error(cmd));
@@ -426,6 +509,7 @@ impl Sdmmc {
         len: usize,
         timer: &mut Timer,
     ) -> Result<(), Error> {
+        self.activate(timer)?;
         #[repr(C, align(64))]
         struct Descriptors([[u32; 16]; MAX_TRANSFER / DMA_CHUNK]);
         if len == 0 || len > MAX_TRANSFER || !len.is_multiple_of(4) {
@@ -465,7 +549,14 @@ impl Sdmmc {
         write(0x88, desc_addr as u32);
         write(0x8c, u32::MAX);
         write(0x90, 0x1f); // IDMAC completion latches need masks set; global CPU IRQ stays off.
-        write(0x1c, if multi { 512 } else { len as u32 });
+        write(
+            0x1c,
+            if multi || (cmd == 53 && argument & (1 << 27) != 0) {
+                512
+            } else {
+                len as u32
+            },
+        );
         write(0x20, len as u32);
         write(0, (1 << 25) | (1 << 5));
         write(0x80, (1 << 7) | (1 << 1) | (2 << 8));
@@ -476,7 +567,7 @@ impl Sdmmc {
                 RESPONSE | (1 << 9) | (u32::from(writing) << 10) | (u32::from(multi) << 12),
                 timer,
             )?[0];
-            if r1 & 0xfdff_e008 != 0 {
+            if r1 & if cmd == 53 { 0xcb00 } else { 0xfdff_e008 } != 0 {
                 return Err(error(cmd));
             }
             let start = timer.now_us();
@@ -519,7 +610,7 @@ impl Sdmmc {
             out[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
         }
         write(0x44, u32::MAX);
-        if writing || multi {
+        if (writing || multi) && cmd != 53 {
             let start = timer.now_us();
             loop {
                 let r1 = self.command(13, u32::from(self.info.rca) << 16, RESPONSE, timer)?[0];
@@ -725,4 +816,579 @@ fn high_speed_supported(status: &[u8; 64]) -> bool {
 
 const fn card_clock_hz(divider: u32) -> u32 {
     SDIO_PLL_HZ / HOST_DIV / if divider == 0 { 1 } else { 2 * divider }
+}
+
+/// SDIO function access for the board's C6. Owns the whole host until dropped.
+/// No storage commands (CMD17/24 etc.) are sent to the SD card slot.
+pub struct Sdio {
+    host: Sdmmc,
+    pub ocr: u32,
+    pub cccr: [u8; 24],
+}
+impl Sdio {
+    /// # Safety
+    /// Initialization exclusively owns SDMMC, GPIO14..19, C6 reset GPIO54 and DMA workspace.
+    /// An idle slot0 handle may survive this reset; serialize both handles through one Timer.
+    pub unsafe fn new(timer: &mut Timer, reset_active_high: bool) -> Result<Self, Error> {
+        // Our module: GPIO54 active LOW, verified by receiving the C6 boot event. No Flash writes.
+        unsafe {
+            modify_at(0x500e_6020, 0, 1 << 3);
+            modify_at(0x500e_60ac, 0, 1 << 9);
+            write_at(0x500e_0034, 1 << 22); // GPIO54 output disable.
+            write_at(
+                if reset_active_high {
+                    0x500e_0014
+                } else {
+                    0x500e_0018
+                },
+                1 << 22,
+            ); // Assert reset.
+            modify_at(
+                0x500e_1004 + 54 * 4,
+                (7 << 12) | (1 << 7) | (1 << 8),
+                (1 << 12) | (1 << 9),
+            );
+            write_at(0x500e_0558 + 54 * 4, 256 | (1 << 10));
+            write_at(0x500e_0030, 1 << 22);
+            timer.delay_us(20_000);
+            write_at(
+                if reset_active_high {
+                    0x500e_0018
+                } else {
+                    0x500e_0014
+                },
+                1 << 22,
+            ); // Release reset.
+        }
+        timer.delay_us(1_000_000);
+        let mut host = unsafe { Sdmmc::host(1, timer) }?;
+        host.set_clock(125, timer)?;
+        host.command(0, 0, 1 << 15, timer)?;
+        let start = timer.now_us();
+        let mut ocr = loop {
+            match host.command(5, 0, 1 << 6, timer) {
+                Ok(response) => break response[0],
+                Err(e) if e.interrupts & ERRORS == 1 << 8 && !expired(timer, start, 5_000_000) => {
+                    timer.delay_us(100_000)
+                }
+                Err(e) => return Err(e),
+            }
+        };
+        if ocr & 0x7000_0000 == 0 {
+            return Err(error(5));
+        }
+        let start = timer.now_us();
+        loop {
+            ocr = host.command(5, ocr & 0x00ff_8000, 1 << 6, timer)?[0];
+            if ocr & (1 << 31) != 0 {
+                break;
+            }
+            if expired(timer, start, 1_000_000) {
+                return Err(error(5));
+            }
+            timer.delay_us(1_000);
+        }
+        host.info.rca = (host.command(3, 0, RESPONSE, timer)?[0] >> 16) as u16;
+        host.command(7, u32::from(host.info.rca) << 16, RESPONSE, timer)?;
+        let mut this = Self {
+            host,
+            ocr,
+            cccr: [0; 24],
+        };
+        for i in 0..this.cccr.len() {
+            this.cccr[i] = this.read_byte(0, i as u32, timer)?;
+        }
+        Ok(this)
+    }
+    pub fn read_byte(
+        &mut self,
+        function: u8,
+        address: u32,
+        timer: &mut Timer,
+    ) -> Result<u8, Error> {
+        let arg = cmd52_arg(false, function, address, 0).ok_or_else(|| error(52))?;
+        let r5 = self.host.command(52, arg, RESPONSE, timer)?[0];
+        if r5 & 0xcb00 != 0 {
+            return Err(error(52));
+        }
+        Ok(r5 as u8)
+    }
+    pub fn write_byte(
+        &mut self,
+        function: u8,
+        address: u32,
+        data: u8,
+        timer: &mut Timer,
+    ) -> Result<(), Error> {
+        let arg = cmd52_arg(true, function, address, data).ok_or_else(|| error(52))?;
+        let r5 = self.host.command(52, arg, RESPONSE, timer)?[0];
+        if r5 & 0xcb00 != 0 {
+            return Err(error(52));
+        }
+        Ok(())
+    }
+    /// One function-1 CMD53 byte-mode transaction, or a reproducible CMD52 control.
+    pub fn read_register(&mut self, address: u32, timer: &mut Timer) -> Result<u32, Error> {
+        if cfg!(feature = "sdio-reg-cmd52") {
+            return self.read_register_cmd52(address, timer);
+        }
+        let arg = cmd53_bytes_arg(1, address, 4).ok_or_else(|| error(53))?;
+        let mut bytes = [0; 4];
+        self.host.transfer(53, arg, &mut bytes, None, 4, timer)?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+    fn read_register_cmd52(&mut self, address: u32, timer: &mut Timer) -> Result<u32, Error> {
+        let mut bytes = [0; 4];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = self.read_byte(1, address + i as u32, timer)?;
+        }
+        Ok(u32::from_le_bytes(bytes))
+    }
+    pub fn enable(&mut self, timer: &mut Timer) -> Result<(), Error> {
+        self.write_byte(0, 2, self.cccr[2] | 2, timer)?;
+        let start = timer.now_us();
+        while self.read_byte(0, 3, timer)? & 2 == 0 {
+            if expired(timer, start, 1_000_000) {
+                return Err(error(52));
+            }
+        }
+        for (address, value) in [(0x10, 0), (0x11, 2), (0x110, 0), (0x111, 2)] {
+            self.write_byte(0, address, value, timer)?;
+        }
+        self.write_byte(0, 4, 3, timer)?;
+        Ok(())
+    }
+    pub fn receive(
+        &mut self,
+        address: u32,
+        out: &mut [u8],
+        timer: &mut Timer,
+    ) -> Result<(), Error> {
+        if address > 0x1ffff
+            || out.is_empty()
+            || out.len() > 16384
+            || !out.len().is_multiple_of(512)
+        {
+            return Err(error(53));
+        }
+        for (index, part) in out.chunks_mut(MAX_TRANSFER).enumerate() {
+            let len = part.len();
+            let address = address + (index * MAX_TRANSFER) as u32;
+            if address > 0x1ffff {
+                return Err(error(53));
+            }
+            let arg = (1 << 28) | (1 << 27) | (1 << 26) | (address << 9) | (len as u32 / 512);
+            self.host.transfer(53, arg, part, None, len, timer)?;
+        }
+        Ok(())
+    }
+    pub fn four_bit_25mhz(&mut self, timer: &mut Timer) -> Result<(), Error> {
+        let width = self.read_byte(0, 7, timer)?;
+        self.write_byte(0, 7, (width & !3) | 2, timer)?;
+        write(0x18, read(0x18) | (1 << 1));
+        self.host.info.width = 4;
+        self.host.set_clock(2, timer)
+    }
+    pub fn transmit(&mut self, address: u32, data: &[u8], timer: &mut Timer) -> Result<(), Error> {
+        let len = data.len();
+        if address > 0x1ffff || len == 0 || len > MAX_TRANSFER || !len.is_multiple_of(512) {
+            return Err(error(53));
+        }
+        let arg =
+            (1 << 31) | (1 << 28) | (1 << 27) | (1 << 26) | (address << 9) | (len as u32 / 512);
+        self.host.transfer(53, arg, &mut [], Some(data), len, timer)
+    }
+    pub fn registers(&self) -> [u32; 8] {
+        self.host.registers()
+    }
+}
+fn cmd52_arg(writing: bool, function: u8, address: u32, data: u8) -> Option<u32> {
+    if function > 7 || address > 0x1ffff {
+        return None;
+    }
+    Some(
+        (u32::from(writing) << 31) | (u32::from(function) << 28) | (address << 9) | u32::from(data),
+    )
+}
+
+pub fn sdio_debug() -> ([u32; 14], [u32; 6], [u32; 6], [u32; 6]) {
+    let mut all = u32::MAX;
+    let mut any = 0;
+    for _ in 0..4096 {
+        let v = unsafe { read_at(0x500e_003c) };
+        all &= v;
+        any |= v;
+    }
+    (
+        [
+            read(8),
+            read(0xc),
+            read(0x10),
+            read(0x18),
+            read(0x50),
+            all,
+            any,
+            unsafe { read_at(0x500e_0020) },
+            unsafe { read_at(0x500e_0040) },
+            unsafe { read_at(0x500e_0030 - 4) },
+            unsafe { read_at(0x500e_1004 + 54 * 4) },
+            unsafe { read_at(0x500e_0558 + 54 * 4) },
+            unsafe { COMMAND_LEVELS[0] },
+            unsafe { COMMAND_LEVELS[1] },
+        ],
+        core::array::from_fn(|i| unsafe { read_at(0x500e_0558 + (14 + i) * 4) }),
+        core::array::from_fn(|i| unsafe { read_at(0x500e_0158 + i * 4) }),
+        core::array::from_fn(|i| unsafe { read_at(0x500e_1004 + (14 + i) * 4) }),
+    )
+}
+
+/// CMD53 byte-mode, incrementing address. Count zero encodes 512 bytes.
+fn cmd53_bytes_arg(function: u8, address: u32, len: usize) -> Option<u32> {
+    if function > 7
+        || len == 0
+        || len > 512
+        || !len.is_multiple_of(4)
+        || address.checked_add(len as u32 - 1)? > 0x1ffff
+    {
+        return None;
+    }
+    Some((u32::from(function) << 28) | (1 << 26) | (address << 9) | (len as u32 & 0x1ff))
+}
+#[cfg(test)]
+mod sdio_tests {
+    use super::*;
+    #[test]
+    fn byte_mode_register_command_and_bounds() {
+        assert_eq!(cmd53_bytes_arg(1, 0x60, 4), Some(0x1400c004));
+        assert_eq!(cmd53_bytes_arg(1, 0x44, 4), Some(0x14008804));
+        assert_eq!(cmd53_bytes_arg(1, 0, 512), Some(0x14000000));
+        assert_eq!(cmd53_bytes_arg(1, 0x1fffd, 4), None);
+        assert_eq!(cmd53_bytes_arg(8, 0, 4), None);
+        for len in [0, 1, 3, 513] {
+            assert_eq!(cmd53_bytes_arg(1, 0, len), None);
+        }
+    }
+    #[test]
+    fn direct_command_wire_fields_and_bounds() {
+        assert_eq!(cmd52_arg(false, 0, 3, 0), Some(3 << 9));
+        assert_eq!(cmd52_arg(true, 1, 0x8c, 1), Some(0x90011801));
+        assert_eq!(cmd52_arg(false, 8, 0, 0), None);
+        assert_eq!(cmd52_arg(false, 1, 0x20000, 0), None);
+    }
+}
+
+/// Resumable DMA operation. Descriptors/data are controller-owned static SRAM;
+/// user slices are copied only before DMA starts / after it has stopped.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AsyncPhase {
+    Acquire,
+    FifoReset,
+    DmaReset,
+    Data,
+    Stop,
+    CardReadyStart,
+    CardReady,
+    Done,
+}
+#[repr(C, align(64))]
+struct AsyncDescriptors([[u32; 16]; MAX_TRANSFER / DMA_CHUNK]);
+static mut ASYNC_DESCRIPTORS: AsyncDescriptors =
+    AsyncDescriptors([[0; 16]; MAX_TRANSFER / DMA_CHUNK]);
+static ASYNC_ACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static ASYNC_FAULT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+pub struct Request {
+    cmd: u8,
+    arg: u32,
+    len: usize,
+    writing: bool,
+    phase: AsyncPhase,
+    deadline: u64,
+    transaction_deadline: u64,
+    seen: u32,
+    claimed: bool,
+}
+impl Request {
+    fn new(cmd: u8, arg: u32, len: usize, writing: bool) -> Self {
+        Self {
+            cmd,
+            arg,
+            len,
+            writing,
+            phase: AsyncPhase::Acquire,
+            deadline: 0,
+            transaction_deadline: 0,
+            seen: 0,
+            claimed: false,
+        }
+    }
+    fn issue(&mut self, cmd: u8, arg: u32, flags: u32, timer: &mut Timer) {
+        super::interrupt::events();
+        self.seen = 0;
+        write(0x44, u32::MAX);
+        write(0x24, super::interrupt::SD_MASK);
+        write(0, read(0) | (1 << 4));
+        write(0x28, arg);
+        write(
+            0x2c,
+            (1 << 31) | (1 << 29) | (1 << 13) | flags | u32::from(cmd),
+        );
+        self.deadline = timer.now_us() + 500_000;
+    }
+    fn stop(&mut self) {
+        write(0x24, 0);
+        write(0, 0);
+        write(0, 4);
+        write(0x80, 0);
+        write(0x90, 0);
+    }
+}
+impl Drop for Request {
+    fn drop(&mut self) {
+        if self.claimed {
+            // Cancellation never exposes user memory to DMA. Quarantine this
+            // controller until explicit host/card initialization after abort.
+            ASYNC_FAULT.store(true, core::sync::atomic::Ordering::Release);
+            self.stop();
+            write(0, 7);
+            for _ in 0..100000 {
+                if read(0) & 7 == 0 {
+                    ASYNC_ACTIVE.store(false, core::sync::atomic::Ordering::Release);
+                    return;
+                }
+            }
+            panic!("SDMMC async abort did not quiesce");
+        }
+    }
+}
+impl Sdmmc {
+    pub fn request_read(&self, lba: u32, len: usize) -> Result<Request, Error> {
+        let cmd = if len == 512 { 17 } else { 18 };
+        let arg = transfer_argument(lba, len, self.info.sectors, self.info.ocr)
+            .ok_or_else(|| error(cmd))?;
+        Ok(Request::new(cmd, arg, len, false))
+    }
+    pub fn request_write(&self, lba: u32, len: usize) -> Result<Request, Error> {
+        let cmd = if len == 512 { 24 } else { 25 };
+        let arg = transfer_argument(lba, len, self.info.sectors, self.info.ocr)
+            .ok_or_else(|| error(cmd))?;
+        Ok(Request::new(cmd, arg, len, true))
+    }
+    /// Advance without a hardware wait loop. Each pending wait is woken by the
+    /// SDMMC ISR, with the scoped timer tick providing timeout/reset progress.
+    /// Slot0 memory-card transfers only; host/slot initialization stays synchronous.
+    pub fn poll_request(
+        &mut self,
+        req: &mut Request,
+        cx: &mut core::task::Context<'_>,
+        timer: &mut Timer,
+        out: &mut [u8],
+        input: Option<&[u8]>,
+    ) -> core::task::Poll<Result<(), Error>> {
+        use core::{sync::atomic::Ordering, task::Poll};
+        super::interrupt::register(cx.waker());
+        let result = (|| -> Result<bool, Error> {
+            if self.slot != 0
+                || ASYNC_FAULT.load(Ordering::Acquire)
+                || !super::interrupt::is_active()
+            {
+                return Err(error(req.cmd));
+            }
+            for _ in 0..8 {
+                // CMD13 retries must not extend the total busy timeout forever.
+                if req.claimed && timer.now_us() > req.transaction_deadline {
+                    return Err(error(req.cmd));
+                }
+                if req.phase != AsyncPhase::Acquire
+                    && req.phase != AsyncPhase::Done
+                    && timer.now_us() > req.deadline
+                {
+                    return Err(error(req.cmd));
+                }
+                match req.phase {
+                    AsyncPhase::Acquire => {
+                        if ASYNC_ACTIVE
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                            .is_err()
+                        {
+                            return Ok(false);
+                        }
+                        req.claimed = true;
+                        req.transaction_deadline = timer.now_us() + 2_000_000;
+                        self.activate(timer)?;
+                        if req.writing {
+                            let b = input
+                                .filter(|b| b.len() == req.len)
+                                .ok_or_else(|| error(req.cmd))?;
+                            for (i, b) in b.as_chunks::<4>().0.iter().enumerate() {
+                                unsafe {
+                                    (*core::ptr::addr_of_mut!(DMA_BUFFER)).0[i] =
+                                        u32::from_le_bytes(*b);
+                                }
+                            }
+                        } else if out.len() != req.len {
+                            return Err(error(req.cmd));
+                        }
+                        let desc = core::ptr::addr_of_mut!(ASYNC_DESCRIPTORS);
+                        let data = core::ptr::addr_of_mut!(DMA_BUFFER) as usize;
+                        let count = req.len.div_ceil(DMA_CHUNK);
+                        unsafe {
+                            (*desc).0 = [[0; 16]; MAX_TRANSFER / DMA_CHUNK];
+                            for i in 0..count {
+                                let last = i + 1 == count;
+                                (*desc).0[i][0] = (1 << 31)
+                                    | (1 << 4)
+                                    | if i == 0 { 1 << 3 } else { 0 }
+                                    | if last { 1 << 2 } else { 1 << 1 };
+                                (*desc).0[i][1] = (req.len - i * DMA_CHUNK).min(DMA_CHUNK) as u32;
+                                (*desc).0[i][2] = (data + i * DMA_CHUNK) as u32;
+                                (*desc).0[i][3] = if last {
+                                    0
+                                } else {
+                                    desc as usize as u32 + (i as u32 + 1) * 64
+                                };
+                            }
+                        }
+                        sync_cache(desc as usize, count * 64, 8, timer)?;
+                        sync_cache(data, req.len.next_multiple_of(64), 8, timer)?;
+                        write(0, 6);
+                        req.phase = AsyncPhase::FifoReset;
+                        req.deadline = timer.now_us() + 500_000;
+                    }
+                    AsyncPhase::FifoReset => {
+                        if read(0) & 6 != 0 {
+                            return Ok(false);
+                        }
+                        write(0x80, 1);
+                        req.phase = AsyncPhase::DmaReset;
+                    }
+                    AsyncPhase::DmaReset => {
+                        if read(0x80) & 1 != 0 {
+                            return Ok(false);
+                        }
+                        write(0x88, core::ptr::addr_of_mut!(ASYNC_DESCRIPTORS) as u32);
+                        write(0x8c, u32::MAX);
+                        write(0x90, 0);
+                        write(0x1c, 512);
+                        write(0x20, req.len as u32);
+                        write(0, (1 << 25) | (1 << 5) | (1 << 4));
+                        write(0x80, (1 << 7) | (1 << 1) | (2 << 8));
+                        req.issue(
+                            req.cmd,
+                            req.arg,
+                            RESPONSE
+                                | (1 << 9)
+                                | (u32::from(req.writing) << 10)
+                                | (u32::from(matches!(req.cmd, 18 | 25)) << 12),
+                            timer,
+                        );
+                        req.phase = AsyncPhase::Data;
+                        return Ok(false);
+                    }
+                    AsyncPhase::Data => {
+                        req.seen |= super::interrupt::events() | read(0x44);
+                        if req.seen & ERRORS != 0 || read(0x8c) & ((1 << 2) | (1 << 5)) != 0 {
+                            return Err(error(req.cmd));
+                        }
+                        if req.seen & (1 << 2) != 0 && read(0x30) & 0xfdffe008 != 0 {
+                            return Err(error(req.cmd));
+                        }
+                        if req.seen & (1 << 3) == 0
+                            || matches!(req.cmd, 18 | 25) && req.seen & (1 << 14) == 0
+                        {
+                            return Ok(false);
+                        }
+                        let desc = core::ptr::addr_of!(ASYNC_DESCRIPTORS);
+                        if unsafe {
+                            (*desc).0[req.len.div_ceil(DMA_CHUNK) - 1]
+                                .as_ptr()
+                                .read_volatile()
+                        } & (1 << 31)
+                            != 0
+                        {
+                            return Ok(false);
+                        }
+                        req.stop();
+                        req.phase = AsyncPhase::Stop;
+                    }
+                    AsyncPhase::Stop => {
+                        if read(0) & 4 != 0 {
+                            return Ok(false);
+                        }
+                        let desc = core::ptr::addr_of!(ASYNC_DESCRIPTORS);
+                        sync_cache(desc as usize, req.len.div_ceil(DMA_CHUNK) * 64, 1, timer)?;
+                        sync_cache(
+                            core::ptr::addr_of!(DMA_BUFFER) as usize,
+                            req.len.next_multiple_of(64),
+                            1,
+                            timer,
+                        )?;
+                        for i in 0..req.len.div_ceil(DMA_CHUNK) {
+                            if unsafe { (*desc).0[i].as_ptr().read_volatile() }
+                                & ((1 << 31) | (1 << 30))
+                                != 0
+                            {
+                                return Err(error(req.cmd));
+                            }
+                        }
+                        if req.writing {
+                            req.phase = AsyncPhase::CardReadyStart;
+                        } else {
+                            for (i, b) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                                let v = unsafe {
+                                    (*core::ptr::addr_of!(DMA_BUFFER))
+                                        .0
+                                        .as_ptr()
+                                        .add(i)
+                                        .read_volatile()
+                                };
+                                *b = v.to_le_bytes();
+                            }
+                            req.phase = AsyncPhase::Done;
+                        }
+                    }
+                    AsyncPhase::CardReadyStart => {
+                        req.issue(13, u32::from(self.info.rca) << 16, RESPONSE, timer);
+                        req.phase = AsyncPhase::CardReady;
+                        return Ok(false);
+                    }
+                    AsyncPhase::CardReady => {
+                        req.seen |= super::interrupt::events() | read(0x44);
+                        if req.seen & ERRORS != 0 {
+                            return Err(error(13));
+                        }
+                        if req.seen & (1 << 2) == 0 {
+                            return Ok(false);
+                        }
+                        let r = read(0x30);
+                        if r & 0xfdffe008 != 0 {
+                            return Err(error(13));
+                        }
+                        if r & (1 << 8) != 0 && (r >> 9) & 15 == 4 {
+                            req.phase = AsyncPhase::Done;
+                        } else {
+                            req.phase = AsyncPhase::CardReadyStart;
+                            return Ok(false);
+                        }
+                    }
+                    AsyncPhase::Done => {
+                        write(0x24, 0);
+                        write(0, read(0) & !(1 << 4));
+                        req.claimed = false;
+                        ASYNC_ACTIVE.store(false, Ordering::Release);
+                        return Ok(true);
+                    }
+                }
+            }
+            cx.waker().wake_by_ref();
+            Ok(false)
+        })();
+        match result {
+            Ok(true) => Poll::Ready(Ok(())),
+            Ok(false) => Poll::Pending,
+            Err(mut e) => {
+                e.interrupts |= req.seen;
+                Poll::Ready(Err(e))
+            }
+        }
+    }
 }

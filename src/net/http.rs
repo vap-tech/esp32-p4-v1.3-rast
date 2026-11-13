@@ -6,24 +6,38 @@ pub enum Method {
     Get,
     Head,
     Put,
+    Post,
+    Delete,
+    Mkcol,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub struct Request {
     pub method: Method,
-    pub path: [u8; 96],
+    pub path: [u8; crate::storage::volume::PATH_BYTES],
     pub path_len: usize,
     pub length: u32,
     pub expect: bool,
     pub http11: bool,
     pub route: Route,
+    pub argument: [u8; crate::storage::volume::PATH_BYTES],
+    pub argument_len: usize,
+    pub download: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Route {
     Index,
     List,
     File,
+    Rename,
+    Clipboard,
+    State,
+    Brightness,
+    NetTest,
 }
 impl Request {
+    pub fn argument(&self) -> &str {
+        core::str::from_utf8(&self.argument[..self.argument_len]).unwrap()
+    }
     pub fn path(&self) -> &str {
         core::str::from_utf8(&self.path[..self.path_len]).unwrap()
     }
@@ -51,6 +65,9 @@ pub fn parse(bytes: &[u8]) -> Result<Request, u16> {
         Some("GET") => Method::Get,
         Some("HEAD") => Method::Head,
         Some("PUT") => Method::Put,
+        Some("POST") => Method::Post,
+        Some("DELETE") => Method::Delete,
+        Some("MKCOL") => Method::Mkcol,
         _ => return Err(405),
     };
     let target = first.next().ok_or(400u16)?;
@@ -107,62 +124,87 @@ pub fn parse(bytes: &[u8]) -> Result<Request, u16> {
     if method == Method::Put && length.is_none() {
         return Err(411);
     }
-    if method != Method::Put && length.unwrap_or(0) != 0 {
+    if !matches!(method, Method::Put | Method::Post) && length.unwrap_or(0) != 0 {
         return Err(400);
     }
-    let (route, path) = if target == "/" || target.starts_with("/?") || target == "/index.html" {
+    let (target, query) = target.split_once('?').unwrap_or((target, ""));
+    let mut argument = "";
+    let mut download = false;
+    let (route, path) = if matches!(target, "/" | "/index.html") && query.is_empty() {
         (Route::Index, "/")
-    } else if let Some(path) = target.strip_prefix("/api/list?path=") {
-        (Route::List, path)
+    } else if target == "/api/list" {
+        (Route::List, query.strip_prefix("path=").ok_or(400u16)?)
+    } else if target == "/api/rename" {
+        let (path, name) = query
+            .strip_prefix("path=")
+            .ok_or(400u16)?
+            .split_once("&name=")
+            .ok_or(400u16)?;
+        argument = name;
+        (Route::Rename, path)
+    } else if target == "/api/net-test" {
+        argument = query.strip_prefix("bytes=").ok_or(400u16)?;
+        (Route::NetTest, "/")
+    } else if target == "/api/clipboard" && query.is_empty() {
+        (Route::Clipboard, "/")
+    } else if target == "/api/state" && query.is_empty() {
+        (Route::State, "/")
+    } else if target == "/api/brightness" {
+        argument = query.strip_prefix("value=").ok_or(400u16)?;
+        (Route::Brightness, "/")
     } else if let Some(path) = target.strip_prefix("/fs/") {
+        if !query.is_empty() && query != "download=1" {
+            return Err(400);
+        }
+        download = query == "download=1";
         (Route::File, path)
     } else {
         return Err(404);
     };
-    if method == Method::Put && route != Route::File {
+    let allowed = match route {
+        Route::Index | Route::List | Route::State => matches!(method, Method::Get | Method::Head),
+        Route::File => matches!(
+            method,
+            Method::Get | Method::Head | Method::Put | Method::Delete | Method::Mkcol
+        ),
+        Route::Rename | Route::Brightness => method == Method::Post,
+        Route::NetTest | Route::Clipboard => {
+            matches!(method, Method::Get | Method::Head | Method::Post)
+        }
+    };
+    if !allowed {
         return Err(405);
+    }
+    if length.unwrap_or(0) != 0
+        && !(matches!(route, Route::Clipboard | Route::NetTest) && method == Method::Post
+            || route == Route::File && method == Method::Put)
+    {
+        return Err(400);
+    }
+    if matches!(route, Route::Clipboard | Route::NetTest)
+        && method == Method::Post
+        && length.is_none()
+    {
+        return Err(411);
     }
     let mut request = Request {
         method,
-        path: [0; 96],
+        path: [0; crate::storage::volume::PATH_BYTES],
         path_len: 0,
         length: length.unwrap_or(0),
         expect,
         http11: version == "HTTP/1.1",
         route,
+        argument: [0; crate::storage::volume::PATH_BYTES],
+        argument_len: 0,
+        download,
     };
     if route == Route::File {
         request.path[0] = b'/';
         request.path_len = 1;
     }
-    if path.contains('#') {
-        return Err(400);
-    }
-    let bytes = path.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = if bytes[i] == b'%' {
-            if i + 2 >= bytes.len() {
-                return Err(400);
-            }
-            let hi = hex(bytes[i + 1]).ok_or(400u16)?;
-            let lo = hex(bytes[i + 2]).ok_or(400u16)?;
-            i += 3;
-            hi * 16 + lo
-        } else {
-            let b = bytes[i];
-            i += 1;
-            b
-        };
-        if !b.is_ascii_graphic() || b == b'\\' || b == b'?' {
-            return Err(400);
-        }
-        if request.path_len == request.path.len() {
-            return Err(414);
-        }
-        request.path[request.path_len] = b;
-        request.path_len += 1;
-    }
+    request.path_len += decode(path, &mut request.path[request.path_len..])?;
+    request.argument_len = decode(argument, &mut request.argument)?;
     if !request.path().starts_with('/') || request.path().split('/').any(|s| s == ".." || s == ".")
     {
         return Err(400);
@@ -171,6 +213,41 @@ pub fn parse(bytes: &[u8]) -> Result<Request, u16> {
         return Err(400);
     }
     Ok(request)
+}
+fn decode(text: &str, out: &mut [u8]) -> Result<usize, u16> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let mut n = 0;
+    while i < bytes.len() {
+        let b = if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err(400);
+            }
+            let b = hex(bytes[i + 1]).ok_or(400u16)? * 16 + hex(bytes[i + 2]).ok_or(400u16)?;
+            i += 3;
+            b
+        } else {
+            let b = bytes[i];
+            i += 1;
+            if b == b'#' || b == b'&' {
+                return Err(400);
+            }
+            b
+        };
+        if b < 32 || b == 127 || b == b'\\' || b == b'?' {
+            return Err(400);
+        }
+        if n == out.len() {
+            return Err(414);
+        }
+        out[n] = b;
+        n += 1;
+    }
+    let decoded = core::str::from_utf8(&out[..n]).map_err(|_| 400u16)?;
+    if decoded.chars().any(char::is_control) {
+        return Err(400);
+    }
+    Ok(n)
 }
 fn hex(b: u8) -> Option<u8> {
     match b {
@@ -184,6 +261,7 @@ pub fn reason(code: u16) -> &'static str {
     match code {
         200 => "OK",
         201 => "Created",
+        204 => "No Content",
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
@@ -234,12 +312,12 @@ impl<const N: usize> fmt::Write for Text<N> {
 }
 pub fn json_string(out: &mut impl fmt::Write, s: &str) -> fmt::Result {
     out.write_char('"')?;
-    for b in s.bytes() {
-        match b {
-            b'"' => out.write_str("\\\"")?,
-            b'\\' => out.write_str("\\\\")?,
-            0..=31 | 127..=255 => write!(out, "\\u{b:04x}")?,
-            _ => out.write_char(b as char)?,
+    for c in s.chars() {
+        match c {
+            '"' => out.write_str("\\\"")?,
+            '\\' => out.write_str("\\\\")?,
+            c if c.is_control() => write!(out, "\\u{:04x}", c as u32)?,
+            c => out.write_char(c)?,
         }
     }
     out.write_char('"')
@@ -247,6 +325,26 @@ pub fn json_string(out: &mut impl fmt::Write, s: &str) -> fmt::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unicode_paths_and_json_are_utf8_not_escaped_bytes() {
+        let r = parse(
+            b"GET /fs/%D0%A4%D0%B0%D0%B9%D0%BB%20%F0%9F%8E%B5.txt HTTP/1.1\r\nHost: p4\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(r.path(), "/Файл 🎵.txt");
+        for path in ["%ff", "%d0", "%c2%80", "%00"] {
+            let mut raw = Text::<256>::new();
+            use core::fmt::Write;
+            write!(raw, "GET /fs/{path} HTTP/1.1\r\nHost: p4\r\n\r\n").unwrap();
+            assert_eq!(parse(raw.data()), Err(400));
+        }
+        let mut out = Text::<128>::new();
+        json_string(&mut out, "Файл 🎵\n\"").unwrap();
+        assert_eq!(
+            core::str::from_utf8(out.data()).unwrap(),
+            "\"Файл 🎵\\u000a\\\"\""
+        );
+    }
     #[test]
     fn framing_paths_and_limits() {
         let r=parse(b"PUT /fs/DIR%2FNEW.BIN HTTP/1.1\r\nHost: p4\r\nContent-Length: 4294967295\r\nExpect: 100-continue\r\n\r\n").unwrap();

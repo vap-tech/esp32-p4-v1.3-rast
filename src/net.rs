@@ -1,5 +1,6 @@
 //! Bounded Ethernet/IPv4 packet logic for bring-up and the local file server.
 //! DHCP client (one lease), ARP reply and ICMP echo. No allocations or fragments.
+pub mod hosted;
 pub mod http;
 pub mod tcp;
 pub const MAC: [u8; 6] = [0x02, 0xf1, 0xb2, 0xd3, 0x81, 0x00];
@@ -34,9 +35,12 @@ pub struct Lease {
 /// DHCPDISCOVER or DHCPREQUEST for the selected offer; UDP checksum omitted
 /// as permitted for IPv4. DHCP flag requests a broadcast server response.
 pub fn dhcp(out: &mut [u8; FRAME], xid: u32, offer: Option<Lease>) -> usize {
+    dhcp_for_mac(out, xid, offer, MAC)
+}
+pub fn dhcp_for_mac(out: &mut [u8; FRAME], xid: u32, offer: Option<Lease>, mac: [u8; 6]) -> usize {
     out.fill(0);
     out[..6].fill(255);
-    out[6..12].copy_from_slice(&MAC);
+    out[6..12].copy_from_slice(&mac);
     put(out, 12, 0x0800);
     out[14] = 0x45;
     out[22] = 64;
@@ -48,14 +52,14 @@ pub fn dhcp(out: &mut [u8; FRAME], xid: u32, offer: Option<Lease>) -> usize {
     boot[..3].copy_from_slice(&[1, 1, 6]);
     boot[4..8].copy_from_slice(&xid.to_be_bytes());
     put(boot, 10, 0x8000);
-    boot[28..34].copy_from_slice(&MAC);
+    boot[28..34].copy_from_slice(&mac);
     boot[236..240].copy_from_slice(&[99, 130, 83, 99]);
     let mut at = 240;
     boot[at..at + 3].copy_from_slice(&[53, 1, if offer.is_some() { 3 } else { 1 }]);
     at += 3;
     boot[at..at + 3].copy_from_slice(&[61, 7, 1]);
     at += 3;
-    boot[at..at + 6].copy_from_slice(&MAC);
+    boot[at..at + 6].copy_from_slice(&mac);
     at += 6;
     if let Some(offer) = offer {
         for (code, value) in [(50, offer.address), (54, offer.server)] {
@@ -97,6 +101,9 @@ fn ipv4(frame: &[u8]) -> Option<(&[u8], usize)> {
 }
 
 pub fn dhcp_reply(frame: &[u8], xid: u32) -> Option<(u8, Lease)> {
+    dhcp_reply_for_mac(frame, xid, MAC)
+}
+pub fn dhcp_reply_for_mac(frame: &[u8], xid: u32, mac: [u8; 6]) -> Option<(u8, Lease)> {
     let (ip, ihl) = ipv4(frame)?;
     if ip[9] != 17 || ip.len() < ihl + 8 {
         return None;
@@ -123,7 +130,7 @@ pub fn dhcp_reply(frame: &[u8], xid: u32) -> Option<(u8, Lease)> {
     let boot = &udp[8..size];
     if boot[..3] != [2, 1, 6]
         || boot[4..8] != xid.to_be_bytes()
-        || boot[28..34] != MAC
+        || boot[28..34] != mac
         || boot[236..240] != [99, 130, 83, 99]
     {
         return None;
@@ -165,6 +172,14 @@ pub fn dhcp_reply(frame: &[u8], xid: u32) -> Option<(u8, Lease)> {
 
 /// Returns a reply frame length for ARP or ICMP echo addressed to this lease.
 pub fn reply(frame: &[u8], ip: [u8; 4], out: &mut [u8; FRAME]) -> Option<usize> {
+    reply_for_mac(frame, ip, out, MAC)
+}
+pub fn reply_for_mac(
+    frame: &[u8],
+    ip: [u8; 4],
+    out: &mut [u8; FRAME],
+    mac: [u8; 6],
+) -> Option<usize> {
     if frame.len() < 14 || ip == [0; 4] {
         return None;
     }
@@ -174,9 +189,9 @@ pub fn reply(frame: &[u8], ip: [u8; 4], out: &mut [u8; FRAME]) -> Option<usize> 
         }
         out[..42].copy_from_slice(&frame[..42]);
         out[..6].copy_from_slice(&frame[22..28]);
-        out[6..12].copy_from_slice(&MAC);
+        out[6..12].copy_from_slice(&mac);
         put(out, 20, 2);
-        out[22..28].copy_from_slice(&MAC);
+        out[22..28].copy_from_slice(&mac);
         out[28..32].copy_from_slice(&ip);
         out[32..38].copy_from_slice(&frame[22..28]);
         out[38..42].copy_from_slice(&frame[28..32]);
@@ -196,7 +211,7 @@ pub fn reply(frame: &[u8], ip: [u8; 4], out: &mut [u8; FRAME]) -> Option<usize> 
     }
     out[..len].copy_from_slice(&frame[..len]);
     out[..6].copy_from_slice(&frame[6..12]);
-    out[6..12].copy_from_slice(&MAC);
+    out[6..12].copy_from_slice(&mac);
     out[26..30].copy_from_slice(&ip);
     out[30..34].copy_from_slice(&packet[12..16]);
     out[22] = 64;
@@ -241,6 +256,28 @@ mod tests {
         let c = checksum(&out[14..34]);
         put(out, 24, c);
         n
+    }
+    #[test]
+    fn independent_interface_mac_is_used_in_dhcp_and_replies() {
+        let wifi = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let mut wire = [0; FRAME];
+        let n = dhcp_for_mac(&mut wire, XID, None, wifi);
+        assert!(n > 280);
+        assert_eq!(&wire[6..12], &wifi);
+        assert_eq!(&wire[70..76], &wifi);
+        let n = incoming_dhcp(&mut wire);
+        wire[70..76].copy_from_slice(&wifi);
+        assert!(dhcp_reply_for_mac(&wire[..n], XID, wifi).is_some());
+        assert!(dhcp_reply(&wire[..n], XID).is_none());
+        let mut request = [0; 42];
+        put(&mut request, 12, 0x0806);
+        request[14..22].copy_from_slice(&[0, 1, 8, 0, 6, 4, 0, 1]);
+        request[22..28].copy_from_slice(&[0x02, 3, 4, 5, 6, 7]);
+        request[28..32].copy_from_slice(&SERVER);
+        request[38..42].copy_from_slice(&IP);
+        assert_eq!(reply_for_mac(&request, IP, &mut wire, wifi), Some(42));
+        assert_eq!(&wire[6..12], &wifi);
+        assert_eq!(&wire[22..28], &wifi);
     }
     #[test]
     fn internet_checksum_known_vector_and_odd_length() {

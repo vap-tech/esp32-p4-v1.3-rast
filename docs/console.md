@@ -157,3 +157,37 @@ MODE=`u16|u32|paced`, TARGET=`frame|scratch|linear`, ROUNDS=1..200.
 одно чтение BUSY / ожидание сброса / fence и ожидание, каждые32 пикселя.
 Таймаут одного ожидания160000 тактов. Это диагностические режимы, не новая
 штатная политика рисования; см. ограничения измерений в memory-arbitration.md.
+
+Wi-Fi/C6: `:wifi probe` — reset/SDIO/boot и AppGetDesc RPC;
+`:wifi scan` — init STA, scan до8 точек, stop/deinit без подключения.
+Скрипт: `--wifi-probe` / `--wifi-scan`. На нашей плате reset GPIO54 активен LOW.
+Это эксклюзивная операция SDMMC host; SD и C6 пока не работают одновременно.
+D-cache OFF; подробнее [wifi.md](wifi.md).
+
+
+Wi-Fi STA: `:wifi connect SSID_HEX PASSWORD_HEX SECONDS` (1..3600с после DHCP),
+без сохранения профиля. Используйте `--wifi-connect SSID --wifi-seconds 300`:
+helper спрашивает пароль без echo; автоматизация через `--wifi-password-stdin`.
+Это диагностическое DHCP/ARP/ping окно, не HTTP. ESC/Ctrl-C останавливает и
+отключает Wi-Fi. Кадр консоли теперь до256B (было96B); таймаут кадра2с сохранён.
+
+
+Встроенный профиль сети (разрешён владельцем): `:wifi default 300`, helper
+`--wifi-default --wifi-seconds 300`. Credentials включены в Flash P4 через
+`src/wifi_profile.rs`; пароль в USB-логи не выводится. Автозапуска нет.
+
+`:net wifi serve 3600` / `--wifi-web 3600`: общий файловый HTTP-сервер через C6,
+SD slot0 и радио slot1 обслуживаются последовательно. ESC завершает окно.
+
+SDIO без радио: `:wifi raw rx 10` / `:wifi raw tx 10`, секунды1..30,
+направление относительно P4. Скрипт `--wifi-raw rx --raw-seconds 10`.
+Нужен idle runtime (web-run завершить ESC); карта и C6 Flash не изменяются.
+После теста C6 reset, затем можно снова `--wifi-web 3600`.
+Во время RAM HTTP-test после запроса печатается `C6 NET` с затратами SDIO.
+
+## IRQ storage probe
+
+`system irq test` / `python3 scripts/display-control.py --irq-test` временно
+включает scoped CLIC и SYSTIMER target0 на 20 ms, печатает счётчики IRQ и стек,
+затем возвращает прежнюю конфигурацию. Не выполняет SD-запись. Веб-сервер сам
+владеет этими IRQ в течение работы нового async FAT слоя.

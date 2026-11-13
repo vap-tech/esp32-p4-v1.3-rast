@@ -1,7 +1,7 @@
 # Загрузка приложения в верхнюю SRAM
 
 Текущая архитектура с 2026-11-08. ESP32-P4 rev1.3, собственный bootstrap и HAL,
-без ESP-IDF bootloader, partition table, RTOS и Cargo-зависимостей.
+без ESP-IDF bootloader, partition table и RTOS; используются небольшие no_std Rust crates.
 
 ## Порядок запуска
 
@@ -17,7 +17,7 @@
    ELF; payload не может пересечь runtime stack. Затем CRC32 всего payload.
 5. После `fence rw,rw` / `fence.i` обнуляется только BSS. Rust проверяет cache
    configuration, linker/HAL boundaries и заполняет runtime stack watermark.
-   SP переключается на верхний 16-KiB stack, запускается `rust_main`.
+   SP переключается на верхний 64-KiB stack, запускается `rust_main`.
 
 Полный destructive SRAM health-test не возвращён: CRC проверяет только новый
 загружаемый image, который больше не защищён ROM checksum исходного контейнера.
@@ -30,25 +30,26 @@
 | Диапазон | Назначение |
 |---|---|
 | `30100000..30102000` | SPM bootstrap и резидентные cache-control routines |
-| `4ff00000..4ff26000` | Отдельная нижняя DMA arena, **152 KiB** |
+| `4ff00000..4ff1d000` | Scoped DMA arena, **116 KiB** |
+| `4ff1d000..4ff26000` | Fixed SD/Wi-Fi/I2S DMA workspaces, **36 KiB** |
 | `4ff26000..4ff28000` | Boot stack; после переключения SP — прежний legacy SD CPU scratch |
 | `4ff28000..4ff40000` | ROM-reserved 96 KiB, не трогаем |
 | `4ff40000.._upper_load_end` | Загружаемые text / rodata / initialized data |
-| `_bss_start.._bss_end` | Статические zero-initialized данные, включая прежние static DMA buffers |
-| `_bss_end..4ffbc000` | Динамически вычисляемая work arena, 64-B aligned |
-| `4ffbc000..4ffc0000` | Runtime stack 16 KiB с guard/watermark |
+| `_bss_start.._bss_end` | Статические zero-initialized данные, без вынесенных fixed DMA workspaces |
+| `_bss_end..4ffb0000` | Динамически вычисляемая work arena, 64-B aligned |
+| `4ffb0000..4ffc0000` | Runtime stack 64 KiB с guard/watermark |
 
 На этапе объединённого default image до HTTP: payload около **163 KiB**, BSS **19.25 KiB**,
 work около **314 KiB**, отдельно DMA **152 KiB**, то есть около **466 KiB** свободных
 арен. После добавления TCP/HTTP work около 265 KiB, DMA по-прежнему 152 KiB;
 payload около 189 KiB, BSS около 42 KiB. [Flash-assets и сервер](web.md).
 Точные размеры печатает `--memory`. Никакого CODE budget 132 KiB нет:
-рост `.upper` уменьшает work arena, а linker запрещает оставлять меньше 64 KiB.
+рост `.upper` уменьшает work arena, а linker запрещает оставлять меньше 32 KiB.
 Нижний pool и runtime/statics/work/stack не пересекаются. Для l2-128 верхняя граница
 SRAM сдвигается как раньше, размеры work вычисляются заново, а не вычитаются вручную.
 
 Ethernet, audio-lab RX и SD DMA soak используют нижнюю arena; временные CPU
-memory-bench buffers — верхнюю. Старые static I2S/SD DMA arrays находятся в BSS
+memory-bench buffers — верхнюю. Постоянные I2S/SD/Wi-Fi DMA arrays находятся в `.dma_fixed`
 и остаются отдельными владельцами. Наличие DMA pool не делает его автоматически
 uncached: прежние handoffs/ограничения кешей остаются, Ethernet требует D OFF/L2=0.
 `valid_ahb_range` больше не принимает boot stack или ROM-reserved interval.

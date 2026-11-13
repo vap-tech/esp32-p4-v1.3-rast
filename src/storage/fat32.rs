@@ -377,11 +377,8 @@ impl<D: BlockDevice> Fat32<D> {
             Err(Error::NotFound) => {}
             Err(error) => return Err(error),
         }
-        let slot = self.free_slot(directory.cluster)?;
-        let status = self.write_status()?;
-        self.write_failed = true;
-        self.set_fat(1, status & !(1 << 27))?;
-        self.invalidate_fsinfo()?;
+        let status = self.begin_change()?;
+        let slot = self.growing_slot(directory.cluster)?;
         Ok(FileWriter {
             fs: self,
             slot,
@@ -402,6 +399,7 @@ impl<D: BlockDevice> Fat32<D> {
         name: ShortName,
         first: u32,
         size: u32,
+        attributes: u8,
     ) -> Result<(), Error<D::Error>> {
         // Preserve the end marker when replacing the first unused directory slot.
         if slot.was_end {
@@ -415,8 +413,8 @@ impl<D: BlockDevice> Fat32<D> {
         let raw = &mut self.metadata.bytes[slot.offset..slot.offset + 32];
         raw.fill(0);
         raw[..11].copy_from_slice(&name.0);
-        raw[11] = 0x20; // Archive, ordinary file.
-                        // The board RTC is not valid. Use the minimum valid FAT date, 1980-01-01.
+        raw[11] = attributes;
+        // The board RTC is not valid. Use the minimum valid FAT date, 1980-01-01.
         for at in [16, 18, 24] {
             raw[at..at + 2].copy_from_slice(&0x21u16.to_le_bytes());
         }
@@ -561,6 +559,209 @@ impl<D: BlockDevice> Fat32<D> {
         }
         Err(Error::Invalid("directory chain exceeds cluster count"))
     }
+    fn begin_change(&mut self) -> Result<u32, Error<D::Error>> {
+        if self.write_failed {
+            return Err(Error::NeedsRecovery);
+        }
+        let status = self.write_status()?;
+        self.write_failed = true;
+        self.set_fat(1, status & !(1 << 27))?;
+        self.invalidate_fsinfo()?;
+        Ok(status)
+    }
+    fn end_change(&mut self, status: u32) -> Result<(), Error<D::Error>> {
+        self.set_fat(1, status)?;
+        self.write_failed = false;
+        Ok(())
+    }
+    fn parent_name(&mut self, path: &str) -> Result<(u32, ShortName), Error<D::Error>> {
+        let (parent, name) = path.rsplit_once('/').unwrap_or(("/", path));
+        let name = ShortName::parse(name)?;
+        let directory = self.resolve(parent)?;
+        if !directory.is_directory() {
+            return Err(Error::NotDirectory);
+        }
+        Ok((directory.cluster, name))
+    }
+    // Locate an exact short entry. Mutations of imported LFN aliases are rejected:
+    // their preceding long-name slots must not be left attached to a new entry.
+    fn entry_slot(
+        &mut self,
+        mut cluster: u32,
+        name: ShortName,
+    ) -> Result<DirectorySlot, Error<D::Error>> {
+        let mut lfn = false;
+        for _ in 0..self.geometry.clusters {
+            let first = self.geometry.cluster_sector(cluster);
+            for sector in first..first + u32::from(self.geometry.sectors_per_cluster) {
+                self.metadata.read(&mut self.device, sector)?;
+                for offset in (0..512).step_by(32) {
+                    let raw = &self.metadata.bytes[offset..offset + 32];
+                    if raw[0] == 0 {
+                        return Err(Error::NotFound);
+                    }
+                    if raw[0] == 0xe5 {
+                        lfn = false;
+                        continue;
+                    }
+                    if raw[11] == 0x0f {
+                        lfn = true;
+                        continue;
+                    }
+                    if raw[..11].eq_ignore_ascii_case(&name.0) {
+                        if lfn {
+                            return Err(Error::Unsupported("LFN mutation"));
+                        }
+                        if raw[11] & 1 != 0 {
+                            return Err(Error::Unsupported("read-only entry"));
+                        }
+                        return Ok(DirectorySlot {
+                            sector,
+                            offset,
+                            was_end: false,
+                            following: None,
+                        });
+                    }
+                    lfn = false;
+                }
+            }
+            match self.next_cluster(cluster)? {
+                Some(next) => cluster = next,
+                None => return Err(Error::NotFound),
+            }
+        }
+        Err(Error::Invalid("directory cycle"))
+    }
+    fn zero_cluster(&mut self, cluster: u32) -> Result<(), Error<D::Error>> {
+        self.metadata.sector = None;
+        self.edge.sector = None;
+        self.edge.bytes.fill(0);
+        let first = self.geometry.cluster_sector(cluster);
+        for sector in first..first + u32::from(self.geometry.sectors_per_cluster) {
+            self.device
+                .write(u64::from(sector), &self.edge.bytes)
+                .map_err(Error::Device)?;
+        }
+        Ok(())
+    }
+    // Caller has marked volume dirty. Publish a new directory cluster only after zeroing it.
+    fn growing_slot(&mut self, directory: u32) -> Result<DirectorySlot, Error<D::Error>> {
+        match self.free_slot(directory) {
+            Ok(slot) => return Ok(slot),
+            Err(Error::DirectoryFull) => {}
+            Err(e) => return Err(e),
+        }
+        let mut last = directory;
+        for _ in 0..self.geometry.clusters {
+            match self.next_cluster(last)? {
+                Some(next) => last = next,
+                None => {
+                    let next = self.allocate(None)?;
+                    self.zero_cluster(next)?;
+                    self.set_fat(last, next)?;
+                    return self.free_slot(next);
+                }
+            }
+        }
+        Err(Error::Invalid("directory cycle"))
+    }
+    /// New empty directory with valid dot/dotdot entries; no overwrite.
+    pub fn create_dir(&mut self, path: &str) -> Result<(), Error<D::Error>> {
+        let (parent, name) = self.parent_name(path)?;
+        match self.lookup(parent, name) {
+            Ok(_) => return Err(Error::AlreadyExists),
+            Err(Error::NotFound) => {}
+            Err(e) => return Err(e),
+        }
+        let status = self.begin_change()?;
+        let slot = self.growing_slot(parent)?;
+        let cluster = self.allocate(None)?;
+        self.zero_cluster(cluster)?;
+        let sector = self.geometry.cluster_sector(cluster);
+        self.metadata.read(&mut self.device, sector)?;
+        for (offset, raw_name, target) in [
+            (0, *b".          ", cluster),
+            (
+                32,
+                *b"..         ",
+                if parent == self.geometry.root_cluster {
+                    0
+                } else {
+                    parent
+                },
+            ),
+        ] {
+            let raw = &mut self.metadata.bytes[offset..offset + 32];
+            raw[..11].copy_from_slice(&raw_name);
+            raw[11] = 0x10;
+            raw[20..22].copy_from_slice(&((target >> 16) as u16).to_le_bytes());
+            raw[26..28].copy_from_slice(&(target as u16).to_le_bytes());
+        }
+        self.write_metadata(sector)?;
+        self.publish_file(&slot, name, cluster, 0, 0x10)?;
+        self.end_change(status)
+    }
+    /// Rename within one directory. Preserve metadata and cluster chain, reject overwrite.
+    pub fn rename(&mut self, path: &str, new_name: &str) -> Result<(), Error<D::Error>> {
+        let (parent, name) = self.parent_name(path)?;
+        let new_name = ShortName::parse(new_name)?;
+        let slot = self.entry_slot(parent, name)?;
+        if name.0 == new_name.0 {
+            return Ok(());
+        }
+        match self.lookup(parent, new_name) {
+            Ok(_) => return Err(Error::AlreadyExists),
+            Err(Error::NotFound) => {}
+            Err(e) => return Err(e),
+        }
+        let status = self.begin_change()?;
+        self.metadata.read(&mut self.device, slot.sector)?;
+        self.metadata.bytes[slot.offset..slot.offset + 11].copy_from_slice(&new_name.0);
+        self.write_metadata(slot.sector)?;
+        self.end_change(status)
+    }
+    /// Remove a file or empty directory. The UI walks trees explicitly, without recursive firmware stacks.
+    pub fn remove(&mut self, path: &str) -> Result<(), Error<D::Error>> {
+        let (parent, name) = self.parent_name(path)?;
+        let slot = self.entry_slot(parent, name)?;
+        let entry = self.lookup(parent, name)?;
+        if entry.is_directory() {
+            let mut empty = true;
+            self.scan(entry.cluster, |e| {
+                if e.name.0 != *b".          " && e.name.0 != *b"..         " {
+                    empty = false;
+                    return false;
+                }
+                true
+            })?;
+            if !empty {
+                return Err(Error::DirectoryNotEmpty);
+            }
+        }
+        // Validate the whole chain before unlinking; no writes for malformed/cyclic chains.
+        let mut at = entry.cluster;
+        let mut count = 0;
+        while at != 0 {
+            if count >= self.geometry.clusters {
+                return Err(Error::Invalid("remove chain cycle"));
+            }
+            at = self.next_cluster(at)?.unwrap_or(0);
+            count += 1;
+        }
+        let status = self.begin_change()?;
+        self.metadata.read(&mut self.device, slot.sector)?;
+        self.metadata.bytes[slot.offset] = 0xe5;
+        self.write_metadata(slot.sector)?; // Unlink before freeing: a failure may leak, never alias a live file.
+        at = entry.cluster;
+        for _ in 0..count {
+            let next = self.next_cluster(at)?.unwrap_or(0);
+            self.set_fat(at, 0)?;
+            self.next_free = self.next_free.min(at);
+            at = next;
+        }
+        self.end_change(status)
+    }
+
     /// A file borrows its volume exclusively. No heap, handles table or Drop I/O.
     pub fn open(&mut self, path: &str) -> Result<File<'_, D>, Error<D::Error>> {
         let entry = self.resolve(path)?;
@@ -736,7 +937,7 @@ impl<D: BlockDevice> FileWriter<'_, D> {
             }
         }
         self.fs
-            .publish_file(&self.slot, self.name, self.first, self.size)?;
+            .publish_file(&self.slot, self.name, self.first, self.size, 0x20)?;
         self.fs.set_fat(1, self.status)?;
         self.fs.write_failed = false;
         Ok(())
@@ -1095,6 +1296,94 @@ mod tests {
     }
     fn mount() -> Fat32<Partition<Disk>> {
         Fat32::mount(Partition::mbr(disk(), 0).unwrap()).unwrap()
+    }
+    #[test]
+    fn directory_create_grow_rename_remove_remount() {
+        let mut fs = Fat32::mount(Partition::mbr(writable_disk(), 0).unwrap()).unwrap();
+        fs.create_dir("/DOCS").unwrap();
+        fs.create_dir("/DOCS/SUB").unwrap();
+        let child = fs.resolve("/DOCS/SUB").unwrap();
+        let parent = fs.resolve("/DOCS").unwrap();
+        fs.metadata
+            .read(&mut fs.device, fs.geometry.cluster_sector(child.cluster))
+            .unwrap();
+        assert_eq!(
+            DirEntry::decode(&fs.metadata.bytes[32..64]).cluster,
+            parent.cluster
+        );
+        assert!(matches!(fs.remove("/DOCS"), Err(Error::DirectoryNotEmpty)));
+        let count = usize::from(fs.geometry.sectors_per_cluster) * 16 + 3;
+        for i in 0..count {
+            fs.create_new(&std::format!("/DOCS/SUB/F{i:04}.TXT"), b"test")
+                .unwrap();
+        }
+        fs.rename("/DOCS", "RENAMED").unwrap();
+        fs.rename("/RENAMED/SUB/F0000.TXT", "FIRST.TXT").unwrap();
+        assert!(matches!(
+            fs.rename("/RENAMED/SUB/FIRST.TXT", "F0001.TXT"),
+            Err(Error::AlreadyExists)
+        ));
+        let mut fs = Fat32::mount(fs.into_inner()).unwrap();
+        let mut contents = [0; 4];
+        fs.open("/RENAMED/SUB/FIRST.TXT")
+            .unwrap()
+            .read(&mut contents)
+            .unwrap();
+        assert_eq!(&contents, b"test");
+        fs.remove("/RENAMED/SUB/FIRST.TXT").unwrap();
+        for i in 1..count {
+            fs.remove(&std::format!("/RENAMED/SUB/F{i:04}.TXT"))
+                .unwrap();
+        }
+        fs.remove("/RENAMED/SUB").unwrap();
+        fs.remove("/RENAMED").unwrap();
+        fs.create_new("/AFTER.TXT", b"ok").unwrap();
+        assert!(matches!(fs.resolve("/RENAMED"), Err(Error::NotFound)));
+        assert_eq!(fs.write_status().unwrap() & 0x0c00_0000, 0x0c00_0000);
+    }
+    #[test]
+    fn mutation_failure_keeps_volume_dirty_and_existing_chain_allocated() {
+        for operation in 0..3 {
+            let mut fs = Fat32::mount(Partition::mbr(writable_disk(), 0).unwrap()).unwrap();
+            let original = fs
+                .lookup(2, ShortName::parse::<()>("FRAG.BIN").unwrap())
+                .unwrap();
+            fs.device.device.fail_write = Some(cluster_lba(2));
+            let result = match operation {
+                0 => fs.create_dir("/NEW"),
+                1 => fs.rename("/FRAG.BIN", "NEW.BIN"),
+                _ => fs.remove("/FRAG.BIN"),
+            };
+            assert!(matches!(result, Err(Error::Device(_))));
+            assert!(matches!(
+                fs.create_new("/AFTER.TXT", b"x"),
+                Err(Error::NeedsRecovery)
+            ));
+            assert_ne!(fs.fat_value(original.cluster).unwrap(), 0);
+            let mut remount = Fat32::mount(fs.into_inner()).unwrap();
+            assert!(matches!(
+                remount.create_dir("/OTHER"),
+                Err(Error::NeedsRecovery)
+            ));
+        }
+    }
+    #[test]
+    fn mutations_reject_root_traversal_lfn_alias_and_readonly_without_writes() {
+        let mut d = writable_disk();
+        let root = d.blocks.get_mut(&cluster_lba(2)).unwrap();
+        root[5 * 32..6 * 32].fill(0);
+        root[5 * 32] = 0x41;
+        root[5 * 32 + 11] = 0x0f;
+        root[6 * 32..7 * 32].copy_from_slice(&entry(b"LONGNA~1TXT", 0, 0, 0x20));
+        root[7 * 32..8 * 32].copy_from_slice(&entry(b"READONLYTXT", 0, 0, 0x21));
+        let mut fs = Fat32::mount(Partition::mbr(d, 0).unwrap()).unwrap();
+        let writes = fs.device.device.writes.len();
+        for path in ["/", "/..", "/LONGNA~1.TXT", "/READONLY.TXT"] {
+            assert!(fs.remove(path).is_err());
+            assert!(fs.rename(path, "NEW.TXT").is_err());
+        }
+        assert!(fs.create_dir("/../ESCAPE").is_err());
+        assert_eq!(fs.device.device.writes.len(), writes);
     }
     fn check(bytes: &[u8], offset: usize) {
         for (i, byte) in bytes.iter().enumerate() {

@@ -31,7 +31,8 @@ pub fn cache_snapshot() -> CacheSnapshot {
 
 pub const UPPER_BASE: usize = 0x4ff4_0000;
 pub const DMA_START: usize = 0x4ff0_0000;
-pub const DMA_END: usize = 0x4ff2_6000;
+pub const DMA_END: usize = 0x4ff1_d000;
+pub const DMA_FIXED_END: usize = 0x4ff2_6000;
 
 #[cfg(target_arch = "riscv32")]
 extern "C" {
@@ -109,7 +110,7 @@ pub const INTERNAL_END: usize = if cfg!(feature = "l2-128") {
 } else {
     0x4ffc_0000
 };
-pub const STACK_BYTES: usize = 16 * 1024;
+pub const STACK_BYTES: usize = 64 * 1024;
 pub const STACK_START: usize = INTERNAL_END - STACK_BYTES;
 pub const STACK_PATTERN: u32 = 0xa55a_6996;
 #[derive(Debug)]
@@ -198,7 +199,7 @@ pub fn valid_ahb_range(address: usize, bytes: usize) -> bool {
         && address.is_multiple_of(64)
         && bytes.is_multiple_of(64)
         && address.checked_add(bytes).is_some_and(|end| {
-            (address >= DMA_START && end <= DMA_END)
+            (address >= DMA_START && end <= DMA_FIXED_END)
                 || (address >= UPPER_BASE && end <= INTERNAL_END)
         })
 }
@@ -258,8 +259,8 @@ mod tests {
             (INTERNAL_END, 64),
             (usize::MAX - 63, 128),
             (0x4ff4_0000, 0),
-            (DMA_END, 64), // Boot stack / legacy CPU scratch is not DMA pool.
-            (DMA_END - 64, 128),
+            (DMA_FIXED_END, 64), // Boot stack / legacy CPU scratch is not DMA pool.
+            (DMA_FIXED_END - 64, 128),
             (0x4ff2_8000, 64), // Reserved ROM interval.
         ] {
             assert!(!valid_ahb_range(a, n));

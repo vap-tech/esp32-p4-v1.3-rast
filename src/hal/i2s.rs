@@ -28,6 +28,7 @@ pub const STREAM_BUFFERS: usize = 4;
 struct Buffer([u32; 512 * STREAM_BUFFERS]);
 #[repr(C, align(64))]
 struct Descriptor([u32; 16]);
+#[link_section = ".dma.fixed"]
 static mut BUFFER: Buffer = Buffer([0; 512 * STREAM_BUFFERS]);
 static mut STREAM_DESC: [Descriptor; STREAM_BUFFERS] =
     [const { Descriptor([0; 16]) }; STREAM_BUFFERS];

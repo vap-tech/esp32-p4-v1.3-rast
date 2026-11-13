@@ -3,7 +3,7 @@
 pub const COMMANDS: &str = include_str!("../commands.tsv");
 pub const ROUTES: &str = include_str!("../command-routes.tsv");
 pub struct Input {
-    bytes: [u8; 96],
+    bytes: [u8; 256],
     len: usize,
     dirty: bool,
     active: bool,
@@ -12,7 +12,7 @@ pub struct Input {
 impl Default for Input {
     fn default() -> Self {
         Self {
-            bytes: [0; 96],
+            bytes: [0; 256],
             len: 0,
             dirty: false,
             active: false,
@@ -21,6 +21,16 @@ impl Default for Input {
     }
 }
 impl Input {
+    pub fn clear(&mut self) {
+        for byte in &mut self.bytes {
+            unsafe {
+                core::ptr::write_volatile(byte, 0);
+            }
+        }
+        self.len = 0;
+        self.active = false;
+        self.dirty = false;
+    }
     pub fn feed(&mut self, byte: u8, now: u64) -> Option<Result<&str, &'static str>> {
         if self.active && now.wrapping_sub(self.started) > 2_000_000 {
             self.dirty = true;
@@ -73,7 +83,7 @@ pub fn action(line: &str) -> Option<u8> {
         .find(|(name, _)| *name == line)
         .map(|(_, code)| code.as_bytes()[0])
 }
-pub fn route<'a>(line: &str, buffer: &'a mut [u8; 96]) -> Option<&'a str> {
+pub fn route<'a, const N: usize>(line: &str, buffer: &'a mut [u8; N]) -> Option<&'a str> {
     for (name, handler) in entries(ROUTES) {
         let args = if line == name {
             ""
@@ -99,6 +109,22 @@ pub fn route<'a>(line: &str, buffer: &'a mut [u8; 96]) -> Option<&'a str> {
 mod tests {
     use super::*;
     #[test]
+    fn long_frame_routes_and_clear_erases_input() {
+        let mut input = Input::default();
+        input.feed(b':', 0);
+        for _ in 0..220 {
+            input.feed(b'A', 0);
+        }
+        assert_eq!(input.feed(b'\n', 0).unwrap().unwrap().len(), 220);
+        input.clear();
+        assert!(input.bytes.iter().all(|b| *b == 0));
+        let mut buffer = [0; 256];
+        assert_eq!(
+            route("wifi connect 4142 3132333435363738 60", &mut buffer),
+            Some("c6-connect 4142 3132333435363738 60")
+        );
+    }
+    #[test]
     fn echoed_boot_and_keys_cannot_dispatch() {
         let mut input = Input::default();
         for b in b"MEMORY BOOT CACHE\r\nB?R\nRTC DATA: :display test bist\n" {
@@ -114,7 +140,7 @@ mod tests {
     fn reject_and_recover_frames() {
         let mut input = Input::default();
         input.feed(b':', 0);
-        for _ in 0..100 {
+        for _ in 0..257 {
             input.feed(b'B', 0);
         }
         assert!(input.feed(b'\n', 0).unwrap().is_err());

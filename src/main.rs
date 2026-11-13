@@ -16,6 +16,8 @@ mod audio_lab;
 mod arbitration_lab;
 mod recorder;
 mod web_server;
+mod wifi;
+mod wifi_profile;
 
 use core::{arch::global_asm, fmt::Write, panic::PanicInfo};
 
@@ -34,7 +36,7 @@ extern "C" fn rust_memory_boot() {
         Ok(()) => {
             let _ = writeln!(
                 console,
-                "MEMORY SRAM configured {}KiB; stack=16KiB work={}KiB",
+                "MEMORY SRAM configured {}KiB; stack=64KiB work={}KiB",
                 (hal::memory::INTERNAL_END - hal::memory::UPPER_BASE) / 1024,
                 (hal::memory::STACK_START - hal::memory::internal_start()) / 1024
             );
@@ -184,12 +186,86 @@ extern "C" fn rust_main() -> ! {
                 clock_enabled = false;
             }
             if command == 0 {
-                let mut normalized = [0; 96];
+                let mut normalized = [0; 256];
                 let Some(line) = esp32_p4::console::route(name, &mut normalized) else {
                     let _ = writeln!(console, "COMMAND ERROR unknown command; use :help");
                     continue;
                 };
-                if line == "arbitration status" {
+                if let Some(seconds) = line.strip_prefix("c6-default ") {
+                    if camera_live || alarm_active || dma_arena.stats().used != 0 {
+                        let _ = writeln!(console, "C6 DONE Err(busy)");
+                        continue;
+                    }
+                    let result = seconds
+                        .parse::<u32>()
+                        .map_err(|_| "seconds 1..3600")
+                        .and_then(|seconds| {
+                            wifi::connect_default(seconds, &mut timer, &mut console)
+                        });
+                    let _ = writeln!(
+                        console,
+                        "C6 DONE {:?} stack={:?}",
+                        result,
+                        hal::memory::stack_usage()
+                    );
+                } else if let Some(args) = line.strip_prefix("c6-connect ") {
+                    if camera_live || alarm_active || dma_arena.stats().used != 0 {
+                        let _ = writeln!(console, "C6 DONE Err(busy)");
+                        continue;
+                    }
+                    let result = wifi::connect(args, &mut timer, &mut console);
+                    normalized.fill(0);
+                    command_input.clear();
+                    let _ = writeln!(
+                        console,
+                        "C6 DONE {:?} stack={:?}",
+                        result,
+                        hal::memory::stack_usage()
+                    );
+                } else if line == "irq-test" {
+                    let guard = unsafe { hal::interrupt::Guard::enter() };
+                    timer.delay_us(20_000);
+                    let stats = hal::interrupt::stats();
+                    drop(guard);
+                    let _ = writeln!(
+                        console,
+                        "IRQ TEST DONE {:?} stack={:?}",
+                        stats,
+                        hal::memory::stack_usage()
+                    );
+                } else if let Some(args) = line.strip_prefix("c6-raw ") {
+                    if camera_live || alarm_active || dma_arena.stats().used != 0 {
+                        let _ = writeln!(console, "C6 RAW DONE Err(busy)");
+                        continue;
+                    }
+                    let result = wifi::raw(args, &mut timer, &mut console);
+                    let _ = writeln!(
+                        console,
+                        "C6 RAW DONE {:?} stack={:?}",
+                        result,
+                        hal::memory::stack_usage()
+                    );
+                } else if matches!(
+                    line,
+                    "c6-probe" | "c6-probe high" | "c6-probe low" | "c6-scan"
+                ) {
+                    if camera_live || alarm_active || dma_arena.stats().used != 0 {
+                        let _ = writeln!(console, "C6 DONE Err(busy)");
+                        continue;
+                    }
+                    let result = wifi::probe(
+                        &mut timer,
+                        &mut console,
+                        line.ends_with(" high"),
+                        line == "c6-scan",
+                    );
+                    let _ = writeln!(
+                        console,
+                        "C6 DONE {:?} stack={:?}",
+                        result,
+                        hal::memory::stack_usage()
+                    );
+                } else if line == "arbitration status" {
                     let _ = writeln!(
                         console,
                         "ARBITRATION STATE {:x?}",
@@ -296,13 +372,44 @@ extern "C" fn rust_main() -> ! {
                         }
                     }
                     let _ = writeln!(console, "RTC DONE {:?}", result.map(|_| ()));
+                } else if let Some(seconds) = line.strip_prefix("wifi-web ") {
+                    if let Ok(seconds @ 1..=3600) = seconds.parse::<u32>() {
+                        if camera_live || alarm_active || dma_arena.stats().used != 0 {
+                            let _ = writeln!(console, "WEB RUN DONE Err(busy)");
+                            continue;
+                        }
+                        let Some(panel) = display.as_mut() else {
+                            continue;
+                        };
+                        let result = web_server::run_wifi(
+                            seconds,
+                            &dma_arena,
+                            &mut timer,
+                            &mut console,
+                            panel,
+                        );
+                        dma_arena.reset();
+                        let _ = writeln!(
+                            console,
+                            "WEB RUN DONE {:?} stack={:?}",
+                            result,
+                            hal::memory::stack_usage()
+                        );
+                    } else {
+                        let _ = writeln!(console, "WEB RUN DONE Err(seconds)");
+                    }
                 } else if let Some(seconds) = line.strip_prefix("web-run ") {
                     if let Ok(seconds @ 1..=86400) = seconds.parse::<u32>() {
                         if camera_live || dma_arena.stats().used != 0 {
                             let _ = writeln!(console, "WEB RUN DONE Err(state)");
                             continue;
                         }
-                        let result = web_server::run(seconds, &dma_arena, &mut timer, &mut console);
+                        let Some(panel) = display.as_mut() else {
+                            let _ = writeln!(console, "WEB RUN DONE Err(display unavailable)");
+                            continue;
+                        };
+                        let result =
+                            web_server::run(seconds, &dma_arena, &mut timer, &mut console, panel);
                         dma_arena.reset();
                         let _ = writeln!(
                             console,
@@ -1534,6 +1641,13 @@ fn camera_command(
         "COMMAND {} CAMERA_DONE",
         esp32_p4::console::action_name(command)
     );
+}
+
+#[no_mangle]
+extern "C" fn rust_irq(cause: u32) {
+    if !hal::interrupt::dispatch(cause) {
+        rust_trap(cause, 0, 0);
+    }
 }
 
 #[no_mangle]

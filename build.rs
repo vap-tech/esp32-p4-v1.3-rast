@@ -4,18 +4,18 @@ fn main() {
         let mut link = std::fs::read_to_string("link.x").unwrap();
         if std::env::var_os("CARGO_FEATURE_L2_128").is_some() {
             assert_eq!(
-                link.matches("LENGTH = 496K").count(),
+                link.matches("LENGTH = 448K").count(),
                 1,
                 "unexpected arena template"
             );
             assert_eq!(
-                link.matches("0x4ffbc000").count(),
+                link.matches("0x4ffb0000").count(),
                 1,
                 "unexpected stack template"
             );
             link = link
-                .replace("LENGTH = 496K", "LENGTH = 368K")
-                .replace("0x4ffbc000", "0x4ff9c000");
+                .replace("LENGTH = 448K", "LENGTH = 320K")
+                .replace("0x4ffb0000", "0x4ff90000");
         }
         let path = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("link.x");
         std::fs::write(&path, link).unwrap();

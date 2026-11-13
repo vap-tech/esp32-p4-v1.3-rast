@@ -3,6 +3,7 @@
 import argparse
 import array
 import fcntl
+import getpass
 import os
 import select
 import sys
@@ -25,10 +26,20 @@ parser.add_argument('--display-clock', choices=['on','off'], help='enable/disabl
 parser.add_argument('--brightness', type=int, choices=range(101), metavar='0..100', help='set backlight percent')
 parser.add_argument('--rtc', metavar='COMMAND', help='RTC read/init/set/config/clear/ram/timer/alarm; see docs/rtc.md')
 parser.add_argument('--rtc-sync', action='store_true', help='explicitly initialize RTC to laptop UTC, resetting settings/alarms/timer')
+parser.add_argument('--irq-test', action='store_true', help='20ms scoped core0 CLIC/SYSTIMER IRQ test')
 parser.add_argument('--memory', action='store_true', help='report memory/cache configuration')
 parser.add_argument('--sd-format-info', action='store_true', help='preview whole-card FAT32 geometry without writing')
 parser.add_argument('--format-sd', action='store_true', help='ERASE all SD partitions; quick-format FAT32 and create/verify CONFIG.TXT')
+parser.add_argument('--wifi-default', action='store_true', help='connect using firmware built-in network profile, no password prompt')
+parser.add_argument('--wifi-connect', metavar='SSID', help='connect C6 STA; asks for password without echo, RAM only')
+parser.add_argument('--wifi-password-stdin', action='store_true', help='read Wi-Fi password from stdin instead of terminal prompt')
+parser.add_argument('--wifi-seconds', type=int, default=300, help='serve Wi-Fi DHCP/ARP/ping for 1..3600 seconds after DHCP (default 300)')
+parser.add_argument('--wifi-scan', action='store_true', help='C6 ESP-Hosted scan; no network credentials or connection')
+parser.add_argument('--wifi-probe', nargs='?', const='low', choices=['high', 'low'], help='reset C6 and read SDIO/ESP-Hosted startup; preserves C6 Flash')
 parser.add_argument('--eth-probe', action='store_true', help='read PHY IDs/link over MDIO')
+parser.add_argument('--wifi-raw', choices=['rx','tx'], help='pure SDIO raw test without Wi-Fi or SD, requires C6 capability')
+parser.add_argument('--raw-seconds', type=int, default=10, help='raw test duration 1..30 seconds')
+parser.add_argument('--wifi-web', type=int, metavar='SECONDS', help='serve SD HTTP through built-in Wi-Fi profile, 1..3600 seconds')
 parser.add_argument('--web-run', type=int, metavar='SECONDS', help='serve Flashbox + SD HTTP for 1..86400 seconds (D-cache OFF)')
 parser.add_argument('--eth-run', type=int, metavar='SECONDS', help='poll Ethernet DHCP/ARP/ping for 1..600 seconds (D-cache OFF)')
 parser.add_argument('--memory-test', action='store_true', help='destructive full PSRAM test before framebuffer initialization')
@@ -95,6 +106,25 @@ def send(fd, payload):
             if time.monotonic() >= deadline:
                 raise TimeoutError('USB not writable for 5 seconds')
             select.select([], [fd], [], 0.1)
+
+wifi_connect_frame = None
+if args.wifi_password_stdin and not args.wifi_connect:
+    parser.error('--wifi-password-stdin requires --wifi-connect')
+if args.wifi_default and args.wifi_connect:
+    parser.error('choose --wifi-default or --wifi-connect')
+if args.wifi_default and not 1 <= args.wifi_seconds <= 3600:
+    parser.error('--wifi-seconds requires 1..3600')
+if args.wifi_connect:
+    if not 1 <= args.wifi_seconds <= 3600:
+        parser.error('--wifi-seconds requires 1..3600')
+    ssid = args.wifi_connect.encode('utf-8')
+    password = (sys.stdin.readline().rstrip('\r\n') if args.wifi_password_stdin else getpass.getpass('Wi-Fi password: ')).encode('utf-8')
+    if not 1 <= len(ssid) <= 32 or not 8 <= len(password) <= 64 or b'\0' in ssid or b'\0' in password:
+        parser.error('Wi-Fi SSID/password length or encoding invalid')
+    if len(password) == 64 and any(c not in b'0123456789abcdefABCDEF' for c in password):
+        parser.error('64-byte password must be hexadecimal PSK')
+    wifi_connect_frame = (':wifi connect ' + ssid.hex() + ' ' + password.hex() + ' ' + str(args.wifi_seconds) + '\n').encode('ascii')
+    del password
 
 fd = os.open(args.port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
 try:
@@ -180,11 +210,65 @@ try:
         line = receive(b'RTC DONE', timeout=10)
         if b'Err(' in line:
             raise SystemExit('RTC command failed')
+    if args.wifi_default:
+        wifi_connect_frame = (':wifi default ' + str(args.wifi_seconds) + '\n').encode('ascii')
+    if wifi_connect_frame is not None:
+        send(fd, wifi_connect_frame)
+        wifi_connect_frame = None
+        try:
+            line = receive(b'C6 DONE', timeout=args.wifi_seconds + 120)
+        except KeyboardInterrupt:
+            os.write(fd, b'\x1b')
+            receive(b'C6 DONE', timeout=60)
+            raise SystemExit(130)
+        if b'Err(' in line:
+            raise SystemExit('C6 connection failed')
+    if args.wifi_scan:
+        send(fd, b':wifi scan\n')
+        try:
+            line = receive(b'C6 DONE', timeout=90)
+        except KeyboardInterrupt:
+            os.write(fd, b'\x1b')
+            receive(b'C6 DONE', timeout=45)
+            raise SystemExit(130)
+        if b'Err(' in line:
+            raise SystemExit('C6 scan failed')
+    if args.wifi_probe:
+        send(fd, (':wifi probe ' + args.wifi_probe + '\n').encode('ascii'))
+        try:
+            line = receive(b'C6 DONE', timeout=30)
+        except KeyboardInterrupt:
+            os.write(fd, b'\x1b')
+            receive(b'C6 DONE', timeout=30)
+            raise SystemExit(130)
+        if b'Err(' in line:
+            raise SystemExit('C6 probe failed')
     if args.eth_probe:
         send(fd, b':eth-probe\n')
         line = receive(b'ETH PROBE DONE', timeout=10)
         if b'Err(' in line:
             raise SystemExit('Ethernet PHY probe failed')
+    if args.irq_test:
+        send(fd,b':system irq test\n'); receive(b'IRQ TEST DONE',timeout=5)
+    if args.wifi_raw:
+        if not 1 <= args.raw_seconds <= 30: parser.error('--raw-seconds requires 1..30')
+        send(fd, (':wifi raw ' + args.wifi_raw + ' ' + str(args.raw_seconds) + '\n').encode('ascii'))
+        try:
+            line = receive(b'C6 RAW DONE', timeout=args.raw_seconds + 25)
+        except KeyboardInterrupt:
+            send(fd,b'\x1b'); line = receive(b'C6 RAW DONE', timeout=15)
+        if b'Err(' in line or b'guard_ok: false' in line: raise SystemExit('Raw SDIO test failed')
+    if args.wifi_web is not None:
+        if not 1 <= args.wifi_web <= 3600:
+            parser.error('--wifi-web requires 1..3600 seconds')
+        send(fd, (':net wifi serve ' + str(args.wifi_web) + '\n').encode('ascii'))
+        try:
+            line = receive(b'WEB RUN DONE', timeout=args.wifi_web + 60)
+        except KeyboardInterrupt:
+            send(fd, b'\x1b')
+            line = receive(b'WEB RUN DONE', timeout=30)
+        if b'Err(' in line or b'guard_ok: false' in line:
+            raise SystemExit('Wi-Fi web server failed')
     if args.web_run is not None:
         send(fd, (':web-run ' + str(args.web_run) + '\n').encode('ascii'))
         try:
