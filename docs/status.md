@@ -573,3 +573,15 @@ Default CMD53 image прошит, профиль R4-2G-TEST, веб-сервер
 Подробные счётчики и порядок воспроизведения: [wifi.md](wifi.md#sdio-profiling-и-чистый-транспорт).
 
 Профиль записи SD и исправление секторного разбиения HTTP: [storage-write-profile.md](storage-write-profile.md).
+
+Разбор разницы с Linux, тесты порций 512 Б–32 КиБ: [sd-write-batching.md](sd-write-batching.md).
+
+Прямой PSRAM → SD DMA проверен с одинаковыми порциями 32 КиБ; настройка FIFOTH.MSIZE исправлена: [sd-psram-dma.md](sd-psram-dma.md).
+
+Проводной веб накапливает upload в PSRAM32КиБ и пишет SD напрямую; [контракт и проверки](web-psram-upload.md).
+
+Веб получил XHR-прогресс, МиБ/с, ETA и отмену с ожиданием cleanup на борде; описание в frontend/readme.md.
+
+Профиль реального HTTP upload64MiB: [http-upload-profile.md](http-upload-profile.md). Главные затраты — FAT21,27s и CPU→PSRAM10,32s; EMAC losses0, TCP zero-window37,61s.
+
+Реализован общий четырёхсекторный write-back кеш FAT с барьерами sync/close и тестами отказов: [fat-writeback.md](fat-writeback.md). HTTP64MiB:2,14MiB/s вместо1,29;117 записей метаданных вместо8243.

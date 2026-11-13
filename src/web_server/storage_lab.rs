@@ -1,11 +1,19 @@
 //! Diagnostic-only flat-root FAT32 profiling. No raw writes outside a new file.
 use super::*;
-use esp32_p4::storage::{files::OpenMode, files::QUANTUM, volume::Error as FsError};
+use esp32_p4::storage::{files::OpenMode, volume::Error as FsError};
+const QUANTUM: usize = hal::sdmmc::MAX_TRANSFER;
 use hal::sdmmc::profile;
+// This image is single-foreground, D-cache bypassed, no concurrent benchmark.
+// Keep the large input off the 64KiB runtime stack and out of Ethernet's DMA pool.
+#[cfg(feature = "sd-wide-bench")]
+#[repr(align(64))]
+struct WideScratch([u8; QUANTUM]);
+#[cfg(feature = "sd-wide-bench")]
+static mut WIDE_SCRATCH: WideScratch = WideScratch([0; QUANTUM]);
 
 /// Counters: reads,writes,readB,writeB,setup_us,data_us,stop_us,ready_us,
 /// read_us,write_us,meta_calls,meta_B,meta_us,payload_calls,payload_B,payload_us,
-/// CMD13,errors,read512,write512,write1024,write2048,write4096,writeOther.
+/// CMD13,errors,read512,write512,write1024,write2048,write4096,writeOther,meta_ready_us,payload_ready_us.
 fn dump(console: &mut hal::usb_serial::Console, tag: &str, before: [u32; profile::N]) {
     let now = profile::snapshot();
     let values: [u32; profile::N] = core::array::from_fn(|i| now[i].wrapping_sub(before[i]));
@@ -19,6 +27,14 @@ pub(super) struct HttpTrace {
     empty_since: u64,
     empty_us: u64,
     write_us: u64,
+    read_us: u64,
+    copy_us: u64,
+    copy_max_us: u64,
+    copy_calls: u32,
+    chunks: [u32; 4],
+    poll_start: u64,
+    losses_start: [u64; 4],
+    emac_start: [u32; 6],
     close_us: u64,
     calls: u32,
     shared: bool,
@@ -31,14 +47,25 @@ impl HttpTrace {
         empty_since: 0,
         empty_us: 0,
         write_us: 0,
+        read_us: 0,
+        copy_us: 0,
+        copy_max_us: 0,
+        copy_calls: 0,
+        chunks: [0; 4],
+        poll_start: 0,
+        losses_start: [0; 4],
+        emac_start: [0; 6],
         close_us: 0,
         calls: 0,
         shared: false,
     };
-    pub fn begin(now: u64) -> Self {
+    pub fn begin(now: u64, poll_start: u64, losses_start: [u64; 4], emac_start: [u32; 6]) -> Self {
         Self {
             before: profile::snapshot(),
             start: now,
+            poll_start,
+            losses_start,
+            emac_start,
             ..Self::EMPTY
         }
     }
@@ -59,6 +86,24 @@ impl HttpTrace {
             self.empty_since = 0;
         }
     }
+    pub fn read(&mut self, us: u64) {
+        self.read_us += us;
+    }
+    pub fn copied(&mut self, us: u64, bytes: usize) {
+        self.copy_us += us;
+        self.copy_max_us = self.copy_max_us.max(us);
+        self.copy_calls += 1;
+        let bucket = if bytes <= 512 {
+            0
+        } else if bytes <= 2048 {
+            1
+        } else if bytes <= 4096 {
+            2
+        } else {
+            3
+        };
+        self.chunks[bucket] += 1;
+    }
     pub fn wrote(&mut self, us: u64) {
         self.write_us += us;
         self.calls += 1;
@@ -66,8 +111,17 @@ impl HttpTrace {
     pub fn closed(&mut self, us: u64) {
         self.close_us = us;
     }
-    pub fn report(&self, now: u64, slot: usize, console: &mut hal::usb_serial::Console) {
-        let _=writeln!(console,"SD HTTP slot={} wall_us={} open_us={} writes={} fs_write_us={} close_us={} rx_empty_us={} shared={}",slot,now-self.start,self.open_us,self.calls,self.write_us,self.close_us,self.empty_us,self.shared);
+    pub fn report<P: Port>(&self, now: u64, slot: usize, network: &mut Network<'_, '_, P>) {
+        let losses = network.sample_losses();
+        let loss_delta: [u64; 4] = core::array::from_fn(|i| losses[i] - self.losses_start[i]);
+        let emac = network.port.borrow().wired_stats().unwrap_or([0; 6]);
+        let emac_delta: [u32; 6] =
+            core::array::from_fn(|i| emac[i].wrapping_sub(self.emac_start[i]));
+        let poll_us = network.poll_us - self.poll_start;
+        let max_tick_gap = network.max_tick_gap;
+        let console = &mut *network.console;
+        let _=writeln!(console,"SD HTTP slot={} wall_us={} open_us={} writes={} fs_write_us={} close_us={} rx_wait_us={} tcp_read_us={} psram_copy_us={} copy_max_us={} copy_calls={} copy_sizes={:?} shared={}",slot,now-self.start,self.open_us,self.calls,self.write_us,self.close_us,self.empty_us,self.read_us,self.copy_us,self.copy_max_us,self.copy_calls,self.chunks,self.shared);
+        let _=writeln!(console,"HTTP NET poll_us={} max_tick_gap_us={} emac={:?} losses=(rx_buffer,rx_fifo,buffer_counter_wraps,fifo_counter_wraps){:?}",poll_us,max_tick_gap,emac_delta,loss_delta);
         dump(console, "HTTP", self.before);
     }
 }
@@ -147,7 +201,15 @@ pub(super) fn run<P: Port, D: disk::BlockDevice, const N: usize>(
     console: &mut hal::usb_serial::Console,
     scratch: &mut [u8],
     mib: u32,
+    #[cfg(feature = "sd-wide-bench")] psram: &mut [u8],
 ) -> Result<(), web::Error> {
+    #[cfg(feature = "sd-wide-bench")]
+    let scratch = {
+        let _ = scratch;
+        // SAFETY: sole caller is the serial foreground benchmark; run_mode rejects
+        // D-cache ON, no reference escapes and no other code accesses this static.
+        unsafe { &mut (*core::ptr::addr_of_mut!(WIDE_SCRATCH)).0 }
+    };
     if !(1..=64).contains(&mib) || scratch.len() < QUANTUM {
         return Err(web::Error::Storage);
     }
@@ -191,7 +253,7 @@ pub(super) fn run<P: Port, D: disk::BlockDevice, const N: usize>(
                 return Err(web::Error::Storage);
             }
         }
-        wait(fs.close(h))?.map_err(|_| web::Error::Storage)
+        wait(fs.sync(h))?.map_err(|_| web::Error::Storage)
     })();
     let us = port.borrow_mut().now_us() - start;
     let _ = writeln!(
@@ -209,6 +271,51 @@ pub(super) fn run<P: Port, D: disk::BlockDevice, const N: usize>(
         }
         return write_result;
     }
+    // Reuse this file's allocated chain: no writes to unowned card sectors.
+    // Keep the CreateNew handle so seek permits overwrite without append.
+    #[cfg(feature = "sd-wide-bench")]
+    let final_tag = direct_compare(fs, h, port, console, scratch, psram, bytes)?;
+    #[cfg(not(feature = "sd-wide-bench"))]
+    let final_tag = 0;
+    #[cfg(not(feature = "sd-wide-bench"))]
+    for chunk in [512, 2048, 8192, QUANTUM]
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, n)| (i != 3 || n != 8192).then_some(n))
+    {
+        wait(fs.seek(h, 0))?.map_err(|_| web::Error::Storage)?;
+        let before = profile::snapshot();
+        let start = port.borrow_mut().now_us();
+        let result = (|| {
+            for offset in (0..bytes).step_by(QUANTUM) {
+                scratch[..8].copy_from_slice(&((offset / QUANTUM) as u64).to_le_bytes());
+                for part in scratch.chunks(chunk) {
+                    if wait(fs.write(h, part))?.map_err(|_| web::Error::Storage)? != part.len() {
+                        return Err(web::Error::Storage);
+                    }
+                }
+            }
+            wait(fs.sync(h))?.map_err(|_| web::Error::Storage)
+        })();
+        let us = port.borrow_mut().now_us() - start;
+        let _ = writeln!(
+            console,
+            "SD FILE BENCH REWRITE chunk={} bytes={} us={} KiB_s={} result={:?}",
+            chunk,
+            bytes,
+            us,
+            bytes as u64 * 1_000_000 / 1024 / us.max(1),
+            result
+        );
+        dump(console, "SRAM_REWRITE", before);
+        if result.is_err() {
+            if !fs.is_poisoned() {
+                let _ = wait(fs.abort(h));
+            }
+            return result;
+        }
+    }
+    wait(fs.close(h))?.map_err(|_| web::Error::Storage)?;
     let name = core::str::from_utf8(path.data()).unwrap();
     let before = profile::snapshot();
     let start = port.borrow_mut().now_us();
@@ -220,7 +327,7 @@ pub(super) fn run<P: Port, D: disk::BlockDevice, const N: usize>(
             || scratch[..n]
                 .iter()
                 .enumerate()
-                .any(|(i, b)| *b != expected(offset + i))
+                .any(|(i, b)| *b != expected(offset + i) ^ final_tag)
         {
             let _ = wait(fs.close(h));
             let _ = wait(fs.remove(name));
@@ -241,4 +348,115 @@ pub(super) fn run<P: Port, D: disk::BlockDevice, const N: usize>(
     wait(fs.remove(name))?.map_err(|_| web::Error::Storage)?;
     let _ = writeln!(console, "SD FILE BENCH CLEANUP deleted={}", name);
     Ok(())
+}
+
+#[cfg(feature = "sd-wide-bench")]
+fn direct_compare<P: Port, D: disk::BlockDevice, const N: usize>(
+    fs: &mut FileTable<'_, '_, D, N>,
+    h: esp32_p4::storage::files::FileHandle,
+    port: &RefCell<P>,
+    console: &mut hal::usb_serial::Console,
+    scratch: &mut [u8],
+    psram: &mut [u8],
+    bytes: usize,
+) -> Result<u8, web::Error> {
+    use core::sync::atomic::Ordering;
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            profile::DIRECT_TX.store(false, Ordering::Relaxed);
+        }
+    }
+    let _reset = Reset;
+    if psram.len() != QUANTUM + 128 {
+        return Err(web::Error::Storage);
+    }
+    psram.fill(0xa5);
+    let (head, rest) = psram.split_at_mut(64);
+    let (external, tail) = rest.split_at_mut(QUANTUM);
+    let mut final_tag = 0;
+    // Repeat in reverse order to expose card-state effects. All payloads are 32KiB.
+    for (pass, (external_source, direct)) in [
+        (false, false),
+        (false, true),
+        (true, false),
+        (true, true),
+        (true, true),
+        (true, false),
+        (false, true),
+        (false, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let tag = (pass as u8 + 1).wrapping_mul(17);
+        let input = if external_source {
+            &mut *external
+        } else {
+            &mut *scratch
+        };
+        for (i, byte) in input.iter_mut().enumerate() {
+            *byte = expected(i) ^ tag;
+        }
+        wait(fs.seek(h, 0))?.map_err(|_| web::Error::Storage)?;
+        profile::DIRECT_BYTES.store(0, Ordering::Relaxed);
+        profile::DIRECT_TX.store(direct, Ordering::Relaxed);
+        let before = profile::snapshot();
+        let start = port.borrow_mut().now_us();
+        for offset in (0..bytes).step_by(QUANTUM) {
+            let marker = ((offset / QUANTUM) as u64).to_le_bytes();
+            for i in 0..8 {
+                input[i] = marker[i] ^ tag;
+            }
+            if wait(fs.write(h, input))?.map_err(|_| web::Error::Storage)? != QUANTUM {
+                return Err(web::Error::Storage);
+            }
+        }
+        wait(fs.sync(h))?.map_err(|_| web::Error::Storage)?;
+        let us = port.borrow_mut().now_us() - start;
+        profile::DIRECT_TX.store(false, Ordering::Relaxed);
+        let direct_bytes = profile::DIRECT_BYTES.load(Ordering::Relaxed);
+        if direct_bytes as usize != if direct { bytes } else { 0 } {
+            return Err(web::Error::Storage);
+        }
+        let _ = writeln!(
+            console,
+            "SD DIRECT pass={} source={} mode={} chunk={} bytes={} us={} KiB_s={} direct_bytes={}",
+            pass,
+            if external_source { "PSRAM" } else { "SRAM" },
+            if direct { "direct" } else { "bounce" },
+            QUANTUM,
+            bytes,
+            us,
+            bytes as u64 * 1_000_000 / 1024 / us.max(1),
+            direct_bytes
+        );
+        dump(console, "DIRECT", before);
+        let _ = writeln!(console, "SD DIRECT HOST {:08x?}", profile::host());
+        // Read back after EVERY pass through the unchanged SRAM bounce RX path.
+        wait(fs.seek(h, 0))?.map_err(|_| web::Error::Storage)?;
+        let mut offset = 0;
+        while offset < bytes {
+            let n = wait(fs.read_written(h, scratch))?.map_err(|_| web::Error::Storage)?;
+            if n == 0
+                || scratch[..n]
+                    .iter()
+                    .enumerate()
+                    .any(|(i, b)| *b != (expected(offset + i) ^ tag))
+            {
+                return Err(web::Error::Storage);
+            }
+            offset += n;
+        }
+        if head.iter().chain(tail.iter()).any(|b| *b != 0xa5) {
+            return Err(web::Error::Storage);
+        }
+        let _ = writeln!(
+            console,
+            "SD DIRECT VERIFIED pass={} source_guards=true",
+            pass
+        );
+        final_tag = tag;
+    }
+    Ok(final_tag)
 }

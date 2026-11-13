@@ -7,6 +7,8 @@ edition = "2021"
 default = []
 # Optional laboratory commands; absent from the normal image and help.
 diagnostics = []
+# Isolated SD experiment: 32KiB transactions, extra static SRAM; not a production profile.
+sd-wide-bench = ["diagnostics"]
 # Preserve C6/ESP-Hosted support without compiling it into the normal image.
 wifi = []
 # Temporary software decoder; future hardware JPEG work is independent.

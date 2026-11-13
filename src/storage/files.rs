@@ -7,7 +7,7 @@ use super::{
 };
 use core::sync::atomic::{AtomicU32, Ordering};
 use embedded_io_async::{Read, Seek, SeekFrom, Write};
-pub const QUANTUM: usize = 8192;
+pub const QUANTUM: usize = 32768;
 static NEXT_GENERATION: AtomicU32 = AtomicU32::new(1);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileHandle {
@@ -75,7 +75,7 @@ impl<'v, 'io, D: BlockDevice, const N: usize> FileTable<'v, 'io, D, N> {
         self.volume.needs_recovery()
     }
     pub fn is_poisoned(&self) -> bool {
-        self.volume.fat().poisoned.get()
+        self.volume.fat().poisoned.get() || self.volume.fat().stream.borrow().fat_flush_failed()
     }
     fn writers(&self) -> usize {
         self.slots
@@ -190,11 +190,30 @@ impl<'v, 'io, D: BlockDevice, const N: usize> FileTable<'v, 'io, D, N> {
         Ok(FileHandle { slot, generation })
     }
     pub async fn read(&mut self, h: FileHandle, out: &mut [u8]) -> Result<usize, Error<D::Error>> {
-        self.volume.readable()?;
-        let i = self.index(h)?;
-        if self.slots[i].info.mode != OpenMode::Read {
+        if self.info(h)?.mode != OpenMode::Read {
             return Err(Error::AccessDenied);
         }
+        self.read_inner(h, out).await
+    }
+    /// Diagnostic readback of the sole newly-created writer; never opens an alias.
+    #[cfg(feature = "sd-wide-bench")]
+    pub async fn read_written(
+        &mut self,
+        h: FileHandle,
+        out: &mut [u8],
+    ) -> Result<usize, Error<D::Error>> {
+        if self.info(h)?.mode != OpenMode::CreateNew {
+            return Err(Error::AccessDenied);
+        }
+        self.read_inner(h, out).await
+    }
+    async fn read_inner(
+        &mut self,
+        h: FileHandle,
+        out: &mut [u8],
+    ) -> Result<usize, Error<D::Error>> {
+        self.volume.readable()?;
+        let i = self.index(h)?;
         let fat = self.volume.fat();
         let guard = Mutation::begin(&fat.poisoned);
         let context = self.slots[i].context.take().ok_or(Error::NeedsRecovery)?;
@@ -224,7 +243,10 @@ impl<'v, 'io, D: BlockDevice, const N: usize> FileTable<'v, 'io, D, N> {
         if info.mode == OpenMode::Append {
             file.seek(SeekFrom::End(0)).await?;
         }
-        file.write_all(&bytes[..n]).await?;
+        {
+            let _scope = super::asynchronous::Stream::defer_file_fat(fat.stream);
+            file.write_all(&bytes[..n]).await?;
+        }
         self.slots[i].context = Some(file.suspend());
         self.slots[i].info.position += n as u64;
         self.slots[i].info.len = self.slots[i].info.len.max(self.slots[i].info.position);
@@ -258,6 +280,11 @@ impl<'v, 'io, D: BlockDevice, const N: usize> FileTable<'v, 'io, D, N> {
         }
         let fat = self.volume.fat();
         let guard = Mutation::begin(&fat.poisoned);
+        fat.stream
+            .borrow_mut()
+            .flush_fat()
+            .await
+            .map_err(embedded_fatfs::Error::Io)?;
         let context = self.slots[i].context.take().ok_or(Error::NeedsRecovery)?;
         self.slots[i].context = Some(FatFile::resume_exclusive(context, &fat.fs).close().await?);
         self.checkpoint(self.writers() != 0).await?;
@@ -270,6 +297,11 @@ impl<'v, 'io, D: BlockDevice, const N: usize> FileTable<'v, 'io, D, N> {
         if self.slots[i].info.mode != OpenMode::Read {
             let fat = self.volume.fat();
             let guard = Mutation::begin(&fat.poisoned);
+            fat.stream
+                .borrow_mut()
+                .flush_fat()
+                .await
+                .map_err(embedded_fatfs::Error::Io)?;
             let context = self.slots[i].context.take().ok_or(Error::NeedsRecovery)?;
             FatFile::resume_exclusive(context, &fat.fs).close().await?;
             self.checkpoint(self.writers() > 1).await?;
@@ -288,6 +320,11 @@ impl<'v, 'io, D: BlockDevice, const N: usize> FileTable<'v, 'io, D, N> {
         }
         let fat = self.volume.fat();
         let guard = Mutation::begin(&fat.poisoned);
+        fat.stream
+            .borrow_mut()
+            .flush_fat()
+            .await
+            .map_err(embedded_fatfs::Error::Io)?;
         let context = self.slots[i].context.take().ok_or(Error::NeedsRecovery)?;
         // Publish the first cluster before unlink, so remove frees the full chain.
         FatFile::resume_exclusive(context, &fat.fs).close().await?;

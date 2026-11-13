@@ -23,3 +23,7 @@ Local changes:
   Close/sync explicitly flush; aborted create flushes first cluster before unlink.
 - FileSystem::flush_preserving_dirty saves FSInfo while unfinished writers remain;
   ordinary flush still clears the dirty flag as before.
+- FileSystem::fat_region_bytes exposes the validated BPB byte range covering all
+  physical FAT copies. The board Stream uses it for a four-sector write-back
+  cache admitted only during scoped regular-file writes; metadata publication
+  and explicit checkpoints drain it before directory/FSInfo/clean-marker writes.

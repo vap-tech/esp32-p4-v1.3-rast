@@ -1,5 +1,6 @@
 //! Synchronous file request service over a polled transport. No file-sized buffer.
 pub mod asyncfs;
+pub mod upload;
 use crate::{
     net::http::{self, Method, Request, Route, Text},
     storage::{self, fat32::Fat32, BlockDevice},

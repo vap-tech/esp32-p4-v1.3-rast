@@ -8,16 +8,36 @@ const SDIO_PLL_HZ: u32 = 200_000_000;
 const HOST_DIV: u32 = 2;
 const MASK: u64 = (1 << 48) - 1;
 /// Maximum bytes per sector transfer (16 sectors), bounded internal SRAM use.
+#[cfg(not(feature = "sd-wide-bench"))]
 pub const MAX_TRANSFER: usize = 8192;
+#[cfg(feature = "sd-wide-bench")]
+pub const MAX_TRANSFER: usize = 32768;
+pub const MAX_DIRECT_TRANSFER: usize = 32768;
 const DMA_CHUNK: usize = 4096;
 #[repr(C, align(64))]
 struct DmaBuffer([u32; MAX_TRANSFER / 4]);
 // The unsafe constructor grants exclusive controller AND workspace ownership.
 // Static SRAM avoids placing an 8 KiB bounce buffer on the small boot stack.
-#[link_section = ".dma.fixed"]
+#[cfg_attr(not(feature = "sd-wide-bench"), link_section = ".dma.fixed")]
 static mut DMA_BUFFER: DmaBuffer = DmaBuffer([0; MAX_TRANSFER / 4]);
 #[cfg(feature = "wifi")]
 static mut COMMAND_LEVELS: [u32; 2] = [u32::MAX, 0];
+/// Preserve arbitrary byte-slice support, but use aligned word loads for the
+/// common SRAM scratch/cache buffers. An &[u8] otherwise makes RV32 emit byte loads.
+fn copy_to_dma(input: &[u8], out: &mut [u32]) {
+    assert_eq!(input.len(), out.len() * 4);
+    if input.as_ptr().align_offset(core::mem::align_of::<u32>()) == 0 {
+        for (i, word) in out.iter_mut().enumerate() {
+            // SAFETY: checked alignment, four initialized bytes per output word,
+            // immutable source is owned by this transfer and disjoint from DMA.
+            *word = u32::from_le(unsafe { input.as_ptr().cast::<u32>().add(i).read() });
+        }
+    } else {
+        for (word, bytes) in out.iter_mut().zip(input.as_chunks::<4>().0) {
+            *word = u32::from_le_bytes(*bytes);
+        }
+    }
+}
 const RESPONSE: u32 = (1 << 6) | (1 << 8);
 const ERRORS: u32 = (1 << 1)
     | (1 << 6)
@@ -179,7 +199,10 @@ impl Sdmmc {
         write(0x44, u32::MAX);
         write(0x14, u32::MAX); // Response/data timeout, also bounded in software.
         write(0x18, 0); // Start 1-bit native SD.
-        write(0x4c, (15 << 16) | 15); // FIFO thresholds, 16 words.
+                        // BMOD.PBL is a read-only mirror of FIFOTH.MSIZE. Set the actual
+                        // burst size here (encoding 2), with unchanged 16-word thresholds.
+                        // Verified on rev1.3 with direct PSRAM/SRAM DMA and active LCD.
+        write(0x4c, (2 << 28) | (15 << 16) | 15);
         let this = Self {
             info: Info {
                 ocr: 0,
@@ -522,9 +545,7 @@ impl Sdmmc {
         let multi = cmd == 18 || cmd == 25;
         let data = unsafe { &mut *core::ptr::addr_of_mut!(DMA_BUFFER) };
         if let Some(input) = input {
-            for (i, chunk) in input.as_chunks::<4>().0.iter().enumerate() {
-                data.0[i] = u32::from_le_bytes(*chunk);
-            }
+            copy_to_dma(input, &mut data.0[..input.len() / 4]);
         }
         let mut desc = Descriptors([[0; 16]; MAX_TRANSFER / DMA_CHUNK]);
         let desc_addr = desc.0.as_mut_ptr() as usize;
@@ -562,7 +583,7 @@ impl Sdmmc {
         );
         write(0x20, len as u32);
         write(0, (1 << 25) | (1 << 5));
-        write(0x80, (1 << 7) | (1 << 1) | (2 << 8));
+        write(0x80, (1 << 7) | (1 << 1));
         let result = (|| {
             let r1 = self.command(
                 cmd,
@@ -738,6 +759,44 @@ fn decode_capacity(csd: [u32; 4]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn direct_dma_alias_and_bounds() {
+        assert_eq!(
+            super::direct_tx_address(0x88400040, 32768),
+            Some(0x48400040)
+        );
+        assert_eq!(
+            super::direct_tx_address(0x4ff40000, 32768),
+            Some(0x4ff40000)
+        );
+        for (address, len) in [
+            (0x88400001, 32768),
+            (0x88400000, 511),
+            (0x89ffc040, 32768),
+            (0x48000000, 32768),
+            (usize::MAX - 63, 512),
+        ] {
+            assert_eq!(super::direct_tx_address(address, len), None);
+        }
+    }
+    #[test]
+    fn dma_copy_supports_aligned_and_unaligned_sources() {
+        #[repr(align(4))]
+        struct Bytes([u8; 20]);
+        let mut source = Bytes([0; 20]);
+        for (i, byte) in source.0.iter_mut().enumerate() {
+            *byte = i as u8;
+        }
+        for offset in 0..4 {
+            let bytes = &source.0[offset..offset + 16];
+            let mut out = [0; 4];
+            super::copy_to_dma(bytes, &mut out);
+            for (word, bytes) in out.iter().zip(bytes.as_chunks::<4>().0) {
+                assert_eq!(*word, u32::from_le_bytes(*bytes));
+            }
+        }
+    }
+
     #[test]
     fn multi_block_ranges_and_addressing() {
         assert_eq!(transfer_argument(7, 1024, 9, 0), Some(3584));
@@ -1099,20 +1158,28 @@ enum AsyncPhase {
     Done,
 }
 #[repr(C, align(64))]
-struct AsyncDescriptors([[u32; 16]; MAX_TRANSFER / DMA_CHUNK]);
+struct AsyncDescriptors([[u32; 16]; MAX_DIRECT_TRANSFER / DMA_CHUNK]);
 static mut ASYNC_DESCRIPTORS: AsyncDescriptors =
-    AsyncDescriptors([[0; 16]; MAX_TRANSFER / DMA_CHUNK]);
+    AsyncDescriptors([[0; 16]; MAX_DIRECT_TRANSFER / DMA_CHUNK]);
 static ASYNC_ACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static ASYNC_FAULT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// Diagnostic counters, microsecond totals wrap after ~71 minutes; reset per test.
 #[cfg(feature = "diagnostics")]
 pub mod profile {
     use core::sync::atomic::{AtomicU32, Ordering};
-    pub const N: usize = 24;
+    #[cfg(feature = "sd-wide-bench")]
+    pub static DIRECT_TX: core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
+    #[cfg(feature = "sd-wide-bench")]
+    pub static DIRECT_BYTES: AtomicU32 = AtomicU32::new(0);
+    pub const N: usize = 26;
     static COUNTERS: [AtomicU32; N] = [const { AtomicU32::new(0) }; N];
     static DATA_START: AtomicU32 = AtomicU32::new(0);
     static ROOT_START: AtomicU32 = AtomicU32::new(0);
     static ROOT_END: AtomicU32 = AtomicU32::new(0);
+    pub fn host() -> [u32; 2] {
+        [super::read(0x4c), super::read(0x80)]
+    }
     pub fn add(i: usize, n: u64) {
         COUNTERS[i].fetch_add(n as u32, Ordering::Relaxed);
     }
@@ -1138,6 +1205,19 @@ pub mod profile {
                     && end <= u64::from(ROOT_END.load(Ordering::Relaxed)))
     }
 }
+fn direct_tx_address(cpu: usize, len: usize) -> Option<usize> {
+    let end = cpu.checked_add(len)?;
+    if len == 0 || !len.is_multiple_of(512) || !cpu.is_multiple_of(64) {
+        return None;
+    }
+    if cpu >= 0x4ff00000 && end <= 0x4ffc0000 {
+        Some(cpu)
+    } else if cpu >= 0x88000000 && end <= 0x8a000000 {
+        Some(cpu - 0x40000000)
+    } else {
+        None
+    }
+}
 pub struct Request {
     cmd: u8,
     arg: u32,
@@ -1148,6 +1228,7 @@ pub struct Request {
     transaction_deadline: u64,
     seen: u32,
     claimed: bool,
+    direct_cpu: Option<usize>,
     #[cfg(feature = "diagnostics")]
     profile_start: u64,
     #[cfg(feature = "diagnostics")]
@@ -1167,6 +1248,7 @@ impl Request {
             transaction_deadline: 0,
             seen: 0,
             claimed: false,
+            direct_cpu: None,
             #[cfg(feature = "diagnostics")]
             profile_start: 0,
             #[cfg(feature = "diagnostics")]
@@ -1179,6 +1261,12 @@ impl Request {
     fn profile_phase(&mut self, index: usize, timer: &mut Timer) {
         let now = timer.now_us();
         profile::add(index, now - self.profile_mark);
+        if index == 7 {
+            profile::add(
+                if self.profile_metadata { 24 } else { 25 },
+                now - self.profile_mark,
+            );
+        }
         self.profile_mark = now;
     }
     fn issue(&mut self, cmd: u8, arg: u32, flags: u32, timer: &mut Timer) {
@@ -1205,7 +1293,7 @@ impl Request {
 impl Drop for Request {
     fn drop(&mut self) {
         if self.claimed {
-            // Cancellation never exposes user memory to DMA. Quarantine this
+            // Stop DMA before releasing any direct source borrow. Quarantine this
             // controller until explicit host/card initialization after abort.
             ASYNC_FAULT.store(true, core::sync::atomic::Ordering::Release);
             self.stop();
@@ -1232,6 +1320,32 @@ impl Sdmmc {
         let arg = transfer_argument(lba, len, self.info.sectors, self.info.ocr)
             .ok_or_else(|| error(cmd))?;
         Ok(Request::new(cmd, arg, len, true))
+    }
+    /// Direct TX up to 32KiB; ordinary read/write requests retain their small bounce buffer.
+    /// # Safety
+    /// `bytes` must remain alive, immutable and at the same address until this
+    /// request completes or its Drop has quiesced DMA. D-cache must stay bypassed,
+    /// L2 disabled, and no cached PSRAM alias may be used for this allocation.
+    pub unsafe fn request_write_direct(&self, lba: u32, bytes: &[u8]) -> Result<Request, Error> {
+        let cache = super::memory::cache_snapshot();
+        if cache.l1_bypass & 16 == 0
+            || cache.l2_size != 0
+            || direct_tx_address(bytes.as_ptr() as usize, bytes.len()).is_none()
+        {
+            return Err(error(25));
+        }
+        let len = bytes.len();
+        if len > MAX_DIRECT_TRANSFER
+            || !len.is_multiple_of(512)
+            || u64::from(lba) + (len / 512) as u64 > self.info.sectors
+        {
+            return Err(error(25));
+        }
+        let arg = transfer_argument(lba, 512, self.info.sectors, self.info.ocr)
+            .ok_or_else(|| error(25))?;
+        let mut req = Request::new(if len == 512 { 24 } else { 25 }, arg, len, true);
+        req.direct_cpu = Some(bytes.as_ptr() as usize);
+        Ok(req)
     }
     /// Advance without a hardware wait loop. Each pending wait is woken by the
     /// SDMMC ISR, with the scoped timer tick providing timeout/reset progress.
@@ -1290,20 +1404,34 @@ impl Sdmmc {
                             let b = input
                                 .filter(|b| b.len() == req.len)
                                 .ok_or_else(|| error(req.cmd))?;
-                            for (i, b) in b.as_chunks::<4>().0.iter().enumerate() {
-                                unsafe {
-                                    (*core::ptr::addr_of_mut!(DMA_BUFFER)).0[i] =
-                                        u32::from_le_bytes(*b);
+                            let direct = req.direct_cpu.is_some();
+                            if let Some(cpu) = req.direct_cpu {
+                                if b.as_ptr() as usize != cpu {
+                                    return Err(error(req.cmd));
                                 }
+                                #[cfg(feature = "sd-wide-bench")]
+                                profile::DIRECT_BYTES.fetch_add(b.len() as u32, Ordering::Relaxed);
+                            }
+                            if !direct {
+                                // The active request exclusively owns this static workspace.
+                                copy_to_dma(b, unsafe {
+                                    &mut (&mut (*core::ptr::addr_of_mut!(DMA_BUFFER)).0)
+                                        [..b.len() / 4]
+                                });
                             }
                         } else if out.len() != req.len {
                             return Err(error(req.cmd));
                         }
                         let desc = core::ptr::addr_of_mut!(ASYNC_DESCRIPTORS);
                         let data = core::ptr::addr_of_mut!(DMA_BUFFER) as usize;
+                        let data = if let Some(cpu) = req.direct_cpu {
+                            direct_tx_address(cpu, req.len).ok_or_else(|| error(req.cmd))?
+                        } else {
+                            data
+                        };
                         let count = req.len.div_ceil(DMA_CHUNK);
                         unsafe {
-                            (*desc).0 = [[0; 16]; MAX_TRANSFER / DMA_CHUNK];
+                            (*desc).0 = [[0; 16]; MAX_DIRECT_TRANSFER / DMA_CHUNK];
                             for i in 0..count {
                                 let last = i + 1 == count;
                                 (*desc).0[i][0] = (1 << 31)
@@ -1320,7 +1448,12 @@ impl Sdmmc {
                             }
                         }
                         sync_cache(desc as usize, count * 64, 8, timer)?;
-                        sync_cache(data, req.len.next_multiple_of(64), 8, timer)?;
+                        let direct = req.direct_cpu.is_some();
+                        // Direct TX is uncached and read-only to DMA. Descriptor sync
+                        // also supplies the publication fence for the source writes.
+                        if !direct {
+                            sync_cache(data, req.len.next_multiple_of(64), 8, timer)?;
+                        }
                         write(0, 6);
                         req.phase = AsyncPhase::FifoReset;
                         req.deadline = timer.now_us() + 500_000;
@@ -1342,7 +1475,7 @@ impl Sdmmc {
                         write(0x1c, 512);
                         write(0x20, req.len as u32);
                         write(0, (1 << 25) | (1 << 5) | (1 << 4));
-                        write(0x80, (1 << 7) | (1 << 1) | (2 << 8));
+                        write(0x80, (1 << 7) | (1 << 1));
                         #[cfg(feature = "diagnostics")]
                         req.profile_phase(4, timer);
                         req.issue(
@@ -1391,12 +1524,15 @@ impl Sdmmc {
                         }
                         let desc = core::ptr::addr_of!(ASYNC_DESCRIPTORS);
                         sync_cache(desc as usize, req.len.div_ceil(DMA_CHUNK) * 64, 1, timer)?;
-                        sync_cache(
-                            core::ptr::addr_of!(DMA_BUFFER) as usize,
-                            req.len.next_multiple_of(64),
-                            1,
-                            timer,
-                        )?;
+                        let direct = req.direct_cpu.is_some();
+                        if !direct {
+                            sync_cache(
+                                core::ptr::addr_of!(DMA_BUFFER) as usize,
+                                req.len.next_multiple_of(64),
+                                1,
+                                timer,
+                            )?;
+                        }
                         for i in 0..req.len.div_ceil(DMA_CHUNK) {
                             if unsafe { (*desc).0[i].as_ptr().read_volatile() }
                                 & ((1 << 31) | (1 << 30))

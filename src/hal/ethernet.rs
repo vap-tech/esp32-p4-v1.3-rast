@@ -205,6 +205,11 @@ impl<'a, 't> Emac<'a, 't> {
             counter.store(0, core::sync::atomic::Ordering::Relaxed);
         }
     }
+    /// Read-to-clear RX buffer/FIFO loss counters, diagnostics owns sampling.
+    #[cfg(feature = "diagnostics")]
+    pub fn take_rx_losses(&mut self) -> u32 {
+        read(DMA + 0x20)
+    }
     pub fn status(&self) -> [u32; 6] {
         [
             read(DMA + 0x14),

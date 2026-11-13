@@ -24,6 +24,10 @@ pub(crate) trait Port {
         None
     }
 
+    #[cfg(feature = "diagnostics")]
+    fn take_rx_losses(&mut self) -> u32 {
+        0
+    }
     fn wired_stats(&self) -> Option<[u32; 6]> {
         None
     }
@@ -41,6 +45,10 @@ pub(crate) trait Port {
     fn status(&self) -> [u32; 6];
 }
 impl Port for hal::ethernet::Emac<'_, '_> {
+    #[cfg(feature = "diagnostics")]
+    fn take_rx_losses(&mut self) -> u32 {
+        hal::ethernet::Emac::take_rx_losses(self)
+    }
     fn wired_stats(&self) -> Option<[u32; 6]> {
         Some(self.stats())
     }
@@ -72,10 +80,18 @@ impl Port for hal::ethernet::Emac<'_, '_> {
 static mut SOCKETS: [tcp::Storage<'static>; tcp::SLOTS] =
     [const { tcp::Storage::EMPTY }; tcp::SLOTS];
 static mut CLIPBOARD: http::Text<1024> = http::Text::new();
+#[derive(Clone, Copy, Debug, Default)]
+struct WriteStats {
+    direct_bytes: u64,
+    direct_requests: u32,
+    bounce_bytes: u64,
+}
 struct Card<'a, P: Port> {
     card: hal::sdmmc::Sdmmc,
     port: &'a RefCell<P>,
     busy: &'a Cell<bool>,
+    direct_psram: bool,
+    writes: &'a Cell<WriteStats>,
 }
 struct Busy<'a>(&'a Cell<bool>);
 impl Drop for Busy<'_> {
@@ -89,42 +105,82 @@ impl<P: Port> disk::BlockDevice for Card<'_, P> {
         self.card.info.sectors
     }
     fn max_transfer_bytes(&self) -> usize {
-        hal::sdmmc::MAX_TRANSFER
+        hal::sdmmc::MAX_DIRECT_TRANSFER
     }
     async fn read(&mut self, lba: u64, out: &mut [u8]) -> Result<(), Self::Error> {
-        esp32_p4::runtime::yield_now().await;
-        let lba = u32::try_from(lba).map_err(|_| Self::Error::AddressOverflow)?;
-        let mut request = self
-            .card
-            .request_read(lba, out.len())
+        for (index, part) in out.chunks_mut(hal::sdmmc::MAX_TRANSFER).enumerate() {
+            esp32_p4::runtime::yield_now().await;
+            let address = lba + (index * hal::sdmmc::MAX_TRANSFER / 512) as u64;
+            let mut request = self
+                .card
+                .request_read(
+                    u32::try_from(address).map_err(|_| Self::Error::AddressOverflow)?,
+                    part.len(),
+                )
+                .map_err(Self::Error::Card)?;
+            assert!(!self.busy.replace(true));
+            let _busy = Busy(self.busy);
+            core::future::poll_fn(|cx| {
+                self.port
+                    .borrow_mut()
+                    .with_timer(|timer| self.card.poll_request(&mut request, cx, timer, part, None))
+            })
+            .await
             .map_err(Self::Error::Card)?;
-        assert!(!self.busy.replace(true));
-        let _busy = Busy(self.busy);
-        core::future::poll_fn(|cx| {
-            self.port
-                .borrow_mut()
-                .with_timer(|timer| self.card.poll_request(&mut request, cx, timer, out, None))
-        })
-        .await
-        .map_err(Self::Error::Card)
+        }
+        Ok(())
     }
     async fn write(&mut self, lba: u64, bytes: &[u8]) -> Result<(), Self::Error> {
-        esp32_p4::runtime::yield_now().await;
-        let lba = u32::try_from(lba).map_err(|_| Self::Error::AddressOverflow)?;
-        let mut request = self
-            .card
-            .request_write(lba, bytes.len())
+        #[allow(unused_mut)]
+        let mut direct = self.direct_psram
+            && bytes.as_ptr() as usize >= 0x88000000
+            && (bytes.as_ptr() as usize)
+                .checked_add(bytes.len())
+                .is_some_and(|end| end <= 0x8a000000)
+            && (bytes.as_ptr() as usize).is_multiple_of(64)
+            && bytes.len().is_multiple_of(512);
+        #[cfg(feature = "sd-wide-bench")]
+        {
+            direct |= hal::sdmmc::profile::DIRECT_TX.load(core::sync::atomic::Ordering::Relaxed)
+                && bytes.len() == 32768;
+        }
+        let chunk = if direct {
+            hal::sdmmc::MAX_DIRECT_TRANSFER
+        } else {
+            hal::sdmmc::MAX_TRANSFER
+        };
+        for (index, part) in bytes.chunks(chunk).enumerate() {
+            esp32_p4::runtime::yield_now().await;
+            let address = u32::try_from(lba + (index * chunk / 512) as u64)
+                .map_err(|_| Self::Error::AddressOverflow)?;
+            let mut request = if direct {
+                // SAFETY: this future holds the immutable source borrow across all
+                // polls; Request::Drop quiesces DMA before that borrow is released.
+                unsafe { self.card.request_write_direct(address, part) }
+            } else {
+                self.card.request_write(address, part.len())
+            }
             .map_err(Self::Error::Card)?;
-        assert!(!self.busy.replace(true));
-        let _busy = Busy(self.busy);
-        core::future::poll_fn(|cx| {
-            self.port.borrow_mut().with_timer(|timer| {
-                self.card
-                    .poll_request(&mut request, cx, timer, &mut [], Some(bytes))
+            assert!(!self.busy.replace(true));
+            let _busy = Busy(self.busy);
+            core::future::poll_fn(|cx| {
+                self.port.borrow_mut().with_timer(|timer| {
+                    self.card
+                        .poll_request(&mut request, cx, timer, &mut [], Some(part))
+                })
             })
-        })
-        .await
-        .map_err(Self::Error::Card)
+            .await
+            .map_err(Self::Error::Card)?;
+            let mut stats = self.writes.get();
+            if direct {
+                stats.direct_bytes += part.len() as u64;
+                stats.direct_requests += 1;
+            } else {
+                stats.bounce_bytes += part.len() as u64;
+            }
+            self.writes.set(stats);
+        }
+        Ok(())
     }
     async fn sync(&mut self) -> Result<(), Self::Error> {
         Ok(())
@@ -286,13 +342,29 @@ struct Network<'a, 'c, P: Port> {
     deadline: u64,
     stop: bool,
     rx_errors: u32,
+    #[cfg(feature = "diagnostics")]
+    losses: [u64; 4],
+    #[cfg(feature = "diagnostics")]
+    last_tick: u64,
+    #[cfg(feature = "diagnostics")]
+    max_tick_gap: u64,
     ticks: u64,
     poll_us: u64,
     read_empty: u64,
     write_full: u64,
+    writes: &'a Cell<WriteStats>,
     busy: &'a Cell<bool>,
 }
 impl<P: Port> Network<'_, '_, P> {
+    #[cfg(feature = "diagnostics")]
+    fn sample_losses(&mut self) -> [u64; 4] {
+        let raw = self.port.borrow_mut().take_rx_losses();
+        self.losses[0] += u64::from(raw & 0xffff);
+        self.losses[1] += u64::from((raw >> 17) & 0x7ff);
+        self.losses[2] += u64::from((raw >> 16) & 1);
+        self.losses[3] += u64::from((raw >> 28) & 1);
+        self.losses
+    }
     // Complete the current bounded FS operation before honoring ESC/deadline.
     // Cancelling its DMA halfway through would quarantine the shared controller.
     fn io_tick(&mut self) -> Result<(), web::Error> {
@@ -310,6 +382,13 @@ impl<P: Port> Network<'_, '_, P> {
         if self.stop || now >= self.deadline {
             return Err(web::Error::Transport);
         }
+        #[cfg(feature = "diagnostics")]
+        {
+            if self.last_tick != 0 {
+                self.max_tick_gap = self.max_tick_gap.max(now - self.last_tick);
+            }
+            self.last_tick = now;
+        }
         let mut error = None;
         let mut device = NetDevice {
             port: self.port,
@@ -324,6 +403,10 @@ impl<P: Port> Network<'_, '_, P> {
         };
         self.tcp.poll(now, &mut device);
         self.ticks += 1;
+        #[cfg(feature = "diagnostics")]
+        if self.ticks.is_multiple_of(256) {
+            self.sample_losses();
+        }
         self.poll_us += self.port.borrow_mut().now_us() - now;
         if let Some(error) = error {
             return Err(error);
@@ -416,8 +499,35 @@ pub fn run(
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
     panel: &mut esp32_p4::devices::jd9165::Display,
+    external: &mut memory::Arena<'_, memory::External>,
 ) -> Result<(), web::Error> {
-    run_mode(seconds, arena, timer, console, panel, None)
+    if external.stats().used != 0 {
+        return Err(web::Error::Storage);
+    }
+    let result = run_mode(
+        seconds,
+        arena,
+        timer,
+        console,
+        panel,
+        Resources {
+            external: Some(external),
+            benchmark: None,
+        },
+    );
+    external.reset();
+    result
+}
+struct Resources<'a, 'mem> {
+    external: Option<&'a memory::Arena<'mem, memory::External>>,
+    benchmark: Option<StorageBench<'a>>,
+}
+struct StorageBench<'a> {
+    #[cfg(feature = "diagnostics")]
+    mib: u32,
+    #[cfg(feature = "sd-wide-bench")]
+    psram: &'a mut [u8],
+    _lifetime: core::marker::PhantomData<&'a mut ()>,
 }
 #[cfg(feature = "diagnostics")]
 pub fn run_storage_bench(
@@ -426,8 +536,37 @@ pub fn run_storage_bench(
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
     panel: &mut esp32_p4::devices::jd9165::Display,
+    #[cfg(feature = "sd-wide-bench")] external: &mut memory::Arena<'_, memory::External>,
 ) -> Result<(), web::Error> {
-    run_mode(600, arena, timer, console, panel, Some(mib))
+    #[cfg(feature = "sd-wide-bench")]
+    if external.stats().used != 0 {
+        return Err(web::Error::Storage);
+    }
+    let result = {
+        #[cfg(feature = "sd-wide-bench")]
+        let mut buffer = external
+            .allocate(core::alloc::Layout::from_size_align(32768 + 128, 64).unwrap())
+            .map_err(|_| web::Error::Storage)?;
+        run_mode(
+            600,
+            arena,
+            timer,
+            console,
+            panel,
+            Resources {
+                external: None,
+                benchmark: Some(StorageBench {
+                    mib,
+                    #[cfg(feature = "sd-wide-bench")]
+                    psram: buffer.as_mut_slice(),
+                    _lifetime: core::marker::PhantomData,
+                }),
+            },
+        )
+    };
+    #[cfg(feature = "sd-wide-bench")]
+    external.reset();
+    result
 }
 #[inline(never)]
 fn run_mode(
@@ -436,7 +575,7 @@ fn run_mode(
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
     panel: &mut esp32_p4::devices::jd9165::Display,
-    benchmark_mib: Option<u32>,
+    resources: Resources<'_, '_>,
 ) -> Result<(), web::Error> {
     let cache = hal::memory::cache_snapshot();
     if cache.l1_bypass & 16 == 0 || cache.l2_size != 0 {
@@ -464,7 +603,7 @@ fn run_mode(
         unsafe { hal::ethernet::Emac::start(arena, timer, net::MAC) }
             .map_err(|_| web::Error::Transport)?,
     );
-    serve(&port, card, arena, seconds, console, panel, benchmark_mib)
+    serve(&port, card, arena, seconds, console, panel, resources)
 }
 #[cfg(feature = "wifi")]
 pub fn run_wifi(
@@ -486,7 +625,18 @@ pub fn run_wifi(
     let outcome =
         crate::wifi::with_default_link(timer, console, |link, address, timer, console| {
             let port = RefCell::new(crate::wifi::WifiPort::new(link, address, timer));
-            match serve(&port, card, arena, seconds, console, panel, None) {
+            match serve(
+                &port,
+                card,
+                arena,
+                seconds,
+                console,
+                panel,
+                Resources {
+                    external: None,
+                    benchmark: None,
+                },
+            ) {
                 Ok(()) => Ok(()),
                 Err(e) => {
                     detail = Some(e);
@@ -507,13 +657,18 @@ fn serve<P: Port>(
     seconds: u32,
     console: &mut hal::usb_serial::Console,
     panel: &mut esp32_p4::devices::jd9165::Display,
-    benchmark_mib: Option<u32>,
+    resources: Resources<'_, '_>,
 ) -> Result<(), web::Error> {
+    let Resources {
+        external,
+        benchmark: benchmark_mib,
+    } = resources;
     #[cfg(not(feature = "diagnostics"))]
     let _ = benchmark_mib;
     let mut asset = FlashPage::open()?;
     let xid = port.borrow_mut().now_us() as u32;
     let busy = Cell::new(false);
+    let writes = Cell::new(WriteStats::default());
     // Queue storage is a scoped SRAM lease; 88KiB is reclaimed when web-run ends.
     let mut allocation = arena
         .allocate(
@@ -546,11 +701,18 @@ fn serve<P: Port>(
         deadline: start + u64::from(seconds) * 1_000_000,
         stop: false,
         rx_errors: 0,
+        #[cfg(feature = "diagnostics")]
+        losses: [0; 4],
+        #[cfg(feature = "diagnostics")]
+        last_tick: 0,
+        #[cfg(feature = "diagnostics")]
+        max_tick_gap: 0,
         ticks: 0,
         poll_us: 0,
         read_empty: 0,
         write_full: 0,
         busy: &busy,
+        writes: &writes,
     };
     let mut offer = None;
     let mut next = 0;
@@ -608,6 +770,8 @@ fn serve<P: Port>(
                 card,
                 port,
                 busy: &busy,
+                direct_psram: external.is_some(),
+                writes: &writes,
             },
             0,
         ),
@@ -628,9 +792,23 @@ fn serve<P: Port>(
     let scratch = scratch_allocation.as_mut_slice();
     #[cfg(feature = "diagnostics")]
     {
-        if let Some(mib) = benchmark_mib {
-            let result =
-                storage_lab::run(&mut fs, port, network.borrow_mut().console, scratch, mib);
+        if let Some(bench) = benchmark_mib {
+            let lcd_before = panel.framebuffer_status();
+            let result = storage_lab::run(
+                &mut fs,
+                port,
+                network.borrow_mut().console,
+                scratch,
+                bench.mib,
+                #[cfg(feature = "sd-wide-bench")]
+                bench.psram,
+            );
+            let _ = writeln!(
+                network.borrow_mut().console,
+                "SD FILE BENCH LCD before={:08x?} after={:08x?}",
+                lcd_before,
+                panel.framebuffer_status()
+            );
             let cleanup = esp32_p4::runtime::run(fs.shutdown(), || Ok::<(), web::Error>(()))?
                 .map_err(|_| web::Error::Storage);
             return result.and(cleanup);
@@ -639,15 +817,17 @@ fn serve<P: Port>(
     }
     let _ = writeln!(
         network.borrow_mut().console,
-        "WEB READY http://{}.{}.{}.{}/ seconds={} FS=async-fat handles=5 metadata={}B parallel-files ESC=stop",
+        "WEB READY http://{}.{}.{}.{}/ seconds={} FS=async-fat handles=5 metadata={}B parallel-files staging={} ESC=stop",
         a[0],
         a[1],
         a[2],
         a[3],
         seconds,
-        core::mem::size_of_val(&fs)
+        core::mem::size_of_val(&fs),
+        if external.is_some() { "PSRAM32K" } else { "SRAM" }
     );
 
+    let mut staging = web::upload::UploadPool::<{ tcp::SLOTS }>::new(external);
     let mut requests = 0;
     let mut transfers = [files::Transfer::Idle; tcp::SLOTS];
     let mut progress = [port.borrow_mut().now_us(); tcp::SLOTS];
@@ -668,7 +848,14 @@ fn serve<P: Port>(
                 Err(web::Error::Transport)
             } else {
                 esp32_p4::runtime::run(
-                    files::step(&mut transfers[slot], slot, &mut fs, &network, scratch),
+                    files::step(
+                        &mut transfers[slot],
+                        slot,
+                        &mut fs,
+                        &network,
+                        scratch,
+                        &mut staging,
+                    ),
                     || network.borrow_mut().io_tick(),
                 )
                 .and_then(|r| r)
@@ -687,7 +874,7 @@ fn serve<P: Port>(
                 }
                 Err(error) => {
                     let cleanup = esp32_p4::runtime::run(
-                        files::cancel(&mut transfers[slot], &mut fs),
+                        files::cancel(&mut transfers[slot], &mut fs, &mut staging, slot),
                         || network.borrow_mut().io_tick(),
                     )
                     .and_then(|r| r);
@@ -758,12 +945,23 @@ fn serve<P: Port>(
                     used: 0,
                 };
                 #[cfg(feature = "diagnostics")]
-                let trace = storage_lab::HttpTrace::begin(port.borrow_mut().now_us());
-                let result =
-                    esp32_p4::runtime::run(files::start(r, &mut fs, &mut connection), || {
-                        network.borrow_mut().io_tick()
-                    })
-                    .and_then(|r| r);
+                let trace = {
+                    let mut net = network.borrow_mut();
+                    let losses = net.sample_losses();
+                    net.max_tick_gap = 0;
+                    // Separate statements drop the timer borrow before reading
+                    // EMAC counters from the same RefCell (argument temporaries
+                    // otherwise live until the entire function call ends).
+                    let now = port.borrow_mut().now_us();
+                    let emac = port.borrow().wired_stats().unwrap_or([0; 6]);
+                    storage_lab::HttpTrace::begin(now, net.poll_us, losses, emac)
+                };
+                let started = port.borrow_mut().now_us();
+                let result = esp32_p4::runtime::run(
+                    files::start(r, &mut fs, &mut connection, &mut staging, slot, started),
+                    || network.borrow_mut().io_tick(),
+                )
+                .and_then(|r| r);
                 match result {
                     #[allow(unused_mut)]
                     Ok(mut transfer) => {
@@ -896,6 +1094,13 @@ fn serve<P: Port>(
             requests
         );
     };
+    let _ = writeln!(
+        network.borrow_mut().console,
+        "WEB STAGING allocated_slots={} peak_active={} chunk={}",
+        staging.stats().0,
+        staging.stats().1,
+        web::upload::CHUNK
+    );
     let cleanup = esp32_p4::runtime::run(fs.shutdown(), || network.borrow_mut().io_tick())
         .and_then(|r| r.map_err(|_| web::Error::Storage));
     for (slot, transfer) in transfers.iter().enumerate() {

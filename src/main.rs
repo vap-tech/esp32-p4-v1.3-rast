@@ -264,8 +264,28 @@ extern "C" fn rust_main() -> ! {
                             &mut timer,
                             &mut console,
                             panel,
+                            #[cfg(feature = "sd-wide-bench")]
+                            match large_arena.as_mut() {
+                                Some(arena) => arena,
+                                None => {
+                                    let _ = writeln!(console, "SD FILE BENCH DONE Err(PSRAM)");
+                                    continue;
+                                }
+                            },
                         );
                         dma_arena.reset();
+                        let framebuffer_guards =
+                            framebuffer.as_ref().is_some_and(|fb| fb.guards_ok());
+                        let _ = writeln!(
+                            console,
+                            "SD FILE BENCH framebuffer_guards={}",
+                            framebuffer_guards
+                        );
+                        let result = result.and(if framebuffer_guards {
+                            Ok(())
+                        } else {
+                            Err(esp32_p4::web::Error::Storage)
+                        });
                         let _ = writeln!(
                             console,
                             "SD FILE BENCH DONE {:?} stack={:?}",
@@ -486,8 +506,18 @@ extern "C" fn rust_main() -> ! {
                             let _ = writeln!(console, "WEB RUN DONE Err(display unavailable)");
                             continue;
                         };
-                        let result =
-                            web_server::run(seconds, &dma_arena, &mut timer, &mut console, panel);
+                        let Some(external) = large_arena.as_mut() else {
+                            let _ = writeln!(console, "WEB RUN DONE Err(PSRAM unavailable)");
+                            continue;
+                        };
+                        let result = web_server::run(
+                            seconds,
+                            &dma_arena,
+                            &mut timer,
+                            &mut console,
+                            panel,
+                            external,
+                        );
                         dma_arena.reset();
                         let _ = writeln!(
                             console,

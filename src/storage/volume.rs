@@ -109,6 +109,11 @@ impl<'io, D: BlockDevice> Volume<'io, D> {
         )
         .await?;
         let flags = fs.read_status_flags().await?;
+        let (start, end) = fs.fat_region_bytes();
+        stream
+            .borrow_mut()
+            .configure_fat_cache(start, end)
+            .map_err(embedded_fatfs::Error::Io)?;
         Ok(Self::Fat(FatVolume {
             fs,
             stream,
@@ -125,10 +130,12 @@ impl<'io, D: BlockDevice> Volume<'io, D> {
         self.fat().stream.borrow().capacity()
     }
     pub fn needs_recovery(&self) -> bool {
-        self.fat().dirty_at_mount || self.fat().poisoned.get()
+        self.fat().dirty_at_mount
+            || self.fat().poisoned.get()
+            || self.fat().stream.borrow().fat_flush_failed()
     }
     pub(super) fn readable(&self) -> Result<(), Error<D::Error>> {
-        if self.fat().poisoned.get() {
+        if self.fat().poisoned.get() || self.fat().stream.borrow().fat_flush_failed() {
             Err(Error::NeedsRecovery)
         } else {
             Ok(())
@@ -339,11 +346,18 @@ impl<D: BlockDevice> Writer<'_, '_, D> {
         self.len == 0
     }
     pub async fn write(&mut self, b: &[u8]) -> Result<(), Error<D::Error>> {
+        let _scope = Stream::defer_file_fat(self.fat.stream);
         self.file.as_mut().unwrap().write_all(b).await?;
         self.len += b.len() as u64;
         Ok(())
     }
     pub async fn finish(mut self) -> Result<(), Error<D::Error>> {
+        self.fat
+            .stream
+            .borrow_mut()
+            .flush_fat()
+            .await
+            .map_err(embedded_fatfs::Error::Io)?;
         self.file.take().unwrap().close().await?;
         self.fat.fs.flush().await?;
         self.fat
@@ -356,6 +370,12 @@ impl<D: BlockDevice> Writer<'_, '_, D> {
         Ok(())
     }
     pub async fn abort(mut self) -> Result<(), Error<D::Error>> {
+        self.fat
+            .stream
+            .borrow_mut()
+            .flush_fat()
+            .await
+            .map_err(embedded_fatfs::Error::Io)?;
         self.file.take().unwrap().close().await?;
         let p = core::str::from_utf8(&self.path[..self.path_len]).unwrap();
         self.fat.fs.root_dir().remove(p).await?;
@@ -616,9 +636,12 @@ mod tests {
                 files.seek(temp, 0).await,
                 Err(Error::AccessDenied)
             ));
-            let block = [0xa7; 16384];
+            let block = [0xa7; crate::storage::files::QUANTUM * 2];
             for _ in 0..12 {
-                assert_eq!(files.write(a, &block).await.unwrap(), 8192);
+                assert_eq!(
+                    files.write(a, &block).await.unwrap(),
+                    crate::storage::files::QUANTUM
+                );
                 assert_eq!(files.write(b, &block[..1003]).await.unwrap(), 1003);
                 files.write(temp, b"23.5\n").await.unwrap();
                 files.write(errors, b"alert\n").await.unwrap();
@@ -649,7 +672,10 @@ mod tests {
                 files.rename("/image-a.bin", "/moved.bin").await,
                 Err(Error::Busy)
             ));
-            assert_eq!(files.info(a).unwrap().len, 12 * 8192);
+            assert_eq!(
+                files.info(a).unwrap().len,
+                12 * crate::storage::files::QUANTUM as u64
+            );
             files.close(a).await.unwrap();
             let replacement = files.open("/new.bin", OpenMode::CreateNew).await.unwrap();
             assert!(matches!(files.info(a), Err(Error::InvalidHandle)));
@@ -845,5 +871,168 @@ mod tests {
             assert!(s.seek(SeekFrom::Start(0)).await.is_ok());
             assert!(s.seek(SeekFrom::Current(-1)).await.is_err());
         });
+    }
+    #[derive(Clone, Debug)]
+    enum AuditEvent {
+        Write(u64, std::vec::Vec<u8>),
+        Sync,
+    }
+    struct AuditDisk {
+        disk: Disk,
+        events: Rc<RefCell<std::vec::Vec<AuditEvent>>>,
+        fail_lba: Rc<Cell<Option<u64>>>,
+    }
+    impl BlockDevice for AuditDisk {
+        type Error = Fault;
+        fn sectors(&self) -> u64 {
+            self.disk.sectors
+        }
+        fn max_transfer_bytes(&self) -> usize {
+            8192
+        }
+        async fn read(&mut self, lba: u64, out: &mut [u8]) -> Result<(), Fault> {
+            crate::storage::BlockDevice::read(&mut self.disk, lba, out)
+        }
+        async fn write(&mut self, lba: u64, bytes: &[u8]) -> Result<(), Fault> {
+            if self
+                .fail_lba
+                .get()
+                .is_some_and(|n| n >= lba && n < lba + (bytes.len() / 512) as u64)
+            {
+                return Err(Fault);
+            }
+            crate::storage::BlockDevice::write(&mut self.disk, lba, bytes)?;
+            self.events
+                .borrow_mut()
+                .push(AuditEvent::Write(lba, bytes.to_vec()));
+            Ok(())
+        }
+        async fn sync(&mut self) -> Result<(), Fault> {
+            self.events.borrow_mut().push(AuditEvent::Sync);
+            Ok(())
+        }
+    }
+    #[test]
+    fn fat_checkpoint_precedes_directory_publication_and_clean_marker() {
+        use crate::storage::files::{FileTable, OpenMode};
+        for fail_mirror in [false, true] {
+            let plan = crate::storage::format::Plan::new(131072).unwrap();
+            let fat1 = u64::from(plan.start) + u64::from(plan.reserved);
+            let fat2 = fat1 + u64::from(plan.fat_sectors);
+            let root = u64::from(plan.start + plan.data_start);
+            let log = Rc::new(RefCell::new(std::vec::Vec::new()));
+            let fail = Rc::new(Cell::new(None));
+            let disk = AuditDisk {
+                disk: disk(),
+                events: log.clone(),
+                fail_lba: fail.clone(),
+            };
+            let mut stream = RefCell::new(Stream::new(run(io::Partition::mbr(disk, 0)).unwrap()));
+            let mut volume = run(Volume::mount(&mut stream)).unwrap();
+            let mut files = FileTable::<_, 2>::new(&mut volume);
+            let h = run(files.open("/ORDER.BIN", OpenMode::CreateNew)).unwrap();
+            log.borrow_mut().clear();
+            assert_eq!(run(files.write(h, &[0x3c; 3072])).unwrap(), 3072);
+            assert!(!log
+                .borrow()
+                .iter()
+                .any(|e| matches!(e, AuditEvent::Write(lba,_) if *lba==fat1 || *lba==fat2)));
+            if fail_mirror {
+                fail.set(Some(fat2));
+            }
+            let result = run(files.sync(h));
+            if fail_mirror {
+                assert!(result.is_err());
+                assert!(files.is_poisoned());
+                assert!(log
+                    .borrow()
+                    .iter()
+                    .any(|e| matches!(e, AuditEvent::Write(lba,_) if *lba==fat1)));
+                assert!(!log
+                    .borrow()
+                    .iter()
+                    .any(|e| matches!(e, AuditEvent::Write(lba,_) if *lba==root)));
+                drop(files);
+                drop(volume);
+                assert!(stream.borrow().has_dirty_fat());
+                assert!(stream.borrow().fat_flush_failed());
+            } else {
+                result.unwrap();
+                let events = log.borrow();
+                let first = events
+                    .iter()
+                    .position(|e| matches!(e, AuditEvent::Write(lba,_) if *lba==fat1))
+                    .unwrap();
+                let second = events
+                    .iter()
+                    .position(|e| matches!(e, AuditEvent::Write(lba,_) if *lba==fat2))
+                    .unwrap();
+                let publish = events
+                    .iter()
+                    .position(|e| matches!(e, AuditEvent::Write(lba,_) if *lba==root))
+                    .unwrap();
+                assert!(first < publish && second < publish);
+                assert!(events[second + 1..publish]
+                    .iter()
+                    .any(|e| matches!(e, AuditEvent::Sync)));
+                assert!(!events.iter().any(|e| matches!(e, AuditEvent::Write(lba,b) if *lba==u64::from(plan.start) && b[0x41]&1==0)));
+                drop(events);
+                run(files.close(h)).unwrap();
+                let events = log.borrow();
+                let clean = events.iter().rposition(|e| matches!(e, AuditEvent::Write(lba,b) if *lba==u64::from(plan.start)+6 && b[0x41]&1==0)).unwrap();
+                assert!(events[clean + 1..]
+                    .iter()
+                    .all(|e| matches!(e, AuditEvent::Sync)));
+                drop(events);
+                drop(files);
+                drop(volume);
+                assert!(!stream.borrow().has_dirty_fat());
+                let mut remount = run(Volume::mount(&mut stream)).unwrap();
+                assert!(!remount.needs_recovery());
+                let mut file = run(remount.open("/ORDER.BIN")).unwrap();
+                let mut out = [0; 3072];
+                run(async {
+                    let mut at = 0;
+                    while at < out.len() {
+                        at += file.read(&mut out[at..]).await.unwrap();
+                    }
+                });
+                assert_eq!(out, [0x3c; 3072]);
+            }
+        }
+    }
+    #[test]
+    fn cached_fat12_and_fat16_cross_sector_chains_remount_correctly() {
+        use embedded_fatfs::{FatType, FormatVolumeOptions};
+        for (kind, sectors) in [(FatType::Fat12, 4096), (FatType::Fat16, 16384)] {
+            let mut stream = RefCell::new(Stream::new(Disk::new(sectors)));
+            run(embedded_fatfs::format_volume(
+                &mut *stream.borrow_mut(),
+                FormatVolumeOptions::new()
+                    .fat_type(kind)
+                    .bytes_per_cluster(512)
+                    .total_sectors(sectors as u32),
+            ))
+            .unwrap();
+            {
+                let mut v = run(Volume::mount(&mut stream)).unwrap();
+                let mut w = run(v.create_new("/CHAIN.BIN")).unwrap();
+                for i in 0..400 {
+                    run(w.write(&[i as u8; 512])).unwrap();
+                }
+                run(w.finish()).unwrap();
+            }
+            let mut v = run(Volume::mount(&mut stream)).unwrap();
+            assert!(!v.needs_recovery());
+            let mut file = run(v.open("/CHAIN.BIN")).unwrap();
+            for i in 0..400 {
+                let mut out = [0; 512];
+                let mut at = 0;
+                while at < 512 {
+                    at += run(file.read(&mut out[at..])).unwrap();
+                }
+                assert_eq!(out, [i as u8; 512]);
+            }
+        }
     }
 }

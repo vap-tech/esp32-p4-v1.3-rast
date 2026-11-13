@@ -3,6 +3,7 @@ import {readFileSync} from 'node:fs';
 import {gunzipSync} from 'node:zlib';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import {xhrAdapter} from './frontend-xhr.mjs';
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
 for (const page of ['index.html', 'demo.html']) {
@@ -41,6 +42,9 @@ for (const page of ['index.html', 'demo.html']) {
       }));
     },
   });
+  sandbox.XMLHttpRequest = xhrAdapter((...args) => sandbox.fetch(...args));
+  sandbox.performance = {now: () => 0};
+  sandbox.setInterval = () => 1; sandbox.clearInterval = () => {};
   const script = readFileSync(new URL('../frontend/' + page, import.meta.url), 'utf8')
     .match(/<script>([\s\S]*?)<\/script>/)[1];
   // Use the real shared app, replacing only demo's in-memory fetch adapter.

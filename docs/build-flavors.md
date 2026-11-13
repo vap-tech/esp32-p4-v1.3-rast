@@ -124,3 +124,9 @@ wifi/software-jpeg/audio-lab/diagnostics; Clippy default, wifi-only, JPEG-only
 Проверка features выполнялась без включения Wi-Fi на плате.
 
 Диагностический файловый SD benchmark и append-маршрут: [storage-write-profile.md](storage-write-profile.md).
+
+`sd-wide-bench` — отдельный экспериментальный образ с 32-КиБ SD-запросами и дополнительной статической SRAM; описание и ограничения: [sd-write-batching.md](sd-write-batching.md).
+
+Обновление sd-wide-bench: теперь четыре пути SRAM/PSRAM × bounce/direct, все по 32 КиБ; [результаты и контракт DMA](sd-psram-dma.md).
+
+Прямой TX и 32-КиБ FileTable теперь доступны в default для проводного PSRAM upload; большие SRAM statics остаются диагностическими. [Описание](web-psram-upload.md).

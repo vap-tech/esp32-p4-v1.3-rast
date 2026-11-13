@@ -614,6 +614,14 @@ impl<IO: ReadWriteSeek, TP, OCC> FileSystem<IO, TP, OCC> {
         self.flush().await
     }
 
+    /// Byte range covering all physical FAT copies, from the validated BPB.
+    /// A block adapter may cache only this region and preserve metadata barriers.
+    pub fn fat_region_bytes(&self) -> (u64, u64) {
+        let start = self.bpb.bytes_from_sectors(self.bpb.reserved_sectors());
+        let end = start + self.bpb.bytes_from_sectors(self.bpb.sectors_per_all_fats());
+        (start, end)
+    }
+
     /// Flushes any in memory state to the filesystem
     ///
     /// Updates the FS Information Sector if needed and clears

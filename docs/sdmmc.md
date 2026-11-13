@@ -399,3 +399,7 @@ random4KiB QD1 по10s на направление. Существующие ф�
 Временный файл удалён, directory fsync выполнен; root имена/размеры до/после совпали.
 Лог target/sd256-reader-benchmark.log, JSON target/sd256-reader-benchmark.json.
 Ранее сохранённый WEBRADIO benchmark относится к старой карте, не к этой.
+
+Сравнение файловой перезаписи P4 с Linux: [sd-write-batching.md](sd-write-batching.md), до 10,28 МиБ/с в коротком 32-КиБ эксперименте без сети.
+
+Прямой DMA из PSRAM с корректным MSIZE дал 14,81 МиБ/с в короткой 32-КиБ перезаписи: [sd-psram-dma.md](sd-psram-dma.md).

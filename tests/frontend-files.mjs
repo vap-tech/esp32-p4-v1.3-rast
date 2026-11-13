@@ -2,6 +2,7 @@
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import {xhrAdapter} from './frontend-xhr.mjs';
 const flush = () => new Promise(r => setImmediate(r));
 for (const page of ['index.html', 'demo.html']) {
   const nodes = new Map(), calls = [], pending = [], opens = [];
@@ -19,6 +20,9 @@ for (const page of ['index.html', 'demo.html']) {
       if(opts.method==='PUT')return new Promise(resolve=>pending.push(()=>resolve({ok:true,status:201})));
       return Promise.resolve({ok:true,status:opts.method==='MKCOL'?201:200,json:async()=>({entries:[]}),text:async()=>''});
     }});
+  ctx.XMLHttpRequest = xhrAdapter((...args) => ctx.fetch(...args));
+  ctx.performance = {now: () => 0};
+  ctx.setInterval = () => 1; ctx.clearInterval = () => {};
   const raw = readFileSync(new URL('../frontend/'+page,import.meta.url),'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
   vm.runInContext(raw.slice(raw.indexOf('const $')),ctx);await flush();
   vm.runInContext('render([{name:"PIC.JPG",dir:false,size:10}])',ctx);
