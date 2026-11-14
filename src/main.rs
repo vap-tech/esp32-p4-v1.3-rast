@@ -16,6 +16,12 @@ mod audio_lab;
 #[cfg(feature = "diagnostics")]
 mod arbitration_lab;
 mod background;
+#[cfg(feature = "lp-lab")]
+mod lp_lab;
+#[cfg(all(feature = "multicore-lab", not(feature = "multicore-queue-lab")))]
+mod multicore_lab;
+#[cfg(feature = "multicore-queue-lab")]
+mod multicore_queue_lab;
 mod recorder;
 mod web_server;
 #[cfg(feature = "wifi")]
@@ -68,6 +74,18 @@ extern "C" fn rust_main() -> ! {
         }
     }
     clock_audit("boot", &mut timer, &mut console);
+    #[cfg(all(feature = "multicore-lab", not(feature = "multicore-queue-lab")))]
+    unsafe {
+        multicore_lab::run(&mut timer, &mut console)
+    };
+    #[cfg(feature = "multicore-queue-lab")]
+    unsafe {
+        multicore_queue_lab::run(&mut timer, &mut console)
+    };
+    #[cfg(feature = "lp-lab")]
+    unsafe {
+        lp_lab::run(&mut timer, &mut console)
+    };
     let backlight_pin = unsafe { hal::gpio::Output::<23>::new_low() };
     let backlight = unsafe { hal::ledc::Pwm::new(backlight_pin) };
     timer.delay_us(100_000);
@@ -168,7 +186,18 @@ extern "C" fn rust_main() -> ! {
     let mut ui_stats = background::Stats::default();
     let mut web_autostart = true;
     let mut web_probe_due = timer.now_us().wrapping_sub(1_000_000);
+    #[cfg(all(
+        feature = "hp-worker",
+        not(any(feature = "multicore-lab", feature = "l2-128"))
+    ))]
+    if let Err(error) = unsafe { esp32_p4::worker::init(&mut timer, &mut console) } {
+        let _ = writeln!(console, "HP WORKER INIT FAILED {}; reset required", error);
+        loop {
+            core::hint::spin_loop();
+        }
+    }
     loop {
+        esp32_p4::worker::poll();
         let mut received = None;
         let mut frame_bytes = [0u8; 96];
         while let Some(byte) = console.read_byte() {
@@ -210,6 +239,9 @@ extern "C" fn rust_main() -> ! {
                     continue;
                 }
             };
+            if esp32_p4::worker::command(name, &mut timer, &mut console) {
+                continue;
+            }
             let command = esp32_p4::console::action(name).unwrap_or(0);
             if matches!(command, b'Q' | b'E' | b'V' | b'G' | b'U') {
                 clock_enabled = false;

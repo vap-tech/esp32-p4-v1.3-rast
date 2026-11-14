@@ -396,6 +396,7 @@ impl<P: Port> Network<'_, '_, '_, P> {
     }
     #[inline(never)]
     fn tick(&mut self) -> Result<(), web::Error> {
+        esp32_p4::worker::poll();
         let now = self.port.borrow_mut().now_us();
         for _ in 0..32 {
             let Some(byte) = self.console.read_byte() else {
@@ -409,7 +410,7 @@ impl<P: Port> Network<'_, '_, '_, P> {
             if let Some(frame) = self.console_input.feed(byte, now) {
                 match frame {
                     Ok("help") => {
-                        let _=writeln!(self.console,"WEB CONSOLE (other hardware commands require ESC)\n  net web serve [arguments]\n  rtc [arguments]\n  display clock [arguments]\n  system services [arguments]\nCONSOLE HELP END");
+                        let _=writeln!(self.console,"WEB CONSOLE (other hardware commands require ESC)\n  net web serve [arguments]\n  rtc [arguments]\n  display clock [arguments]\n  system services [arguments]\n  system worker [arguments]\nCONSOLE HELP END");
                     }
                     Ok("system services") => {
                         if let Some(player) = self.player.as_ref() {
@@ -418,6 +419,13 @@ impl<P: Port> Network<'_, '_, '_, P> {
                         if let Some(ui) = self.services {
                             ui.borrow().report(self.console);
                         }
+                    }
+                    Ok(command)
+                        if command == "system worker" || command.starts_with("system worker ") =>
+                    {
+                        self.port.borrow_mut().with_timer(|timer| {
+                            esp32_p4::worker::command(command, timer, self.console)
+                        });
                     }
                     Ok(command)
                         if command == "net web serve" || command.starts_with("net web serve ") =>

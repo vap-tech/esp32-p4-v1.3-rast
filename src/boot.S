@@ -8,6 +8,17 @@
 .option norelax
 _start:
     csrci mstatus, 8
+    /* HP1 may have been active before a warm HP reset. Hold it in global
+       reset and gate its clock BEFORE cache maintenance or SRAM reload. */
+    li t0, 0x500e60c0
+    lw t1, 0(t0)
+    ori t1, t1, 0x100
+    sw t1, 0(t0)
+    li t0, 0x500e6014
+    lw t1, 0(t0)
+    andi t1, t1, -17
+    sw t1, 0(t0)
+    fence iorw, iorw
     li t0, 0x500e5060
     lw t1, 0(t0)
     ori t1, t1, 1

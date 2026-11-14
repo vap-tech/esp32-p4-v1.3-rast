@@ -4,7 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
+default = ["hp-worker"]
+hp-worker = []
+# Boot-time second HP core experiment; not part of the normal image.
+multicore-lab = []
+multicore-queue-lab = ["multicore-lab"]
+multicore-cache-lab = ["multicore-queue-lab"]
+lp-lab = []
 # Optional laboratory commands; absent from the normal image and help.
 diagnostics = []
 # Isolated SD experiment: 32KiB transactions, extra static SRAM; not a production profile.

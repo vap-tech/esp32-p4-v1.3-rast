@@ -2,6 +2,8 @@
 
 Default image теперь содержит рабочие Ethernet/HTTP/SD/FAT, FileTable, дисплей,
 часы/RTC/будильник, тач, воспроизведение и запись WAV, камеру и форматирование SD.
+Также включён `hp-worker`: постоянный HP1 с отдельным стеком/очередями;
+без заданий спит, вычислительная тестовая нагрузка выключена. См. [hp-worker.md](hp-worker.md).
 Лабораторные команды, ESP-Hosted Wi-Fi и программный JPEG не включены по умолчанию.
 Код и предыдущие исследования сохранены; зависимости C/ESP-IDF runtime не добавлены.
 
@@ -9,6 +11,10 @@ Default image теперь содержит рабочие Ethernet/HTTP/SD/FAT,
 
 | Feature | Что добавляет |
 |---|---|
+| `hp-worker` | Включён по умолчанию: фиксированный HP1 worker, IRQ18, pause/resume и защита cache maintenance |
+| `multicore-lab` | Одноразовая HP1 boot probe; заменяет постоянный worker |
+| `multicore-queue-lab` / `multicore-cache-lab` | Boot queue/IRQ probes, без кешей / с I0+I1+D ON; заменяют постоянный worker |
+| `lp-lab` | LP SRAM code и три цикла сна/HP wake до обычного runtime |
 | `diagnostics` | SRAM/PSRAM/cache, SD/DMA, IRQ, arbitration, RGB/chart/BIST, tone и другие лабораторные команды |
 | `wifi` | C6 ESP-Hosted, SDIO function API, RPC, scan/connect, Wi-Fi web; прежняя конфигурация сети |
 | `software-jpeg` | Программный JPEG decoder, IDCT implementations, команда display image |
@@ -33,6 +39,9 @@ Format в default проверяет геометрию/пустой root, но 
 # Текущий обычный образ, без Wi-Fi/JPEG/labs:
 ./scripts/image.sh
 
+# Однопроцессорная конфигурация для воспроизведения прежних замеров:
+./scripts/image.sh --no-default-features
+
 # Эксперименты SD/памяти/дисплея, без радио и JPEG:
 ./scripts/image.sh --features diagnostics
 
@@ -48,6 +57,11 @@ Format в default проверяет геометрию/пустой root, но 
 # После выбранной сборки — обычная прошивка P4:
 espflash write-bin --port /dev/ttyACM0 0x2000 target/firmware.bin
 ```
+
+Обычный `--features diagnostics` сохраняет HP1. Для старых single-core JPEG/cache
+замеров добавляйте `--no-default-features`. Изменение кешей при живом worker
+возвращает WorkerActive: требуется подтверждённая `system worker pause` и
+соблюдение требований DMA. `l2-128` автоматически исключает runtime worker.
 
 Не использовать `--all-features` как синоним полной рабочей firmware: l2-128
 меняет карту памяти и может не вмещать полный runtime. Linker guards сохранены.

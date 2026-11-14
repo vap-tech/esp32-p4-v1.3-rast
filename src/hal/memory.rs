@@ -1,5 +1,27 @@
 //! Memory/cache configuration readback for ESP32-P4 rev1.x.
 const CACHE: usize = 0x3ff1_0000;
+#[cfg(target_arch = "riscv32")]
+struct CacheIrqs(usize);
+#[cfg(target_arch = "riscv32")]
+impl CacheIrqs {
+    unsafe fn disable() -> Self {
+        let prior;
+        unsafe {
+            core::arch::asm!("csrrci {0},mstatus,8",out(reg)prior,options(nostack));
+        }
+        Self(prior)
+    }
+}
+#[cfg(target_arch = "riscv32")]
+impl Drop for CacheIrqs {
+    fn drop(&mut self) {
+        if self.0 & 8 != 0 {
+            unsafe {
+                core::arch::asm!("csrsi mstatus,8", options(nostack));
+            }
+        }
+    }
+}
 #[derive(Debug)]
 pub struct CacheSnapshot {
     pub l1_i_ctrl: u32,
@@ -119,6 +141,7 @@ pub const STACK_START: usize = INTERNAL_END - STACK_BYTES;
 pub const STACK_PATTERN: u32 = 0xa55a_6996;
 #[derive(Debug)]
 pub enum Error {
+    WorkerActive,
     CacheLayout(u32),
     RegionLayout,
     Mismatch {
@@ -373,13 +396,42 @@ pub unsafe fn benchmark(
 
 /// Toggle core0 instruction cache only; preserve the data/L2 configuration.
 /// # Safety
-/// Single active core, interrupts disabled, immutable executable SRAM, no other
-/// cache maintenance in progress. Runs from SPM throughout the transition.
+/// HP0 owns maintenance, executable SRAM immutable, no concurrent maintenance.
+/// Actual transitions require HP1 absent or generation-confirmed in SPM pause;
+/// a live worker allows only an idempotent no-op or WorkerActive. Local IRQs
+/// are masked internally; transitions execute from SPM.
 #[cfg(target_arch = "riscv32")]
 #[link_section = ".text.entry"]
 #[inline(never)]
 pub unsafe fn set_instruction_cache(enabled: bool) -> Result<(), Error> {
+    unsafe { set_instruction_cache_for(0, enabled) }
+}
+
+/// Toggle the selected HP core's instruction cache from SPM.
+/// # Safety
+/// HP0 owns cache maintenance; executable SRAM immutable. IRQs masked internally.
+/// A live runtime worker permits only an idempotent no-op or WorkerActive.
+/// An actual transition requires HP1 not started or generation-confirmed in
+/// its SPM pause; no other cache operation may run concurrently. For core0,
+/// HP0 executes the transition from SPM, never through the cache being toggled.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".text.entry"]
+#[inline(never)]
+pub unsafe fn set_instruction_cache_for(core: u8, enabled: bool) -> Result<(), Error> {
+    let _irqs = unsafe { CacheIrqs::disable() };
+    let mask = match core {
+        0 => 1,
+        1 => 2,
+        _ => return Err(Error::RegionLayout),
+    };
     let read = |offset| unsafe { ((CACHE + offset) as *const u32).read_volatile() };
+    if !crate::worker::cache_maintenance_allowed() {
+        return if (read(8) & mask == 0) == enabled {
+            Ok(()) // Already configured; no invalidate/maintenance with HP1 live.
+        } else {
+            Err(Error::WorkerActive)
+        };
+    }
     let write = |offset, value| unsafe { ((CACHE + offset) as *mut u32).write_volatile(value) };
     if read(0x278) != L2_SIZE_REGISTER {
         return Err(Error::CacheLayout(read(0x278)));
@@ -387,8 +439,8 @@ pub unsafe fn set_instruction_cache(enabled: bool) -> Result<(), Error> {
     unsafe {
         core::arch::asm!("fence rw, rw", options(nostack));
     }
-    write(8, read(8) | 1);
-    write(0x9c, 1); // Only core0 I-cache, full-range invalidate.
+    write(8, read(8) | mask);
+    write(0x9c, mask); // Selected core I-cache, full-range invalidate.
     write(0xa0, 0);
     write(0xa4, 0);
     write(0x98, 1);
@@ -400,7 +452,7 @@ pub unsafe fn set_instruction_cache(enabled: bool) -> Result<(), Error> {
         }
     }
     if enabled {
-        write(8, read(8) & !1);
+        write(8, read(8) & !mask);
     }
     unsafe {
         core::arch::asm!("fence rw, rw", "fence.i", options(nostack));
@@ -438,6 +490,10 @@ pub fn extra_cache_counts() -> [[u32; 4]; 3] {
 #[link_section = ".text.entry"]
 #[inline(never)]
 pub unsafe fn set_l2_cache(enabled: bool) -> Result<(), Error> {
+    let _irqs = unsafe { CacheIrqs::disable() };
+    if !crate::worker::cache_maintenance_allowed() {
+        return Err(Error::WorkerActive);
+    }
     let read = |offset| unsafe { ((CACHE + offset) as *const u32).read_volatile() };
     let write = |offset, value| unsafe { ((CACHE + offset) as *mut u32).write_volatile(value) };
     if L2_SIZE_REGISTER != 0x200 || read(0x278) != 0x200 || read(8) & 0x10 == 0 {
@@ -467,12 +523,26 @@ pub unsafe fn set_l2_cache(enabled: bool) -> Result<(), Error> {
 
 /// Toggle L1 D-cache only at L2=0, preserving all dirty internal data on exit.
 /// # Safety
-/// Single core, interrupts disabled, no active DMA; future DMA needs maintenance.
+/// HP0 owns maintenance, HP1 absent or generation-confirmed in SPM pause;
+/// no active DMA using cached data. Local IRQs are masked internally.
 /// This transition must remain stackless in the release disassembly.
 #[cfg(target_arch = "riscv32")]
 #[link_section = ".text.entry"]
 #[inline(never)]
 pub unsafe fn set_data_cache(enabled: bool) -> Result<(), Error> {
+    let _irqs = unsafe { CacheIrqs::disable() };
+    if !crate::worker::cache_maintenance_allowed() {
+        return Err(Error::WorkerActive);
+    }
+    unsafe { set_data_cache_quiescent(enabled) }
+}
+
+// Keep the transition itself separate and stackless: the permission check
+// and its call frame must finish before writeback/bypass/invalidation.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".text.entry"]
+#[inline(never)]
+unsafe fn set_data_cache_quiescent(enabled: bool) -> Result<(), Error> {
     let read = |offset| unsafe { ((CACHE + offset) as *const u32).read_volatile() };
     let write = |offset, value| unsafe { ((CACHE + offset) as *mut u32).write_volatile(value) };
     if read(0x278) != 0 || read(0x274) & 0x20 == 0 {

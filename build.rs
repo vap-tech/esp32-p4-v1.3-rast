@@ -44,9 +44,22 @@ fn main() {
             let enabled = fields.get(2).is_none_or(|features| {
                 features.split(',').all(|feature| {
                     assert!(
-                        ["diagnostics", "wifi", "software-jpeg", "audio-lab"].contains(&feature),
+                        [
+                            "diagnostics",
+                            "wifi",
+                            "software-jpeg",
+                            "audio-lab",
+                            "hp-worker"
+                        ]
+                        .contains(&feature),
                         "unknown command feature"
                     );
+                    if feature == "hp-worker"
+                        && (std::env::var_os("CARGO_FEATURE_MULTICORE_LAB").is_some()
+                            || std::env::var_os("CARGO_FEATURE_L2_128").is_some())
+                    {
+                        return false;
+                    }
                     let env = format!("CARGO_FEATURE_{}", feature.replace('-', "_").to_uppercase());
                     std::env::var_os(env).is_some()
                 })

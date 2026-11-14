@@ -1,4 +1,5 @@
-//! Small, register-level HAL for ESP32-P4 rev 1.3. Single core; scoped SDMMC/timer interrupts.
+//! Register-level HAL for ESP32-P4 rev 1.3. Peripheral drivers own core0;
+//! HP1 has a fixed-role worker with its own memory and software interrupts.
 pub mod clock;
 pub mod csi;
 pub mod dsi;
@@ -10,6 +11,7 @@ pub mod i2s;
 pub mod interrupt;
 pub mod ledc;
 pub mod memory;
+pub mod multicore;
 pub mod psram;
 pub mod sdmmc;
 pub mod time;

@@ -28,6 +28,7 @@ parser.add_argument('--rtc', metavar='COMMAND', help='RTC read/init/set/config/c
 parser.add_argument('--rtc-sync', action='store_true', help='explicitly initialize RTC to laptop UTC, resetting settings/alarms/timer')
 parser.add_argument('--sd-files-bench', nargs='?', const=8, type=int, metavar='MiB', help='diagnostics: SRAM to new SD file, verify and remove, 1..64 MiB')
 parser.add_argument('--irq-test', action='store_true', help='20ms scoped core0 CLIC/SYSTIMER IRQ test')
+parser.add_argument('--worker', choices=['status', 'load on', 'load off', 'pause', 'resume', 'cache-check'], help='HP1 fixed worker control; also available while web is running')
 parser.add_argument('--memory', action='store_true', help='report memory/cache configuration')
 parser.add_argument('--sd-format-info', action='store_true', help='preview whole-card FAT32 geometry without writing')
 parser.add_argument('--format-sd', action='store_true', help='ERASE all SD partitions; quick-format FAT32 and create/verify CONFIG.TXT')
@@ -351,6 +352,15 @@ try:
     if args.clock:
         send(fd, b':clock\n')
         receive(b'CLOCK DONE', timeout=10)
+    if args.worker is not None:
+        send(fd, (':system worker ' + args.worker + '\n').encode('ascii'))
+        line = receive(b'HP WORKER state=', timeout=5)
+        if b'errors=0' not in line or b'trap=00000000/00000000/00000000' not in line:
+            raise SystemExit('HP1 worker error; see firmware reply')
+        if args.worker == 'pause' and b'state=2 ' not in line:
+            raise SystemExit('HP1 pause was not acknowledged')
+        if args.worker == 'resume' and b'state=1 ' not in line:
+            raise SystemExit('HP1 resume was not acknowledged')
     if args.memory:
         send(fd, b':memory\n')
         receive(b'MEMORY DONE', timeout=10)

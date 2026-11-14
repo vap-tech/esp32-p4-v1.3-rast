@@ -26,6 +26,7 @@ pub fn run<F: Future, E>(
     let mut future = pin!(future);
     interrupt::schedule();
     loop {
+        crate::worker::poll();
         if interrupt::ready() {
             if let Poll::Ready(result) = future.as_mut().poll(&mut cx) {
                 return Ok(result);

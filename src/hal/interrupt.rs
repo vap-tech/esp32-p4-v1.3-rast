@@ -43,6 +43,10 @@ unsafe fn write(a: usize, v: u32) {
 /// snapshots, allocations, filesystem work or controller transactions here.
 pub fn dispatch(cause: u32) -> bool {
     match cause & 0xfff {
+        18 if crate::worker::interrupt() => {
+            notify();
+            true
+        }
         16 => {
             unsafe {
                 // Only consume events owned by the active async transaction.
@@ -111,6 +115,9 @@ impl Guard {
             write(0x500d60d4, 17);
             write(0x20801040, 0x3fc00100);
             write(0x20801044, 0x3fc00100); // level, non-vectored, priority1
+                                           // HP1 completion is a permanent owner, independent of this scoped
+                                           // SD/timer context. Preserve its local enable and pending level.
+            write(0x20801048, this.clic[18]);
             write(0x500e2000, this.timer[0] & !(1 << 24));
             write(0x500e2034, (1 << 30) | 16000);
             write(0x500e2050, 1);

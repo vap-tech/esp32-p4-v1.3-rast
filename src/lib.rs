@@ -1,6 +1,8 @@
 #![no_std]
 
 pub mod hal;
+pub mod intercore;
+pub mod worker;
 
 pub mod devices;
 
