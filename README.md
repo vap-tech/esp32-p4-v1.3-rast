@@ -176,8 +176,15 @@ Wi-Fi сопроцессор C6: `python3 scripts/display-control.py --wifi-prob
 пароль вводится без echo. Работают свой DHCP/ARP/ping; HTTP и SD одновременно
 с Wi-Fi пока не обслуживаются. По завершении окна радио отключается.
 
-Встроенная сеть владельца: `python3 scripts/display-control.py --wifi-default --wifi-seconds 300`.
-Профиль включён во Flash P4 с явного разрешения, пароль больше не запрашивается.
+Для встроенного Wi-Fi профиля перед сборкой скопируйте шаблон и задайте свою сеть:
+
+```sh
+cp src/wifi_profile.example.rs src/wifi_profile.rs
+```
+
+`src/wifi_profile.rs` — локальный файл, исключённый из Git. При сборке с `wifi`
+его параметры включаются во Flash P4. Подключение к заданной сети:
+`python3 scripts/display-control.py --wifi-default --wifi-seconds 300`.
 Автоподключение при загрузке не включено.
 
 Веб-файлы по Wi-Fi: `python3 scripts/display-control.py --wifi-web 3600`

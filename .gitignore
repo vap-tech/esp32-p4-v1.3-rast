@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 
 /reference/
+
+# Local Wi-Fi credentials; copy the tracked example before enabling wifi.
+/src/wifi_profile.rs
