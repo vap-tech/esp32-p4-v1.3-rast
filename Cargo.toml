@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["hp-worker"]
+default = ["hp-worker", "lp-timer"]
 hp-worker = []
+lp-timer = []
 # Boot-time second HP core experiment; not part of the normal image.
 multicore-lab = []
 multicore-queue-lab = ["multicore-lab"]

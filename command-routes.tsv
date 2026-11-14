@@ -37,3 +37,4 @@ wifi raw	c6-raw	wifi,diagnostics
 system irq test	irq-test	diagnostics
 sd benchmark files	sd-files-bench	diagnostics
 system worker	worker	hp-worker
+system lp	lp	lp-timer

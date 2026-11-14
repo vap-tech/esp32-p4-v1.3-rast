@@ -2,6 +2,8 @@
 
 Default image теперь содержит рабочие Ethernet/HTTP/SD/FAT, FileTable, дисплей,
 часы/RTC/будильник, тач, воспроизведение и запись WAV, камеру и форматирование SD.
+В default также включён `lp-timer`: автономный LP counter с периодом1 с
+([lp-timer.md](lp-timer.md)); старый `lp-lab` заменяет этот сервис.
 Также включён `hp-worker`: постоянный HP1 с отдельным стеком/очередями;
 без заданий спит, вычислительная тестовая нагрузка выключена. См. [hp-worker.md](hp-worker.md).
 Лабораторные команды, ESP-Hosted Wi-Fi и программный JPEG не включены по умолчанию.
@@ -11,6 +13,7 @@ Default image теперь содержит рабочие Ethernet/HTTP/SD/FAT,
 
 | Feature | Что добавляет |
 |---|---|
+| `lp-timer` | Включён по умолчанию: LP TIMER target1, собственный LP код и периодический сон/reset-entry |
 | `hp-worker` | Включён по умолчанию: фиксированный HP1 worker, IRQ18, pause/resume и защита cache maintenance |
 | `multicore-lab` | Одноразовая HP1 boot probe; заменяет постоянный worker |
 | `multicore-queue-lab` / `multicore-cache-lab` | Boot queue/IRQ probes, без кешей / с I0+I1+D ON; заменяют постоянный worker |
@@ -39,7 +42,7 @@ Format в default проверяет геометрию/пустой root, но 
 # Текущий обычный образ, без Wi-Fi/JPEG/labs:
 ./scripts/image.sh
 
-# Однопроцессорная конфигурация для воспроизведения прежних замеров:
+# Только HP0, без runtime HP1/LP, для воспроизведения прежних замеров:
 ./scripts/image.sh --no-default-features
 
 # Эксперименты SD/памяти/дисплея, без радио и JPEG:

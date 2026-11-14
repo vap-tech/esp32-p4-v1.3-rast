@@ -49,7 +49,8 @@ fn main() {
                             "wifi",
                             "software-jpeg",
                             "audio-lab",
-                            "hp-worker"
+                            "hp-worker",
+                            "lp-timer"
                         ]
                         .contains(&feature),
                         "unknown command feature"
@@ -58,6 +59,9 @@ fn main() {
                         && (std::env::var_os("CARGO_FEATURE_MULTICORE_LAB").is_some()
                             || std::env::var_os("CARGO_FEATURE_L2_128").is_some())
                     {
+                        return false;
+                    }
+                    if feature == "lp-timer" && std::env::var_os("CARGO_FEATURE_LP_LAB").is_some() {
                         return false;
                     }
                     let env = format!("CARGO_FEATURE_{}", feature.replace('-', "_").to_uppercase());

@@ -410,7 +410,16 @@ impl<P: Port> Network<'_, '_, '_, P> {
             if let Some(frame) = self.console_input.feed(byte, now) {
                 match frame {
                     Ok("help") => {
-                        let _=writeln!(self.console,"WEB CONSOLE (other hardware commands require ESC)\n  net web serve [arguments]\n  rtc [arguments]\n  display clock [arguments]\n  system services [arguments]\n  system worker [arguments]\nCONSOLE HELP END");
+                        let _=writeln!(self.console,"WEB CONSOLE (other hardware commands require ESC)\n  net web serve [arguments]\n  rtc [arguments]\n  display clock [arguments]\n  system services [arguments]");
+                        for public in ["system worker", "system lp"] {
+                            if esp32_p4::console::ROUTES.lines().any(|line| {
+                                line.strip_prefix(public)
+                                    .is_some_and(|s| s.starts_with('\t'))
+                            }) {
+                                let _ = writeln!(self.console, "  {} [arguments]", public);
+                            }
+                        }
+                        let _ = writeln!(self.console, "CONSOLE HELP END");
                     }
                     Ok("system services") => {
                         if let Some(player) = self.player.as_ref() {
@@ -420,12 +429,23 @@ impl<P: Port> Network<'_, '_, '_, P> {
                             ui.borrow().report(self.console);
                         }
                     }
+                    Ok(command) if command == "system lp" || command.starts_with("system lp ") => {
+                        let handled = self.port.borrow_mut().with_timer(|timer| {
+                            esp32_p4::lp::command(command, timer, self.console)
+                        });
+                        if !handled {
+                            let _ = writeln!(self.console, "WEB COMMAND unavailable");
+                        }
+                    }
                     Ok(command)
                         if command == "system worker" || command.starts_with("system worker ") =>
                     {
-                        self.port.borrow_mut().with_timer(|timer| {
+                        let handled = self.port.borrow_mut().with_timer(|timer| {
                             esp32_p4::worker::command(command, timer, self.console)
                         });
+                        if !handled {
+                            let _ = writeln!(self.console, "WEB COMMAND unavailable");
+                        }
                     }
                     Ok(command)
                         if command == "net web serve" || command.starts_with("net web serve ") =>

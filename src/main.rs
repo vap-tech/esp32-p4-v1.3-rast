@@ -74,6 +74,8 @@ extern "C" fn rust_main() -> ! {
         }
     }
     clock_audit("boot", &mut timer, &mut console);
+    let previous_lp = unsafe { hal::lp::stop_owned_previous(&mut timer) };
+    let _ = writeln!(console, "LP PREVIOUS stopped={:?}", previous_lp);
     #[cfg(all(feature = "multicore-lab", not(feature = "multicore-queue-lab")))]
     unsafe {
         multicore_lab::run(&mut timer, &mut console)
@@ -186,6 +188,10 @@ extern "C" fn rust_main() -> ! {
     let mut ui_stats = background::Stats::default();
     let mut web_autostart = true;
     let mut web_probe_due = timer.now_us().wrapping_sub(1_000_000);
+    #[cfg(all(feature = "lp-timer", not(feature = "lp-lab")))]
+    if let Err(error) = unsafe { esp32_p4::lp::init(&mut timer, &mut console) } {
+        let _ = writeln!(console, "LP TIMER INIT FAILED {:?}", error);
+    }
     #[cfg(all(
         feature = "hp-worker",
         not(any(feature = "multicore-lab", feature = "l2-128"))
@@ -239,7 +245,9 @@ extern "C" fn rust_main() -> ! {
                     continue;
                 }
             };
-            if esp32_p4::worker::command(name, &mut timer, &mut console) {
+            if esp32_p4::lp::command(name, &mut timer, &mut console)
+                || esp32_p4::worker::command(name, &mut timer, &mut console)
+            {
                 continue;
             }
             let command = esp32_p4::console::action(name).unwrap_or(0);

@@ -10,6 +10,8 @@ pub mod i2c;
 pub mod i2s;
 pub mod interrupt;
 pub mod ledc;
+#[cfg(target_arch = "riscv32")]
+pub mod lp;
 pub mod memory;
 pub mod multicore;
 pub mod psram;

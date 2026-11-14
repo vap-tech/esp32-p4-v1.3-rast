@@ -2,6 +2,7 @@
 
 pub mod hal;
 pub mod intercore;
+pub mod lp;
 pub mod worker;
 
 pub mod devices;
