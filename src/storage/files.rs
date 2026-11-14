@@ -352,6 +352,29 @@ impl<'v, 'io, D: BlockDevice, const N: usize> FileTable<'v, 'io, D, N> {
         }
         Ok(())
     }
+    /// Abort incomplete creates, close readers/appends, checkpoint, invalidate clean caches.
+    pub async fn release_caches(&mut self) -> Result<(), Error<D::Error>> {
+        self.volume.readable()?;
+        self.shutdown().await?;
+        let fat = self.volume.fat();
+        let guard = Mutation::begin(&fat.poisoned);
+        if fat.dirty_at_mount {
+            // Read-only mount: never clear a pre-existing dirty/I/O-error marker.
+            fat.stream
+                .borrow_mut()
+                .flush()
+                .await
+                .map_err(embedded_fatfs::Error::Io)?;
+        } else {
+            self.checkpoint(false).await?;
+        }
+        fat.stream
+            .borrow_mut()
+            .invalidate_clean_caches()
+            .map_err(embedded_fatfs::Error::Io)?;
+        guard.commit();
+        Ok(())
+    }
     pub async fn read_dir(&mut self, p: &str) -> Result<Directory<'_, 'io, D>, Error<D::Error>> {
         self.volume.read_dir(p).await
     }

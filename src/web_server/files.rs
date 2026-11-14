@@ -187,7 +187,7 @@ pub(super) async fn step<P: Port, D: disk::BlockDevice, const N: usize>(
     state: &mut Transfer,
     slot: usize,
     files: &mut FileTable<'_, '_, D, N>,
-    network: &RefCell<Network<'_, '_, P>>,
+    network: &RefCell<Network<'_, '_, '_, P>>,
     scratch: &mut [u8],
     staging: &mut UploadPool<'_, '_, { tcp::SLOTS }>,
 ) -> Result<Step, web::Error> {

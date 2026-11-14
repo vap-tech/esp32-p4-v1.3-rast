@@ -32,6 +32,7 @@ pub enum Route {
     Clipboard,
     State,
     Brightness,
+    Release,
     NetTest,
 }
 impl Request {
@@ -155,6 +156,8 @@ pub fn parse(bytes: &[u8]) -> Result<Request, u16> {
         (Route::Clipboard, "/")
     } else if target == "/api/state" && query.is_empty() {
         (Route::State, "/")
+    } else if target == "/api/resources/release" && query.is_empty() {
+        (Route::Release, "/")
     } else if target == "/api/brightness" {
         argument = query.strip_prefix("value=").ok_or(400u16)?;
         (Route::Brightness, "/")
@@ -175,7 +178,7 @@ pub fn parse(bytes: &[u8]) -> Result<Request, u16> {
                 Method::Get | Method::Head | Method::Put | Method::Delete | Method::Mkcol
             ) || cfg!(feature = "diagnostics") && method == Method::Post
         }
-        Route::Rename | Route::Brightness => method == Method::Post,
+        Route::Rename | Route::Brightness | Route::Release => method == Method::Post,
         Route::NetTest | Route::Clipboard => {
             matches!(method, Method::Get | Method::Head | Method::Post)
         }
@@ -342,6 +345,22 @@ pub fn json_string(out: &mut impl fmt::Write, s: &str) -> fmt::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resource_release_is_explicit_empty_post() {
+        let r =
+            parse(b"POST /api/resources/release HTTP/1.1\r\nHost: p4\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        assert_eq!(r.route, Route::Release);
+        assert_eq!(
+            parse(b"GET /api/resources/release HTTP/1.1\r\nHost: p4\r\n\r\n").unwrap_err(),
+            405
+        );
+        assert_eq!(
+            parse(b"POST /api/resources/release HTTP/1.1\r\nHost: p4\r\nContent-Length: 1\r\n\r\n")
+                .unwrap_err(),
+            400
+        );
+    }
     #[test]
     fn explicit_flash_page_only_accepts_get_head_and_exact_flag() {
         extern crate std;

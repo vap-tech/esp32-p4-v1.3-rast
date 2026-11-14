@@ -1,6 +1,7 @@
 //! Small allocation-free media readers. No filesystem or transport policy.
 #[cfg(feature = "software-jpeg")]
 pub mod jpeg;
+pub mod pcm;
 pub mod wav;
 
 #[derive(Debug)]

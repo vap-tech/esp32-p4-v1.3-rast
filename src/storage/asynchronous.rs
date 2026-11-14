@@ -185,6 +185,19 @@ impl<D: BlockDevice> Stream<D> {
         self.cached = [None; 2];
         Ok(())
     }
+    /// Discard clean read/FAT lines only after the volume's explicit checkpoint.
+    pub fn invalidate_clean_caches(&mut self) -> Result<(), Error<D::Error>> {
+        if self.defer_fat || self.has_dirty_fat() || self.fat_flush_incomplete {
+            return Err(Error::Invalid);
+        }
+        self.cached = [None; 2];
+        self.victim = 0;
+        for line in &mut self.fat {
+            line.lba = None;
+        }
+        self.fat_victim = 0;
+        Ok(())
+    }
     pub fn fat_flush_failed(&self) -> bool {
         self.fat_flush_incomplete
     }

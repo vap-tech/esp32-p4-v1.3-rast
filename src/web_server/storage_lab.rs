@@ -111,7 +111,7 @@ impl HttpTrace {
     pub fn closed(&mut self, us: u64) {
         self.close_us = us;
     }
-    pub fn report<P: Port>(&self, now: u64, slot: usize, network: &mut Network<'_, '_, P>) {
+    pub fn report<P: Port>(&self, now: u64, slot: usize, network: &mut Network<'_, '_, '_, P>) {
         let losses = network.sample_losses();
         let loss_delta: [u64; 4] = core::array::from_fn(|i| losses[i] - self.losses_start[i]);
         let emac = network.port.borrow().wired_stats().unwrap_or([0; 6]);
@@ -128,7 +128,7 @@ impl HttpTrace {
 
 pub(super) fn configure<P: Port, D: disk::BlockDevice>(
     partition: &mut disk::Partition<D>,
-    network: &RefCell<Network<'_, '_, P>>,
+    network: &RefCell<Network<'_, '_, '_, P>>,
 ) -> Result<(), web::Error> {
     let mut boot = [0; 512];
     esp32_p4::runtime::run(disk::BlockDevice::read(partition, 0, &mut boot), || {

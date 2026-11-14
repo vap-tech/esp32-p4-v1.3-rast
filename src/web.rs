@@ -57,6 +57,23 @@ fn headers(
     write!(text, "{extra}\r\n").map_err(|_| Error::Format)?;
     io.write_all(text.data())
 }
+pub fn resources_released(io: &mut impl Transport, freed: usize, used: usize) -> Result<(), Error> {
+    let mut body = Text::<128>::new();
+    write!(
+        body,
+        "{{\"freed_bytes\":{},\"psram_used\":{},\"open_files\":0}}",
+        freed, used
+    )
+    .map_err(|_| Error::Format)?;
+    headers(
+        io,
+        200,
+        Some(body.data().len() as u32),
+        "application/json",
+        "",
+    )?;
+    io.write_all(body.data())
+}
 pub fn error(io: &mut impl Transport, code: u16, head: bool) -> Result<(), Error> {
     let body = http::reason(code).as_bytes();
     headers(
@@ -174,7 +191,7 @@ pub fn serve<D: BlockDevice>(
             }
             headers(io, 204, Some(0), "text/plain", "")?;
         }
-        Route::NetTest | Route::Clipboard | Route::State | Route::Brightness => {
+        Route::NetTest | Route::Clipboard | Route::State | Route::Brightness | Route::Release => {
             return error(io, 501, head)
         }
         Route::File => {

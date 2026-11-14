@@ -203,6 +203,9 @@
       <button class="btn" id="clip-read" type="button">Прочитать буфер</button>
       <p id="clip-status" role="status"></p>
       <hr>
+      <button class="btn" id="release-resources" type="button">Закрыть файлы и освободить кеши</button>
+      <p id="release-status" role="status">Веб и часы продолжат работать.</p>
+      <hr>
       <p>Тест сети без SD: данные из RAM → браузер, затем браузер → RAM. Измеряет TCP/HTTP вместе с Wi-Fi, не скорость радио PHY.</p>
       <label>Объём в каждую сторону <select id="net-size"><option value="262144">256 КиБ</option><option value="1048576">1 МиБ</option><option value="4194304">4 МиБ</option></select></label>
       <button class="btn" id="net-test" type="button">Тест скорости сети</button>
@@ -316,6 +319,7 @@
     }
     const uploadQueue = [];
     let uploadRunning = false;
+    let cleanupRunning = false;
     let activeUpload = null, cancelUploads = false;
     function transferSize(bytes) {
       if (bytes < 1024) return Math.round(bytes) + ' Б';
@@ -417,6 +421,7 @@
         && !/[. ]$/.test(name) && !/[\u0000-\u001f\u007f-\u009f\ufffe\uffff"*\/:<>?\\|]/u.test(name);
     }
     function queueJobs(jobs) {
+      if (cleanupRunning) { status('Дождитесь освобождения кешей.', true); return; }
       if (cancelUploads && uploadRunning) { status('Дождитесь завершения отмены.'); return; }
       uploadQueue.push(...jobs);
       if (!uploadRunning && !mutating && uploadQueue.length) return drainUploads();
@@ -476,7 +481,7 @@
     }
     let mutating = false;
     async function mutate(action) {
-      if (uploadRunning || mutating) { status('Дождитесь окончания очереди загрузки.', true); return; }
+      if (uploadRunning || mutating || cleanupRunning) { status('Дождитесь окончания очереди загрузки.', true); return; }
       mutating = true;
       try { await action(); await load(); } catch (e) { status(e.message, true); }
       finally { mutating = false; if (uploadQueue.length && !uploadRunning) drainUploads(); }
@@ -591,7 +596,7 @@
     let netAbort;
     $('net-stop').onclick = () => netAbort?.abort();
     $('net-test').onclick = async () => {
-      if (netAbort || uploadRunning || mutating) { $('net-status').textContent = 'Дождитесь завершения файловой операции.'; return; }
+      if (netAbort || uploadRunning || mutating || cleanupRunning) { $('net-status').textContent = 'Дождитесь завершения файловой операции.'; return; }
       const bytes = Number($('net-size').value), results = [];
       const source = new Uint8Array(bytes);
       for (let i = 0; i < bytes; i++) source[i] = i & 255;
@@ -623,6 +628,25 @@
         $('net-status').textContent = results.join('\n') + '\nГотово. SD не использовалась. Время включает запрос и ответ HTTP.';
       } catch (e) { $('net-status').textContent = [...results, e.name === 'AbortError' ? 'Тест отменён.' : e.message].join('\n'); }
       finally { netAbort = null; $('net-test').disabled = false; $('net-stop').disabled = true; }
+    };
+    $('release-resources').onclick = async () => {
+      if (cleanupRunning) return;
+      if (mutating) { $('release-status').textContent = 'Дождитесь завершения файловой операции.'; return; }
+      if (!confirm('Закрыть открытые файлы и освободить кеши? Незавершённые передачи будут отменены. Веб и часы продолжат работать.')) return;
+      cleanupRunning = true; $('release-resources').disabled = true;
+      if (uploadRunning) $('upload-stop').onclick();
+      netAbort?.abort();
+      $('release-status').textContent = 'Закрытие файлов и освобождение кешей…';
+      try {
+        const response = await fetch('/api/resources/release', {method: 'POST', cache: 'no-store'});
+        if (response.status === 409) throw Error('Сначала остановите звучащий будильник.');
+        if (!response.ok) throw Error('HTTP ' + response.status);
+        const result = await response.json();
+        if (result.open_files !== 0 || result.psram_used !== 0) throw Error('Борда не подтвердила освобождение ресурсов.');
+        $('release-status').textContent = 'Файлы закрыты. Освобождено ' + (result.freed_bytes / 1048576).toFixed(2) + ' МиБ. Веб работает.';
+        await load(true);
+      } catch (e) { $('release-status').textContent = 'Освобождение не подтверждено: ' + e.message; }
+      finally { cleanupRunning = false; $('release-resources').disabled = false; }
     };
     $('refresh').onclick = () => load();
     $('picker').onchange = e => upload(e.target.files);

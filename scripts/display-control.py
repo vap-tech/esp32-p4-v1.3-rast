@@ -41,7 +41,7 @@ parser.add_argument('--eth-probe', action='store_true', help='read PHY IDs/link 
 parser.add_argument('--wifi-raw', choices=['rx','tx'], help='pure SDIO raw test without Wi-Fi or SD, requires C6 capability')
 parser.add_argument('--raw-seconds', type=int, default=10, help='raw test duration 1..30 seconds')
 parser.add_argument('--wifi-web', type=int, metavar='SECONDS', help='serve SD HTTP through built-in Wi-Fi profile, 1..3600 seconds')
-parser.add_argument('--web-run', type=int, metavar='SECONDS', help='serve Flashbox + SD HTTP for 1..86400 seconds (D-cache OFF)')
+parser.add_argument('--web-run', nargs='?', const=0, type=int, metavar='SECONDS', help='start/attach web; omitted/0 means persistent, positive seconds diagnostic duration')
 parser.add_argument('--eth-run', type=int, metavar='SECONDS', help='poll Ethernet DHCP/ARP/ping for 1..600 seconds (D-cache OFF)')
 parser.add_argument('--memory-test', action='store_true', help='destructive full PSRAM test before framebuffer initialization')
 parser.add_argument('--memory-bench', action='store_true', help='benchmark SRAM/PSRAM scratch buffers; preserves display pixels')
@@ -63,8 +63,8 @@ parser.add_argument('--wav-lab-repeat', action='store_true', help='inject one re
 args = parser.parse_args()
 if args.seconds is not None and (args.seconds <= 0 or args.play is None):
     parser.error('--seconds requires --play and a positive duration')
-if args.web_run is not None and not 1 <= args.web_run <= 86400:
-    parser.error('--web-run requires 1..86400 seconds')
+if args.web_run is not None and not 0 <= args.web_run <= 86400:
+    parser.error('--web-run requires 0..86400 seconds (0=persistent)')
 if args.eth_run is not None and not 1 <= args.eth_run <= 600:
     parser.error('--eth-run requires 1..600 seconds')
 if not 1 <= args.record_seconds <= 600:
@@ -182,12 +182,12 @@ try:
                     if until == b'CONSOLE HELP END' and line.startswith(b'  '):
                         name = line.strip().decode('ascii').removesuffix(' [arguments]')
                         available_commands.add(name)
-                    if line.startswith(b'COMMAND ERROR'):
+                    if line.startswith(b'COMMAND ERROR') or line.startswith(b'WEB COMMAND unavailable'):
                         raise RuntimeError(line.decode('ascii', errors='replace'))
-                    if until is not None and until in line:
+                    if until is not None and any(marker in line for marker in (until if isinstance(until,tuple) else (until,))):
                         return line
         if until is not None:
-            raise TimeoutError('No firmware reply: ' + until.decode())
+            raise TimeoutError('No firmware reply: ' + repr(until))
 
     if args.stop:
         send(fd, b'\x1b')
@@ -301,7 +301,14 @@ try:
     if args.web_run is not None:
         send(fd, (':web-run ' + str(args.web_run) + '\n').encode('ascii'))
         try:
-            line = receive(b'WEB RUN DONE', timeout=args.web_run + 15)
+            line = receive((b'WEB RUN DONE',b'WEB RUN ACTIVE'), timeout=args.web_run + 30)
+            if b'WEB RUN ACTIVE' in line:
+                while True:
+                    try:
+                        line=receive(b'WEB RUN DONE', timeout=3600)
+                        break
+                    except TimeoutError:
+                        pass
         except KeyboardInterrupt:
             send(fd, b'\x1b')
             line = receive(b'WEB RUN DONE', timeout=10)

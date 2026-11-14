@@ -3,7 +3,7 @@
 
 use esp32_p4::{
     devices::{
-        gt911::{Gt911, Kind, Tracker},
+        gt911::{Gt911, Tracker},
         jd9165,
         rx8025t::Rx8025t,
     },
@@ -15,6 +15,7 @@ mod audio_lab;
 
 #[cfg(feature = "diagnostics")]
 mod arbitration_lab;
+mod background;
 mod recorder;
 mod web_server;
 #[cfg(feature = "wifi")]
@@ -164,6 +165,9 @@ extern "C" fn rust_main() -> ! {
     let mut clock_enabled = true;
     let mut clock_face = esp32_p4::clock_face::ClockFace::default();
     let mut clock_poll = timer.now_us().wrapping_sub(1_000_000);
+    let mut ui_stats = background::Stats::default();
+    let mut web_autostart = true;
+    let mut web_probe_due = timer.now_us().wrapping_sub(1_000_000);
     loop {
         let mut received = None;
         let mut frame_bytes = [0u8; 96];
@@ -174,6 +178,28 @@ extern "C" fn rust_main() -> ! {
                     text.len()
                 }));
                 break;
+            }
+        }
+        if received.is_none()
+            && web_autostart
+            && !camera_live
+            && dma_arena.stats().used == 0
+            && internal_arena.stats().used == 0
+            && display.is_some()
+            && large_arena.is_some()
+            && timer.now_us().wrapping_sub(web_probe_due) >= 1_000_000
+        {
+            web_probe_due = timer.now_us();
+            let mut mdio = unsafe { hal::ethernet::Mdio::new() };
+            let link = (|| {
+                mdio.read(1, 1, &mut timer)?;
+                mdio.read(1, 1, &mut timer)
+            })();
+            if link.is_ok_and(|s| s & 0x24 == 0x24) {
+                let command = b"net web serve";
+                frame_bytes[..command.len()].copy_from_slice(command);
+                received = Some(Ok(command.len()));
+                let _ = writeln!(console, "WEB AUTOSTART link up; persistent until ESC");
             }
         }
         if let Some(frame) = received {
@@ -508,8 +534,16 @@ extern "C" fn rust_main() -> ! {
 
                     #[cfg(not(feature = "wifi"))]
                     let _ = seconds;
-                } else if let Some(seconds) = line.strip_prefix("web-run ") {
-                    if let Ok(seconds @ 1..=86400) = seconds.parse::<u32>() {
+                } else if let Some(args) = line
+                    .strip_prefix("web-run")
+                    .filter(|a| a.is_empty() || a.starts_with(' '))
+                {
+                    let seconds = if args.trim().is_empty() {
+                        Ok(0)
+                    } else {
+                        args.trim().parse::<u32>()
+                    };
+                    if let Ok(seconds @ 0..=86400) = seconds {
                         if camera_live
                             || dma_arena.stats().used != 0
                             || internal_arena.stats().used != 0
@@ -525,6 +559,27 @@ extern "C" fn rust_main() -> ! {
                             let _ = writeln!(console, "WEB RUN DONE Err(PSRAM unavailable)");
                             continue;
                         };
+                        ui_stats = background::Stats::default();
+                        let service = core::cell::RefCell::new(background::Ui {
+                            bus: &mut i2c,
+                            touch: &mut touch,
+                            tracker: &mut tracker,
+                            framebuffer: if scanout_active {
+                                framebuffer.as_mut()
+                            } else {
+                                None
+                            },
+                            face: &mut clock_face,
+                            clock_enabled: &mut clock_enabled,
+                            active: &mut alarm_active,
+                            alarm_retry: &mut alarm_retry,
+                            rtc_due: &mut alarm_poll,
+                            clock_due: &mut clock_poll,
+                            frames: &mut frames,
+                            errors: &mut errors,
+                            stats: &mut ui_stats,
+                        });
+                        web_autostart = false;
                         let result = web_server::run(
                             seconds,
                             &dma_arena,
@@ -533,7 +588,12 @@ extern "C" fn rust_main() -> ! {
                             &mut console,
                             panel,
                             external,
+                            Some(&service),
                         );
+                        if result.is_err() {
+                            web_autostart = true;
+                            web_probe_due = timer.now_us();
+                        }
                         dma_arena.reset();
                         internal_arena.reset();
                         let _ = writeln!(
@@ -1440,21 +1500,29 @@ extern "C" fn rust_main() -> ! {
                 display_command(command, panel, &mut timer, &mut console);
             }
         }
-        if timer.now_us().wrapping_sub(alarm_poll) >= 1_000_000 {
-            alarm_poll = timer.now_us();
-            if let Ok(s) = Rx8025t::read(&mut i2c, &mut timer) {
-                if s.time_usable() && s.alarm_enabled() && s.alarm_pending() && !alarm_active {
-                    alarm_active = true;
-                    alarm_retry = timer.now_us();
-                    let _ = writeln!(console, "ALARM FIRED RTC AF=true AIE=true");
-                    if scanout_active && !camera_live {
-                        if let Some(fb) = framebuffer.as_mut() {
-                            esp32_p4::clock_face::alarm_button(fb, true);
-                        }
-                    }
-                }
-            }
-        }
+        background::Services::poll(
+            &mut background::Ui {
+                bus: &mut i2c,
+                touch: &mut touch,
+                tracker: &mut tracker,
+                framebuffer: if scanout_active && !camera_live {
+                    framebuffer.as_mut()
+                } else {
+                    None
+                },
+                face: &mut clock_face,
+                clock_enabled: &mut clock_enabled,
+                active: &mut alarm_active,
+                alarm_retry: &mut alarm_retry,
+                rtc_due: &mut alarm_poll,
+                clock_due: &mut clock_poll,
+                frames: &mut frames,
+                errors: &mut errors,
+                stats: &mut ui_stats,
+            },
+            &mut timer,
+            &mut console,
+        );
         if alarm_active && timer.now_us() >= alarm_retry && scanout_active && !camera_live {
             clock_enabled = true;
             if let Some(fb) = framebuffer.as_mut() {
@@ -1475,75 +1543,6 @@ extern "C" fn rust_main() -> ! {
                 alarm_retry = timer.now_us() + if result.is_ok() { 250_000 } else { 5_000_000 };
             }
             tracker = Tracker::default();
-        }
-        if clock_enabled
-            && scanout_active
-            && !camera_live
-            && timer.now_us().wrapping_sub(clock_poll) >= 1_000_000
-        {
-            clock_poll = timer.now_us();
-            let date = Rx8025t::read(&mut i2c, &mut timer)
-                .ok()
-                .filter(|s| s.time_usable())
-                .and_then(|s| s.datetime().ok());
-            if let Some(fb) = framebuffer.as_mut() {
-                let started = timer.now_us();
-                let changed = clock_face.draw(fb, date);
-                let _ = writeln!(
-                    console,
-                    "CLOCK DRAW glyphs={} us={} valid={}",
-                    changed,
-                    timer.now_us().wrapping_sub(started),
-                    date.is_some()
-                );
-            }
-        }
-        match touch.read_frame(&mut i2c, &mut timer) {
-            Ok(frame) => {
-                if frame.is_some() {
-                    frames = frames.wrapping_add(1);
-                }
-                for event in tracker.update(frame).into_iter().flatten() {
-                    if alarm_active
-                        && event.kind == Kind::Down
-                        && esp32_p4::clock_face::stop_hit(event.point.x, event.point.y)
-                    {
-                        match Rx8025t::acknowledge_alarm(&mut i2c, &mut timer) {
-                            Ok(()) => {
-                                alarm_active = false;
-                                if let Some(fb) = framebuffer.as_mut() {
-                                    esp32_p4::clock_face::alarm_button(fb, false);
-                                }
-                                let _ = writeln!(console, "ALARM ACK RTC AF cleared; AIE retained");
-                            }
-                            Err(error) => {
-                                let _ = writeln!(console, "ALARM ACK ERROR {:?}", error);
-                            }
-                        }
-                    }
-                    let kind = match event.kind {
-                        Kind::Down => "down",
-                        Kind::Move => "move",
-                        Kind::Up => "up",
-                    };
-                    let _ = writeln!(
-                        console,
-                        "touch {} id={} x={} y={} size={} us={}",
-                        kind,
-                        event.point.id,
-                        event.point.x,
-                        event.point.y,
-                        event.point.size,
-                        event.timestamp_us
-                    );
-                }
-            }
-            Err(error) => {
-                errors = errors.wrapping_add(1);
-                if errors % 100 == 1 {
-                    let _ = writeln!(console, "GT911 error: {:?}", error);
-                }
-            }
         }
         let now = timer.now_us();
         if now.wrapping_sub(heartbeat) & ((1 << 48) - 1) >= 5_000_000 {

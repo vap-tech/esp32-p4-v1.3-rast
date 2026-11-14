@@ -7,7 +7,17 @@ use smoltcp::{
     time::{Duration, Instant},
     wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address},
 };
-pub const SLOTS: usize = 4;
+pub const SLOTS: usize = 5;
+pub const STORAGE_SLOTS: usize = SLOTS + 1;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddressEvent {
+    Configured {
+        address: [u8; 4],
+        mask: [u8; 4],
+        router: [u8; 4],
+    },
+    Deconfigured,
+}
 pub const RX: usize = 6 * 1024;
 pub const TX: usize = 16384;
 pub const MSS: usize = 1460;
@@ -45,14 +55,18 @@ pub struct Stack<'a> {
     served: [bool; SLOTS],
     counted: [bool; SLOTS],
     pub stats: Stats,
+    dhcp: Option<SocketHandle>,
+    address_event: Option<AddressEvent>,
+    address: [u8; 4],
 }
 impl<'a> Stack<'a> {
     pub fn new(
-        storage: &'a mut [SocketStorage<'a>; SLOTS],
+        storage: &'a mut [SocketStorage<'a>],
         buffers: &'a mut Buffers,
         mac: [u8; 6],
         now: u64,
     ) -> Self {
+        assert!(storage.len() >= SLOTS);
         let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
         config.random_seed =
             now ^ u64::from_be_bytes([mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], 0x19, 0x83]);
@@ -82,7 +96,18 @@ impl<'a> Stack<'a> {
             served: [false; SLOTS],
             counted: [false; SLOTS],
             stats: Stats::default(),
+            dhcp: None,
+            address_event: None,
+            address: [0; 4],
         }
+    }
+    /// One extra static SocketStorage slot; DHCP renew/rebind stays in this poll loop.
+    pub fn start_dhcp(&mut self) {
+        assert!(self.dhcp.is_none());
+        self.dhcp = Some(self.sockets.add(smoltcp::socket::dhcpv4::Socket::new()));
+    }
+    pub fn take_address_event(&mut self) -> Option<AddressEvent> {
+        self.address_event.take()
     }
     pub fn configure(
         &mut self,
@@ -107,16 +132,57 @@ impl<'a> Stack<'a> {
                 .push(IpCidr::new(IpAddress::Ipv4(Ipv4Address::from(ip)), prefix))
                 .unwrap();
         });
+        self.iface.routes_mut().remove_default_ipv4_route();
         if router != [0; 4] {
             self.iface
                 .routes_mut()
                 .add_default_ipv4_route(Ipv4Address::from(router))
                 .map_err(|_| "route capacity")?;
         }
+        self.address = ip;
         Ok(())
     }
     pub fn poll<D: Device>(&mut self, now: u64, device: &mut D) {
         self.iface.poll(instant(now), device, &mut self.sockets);
+        let event = self
+            .dhcp
+            .and_then(|h| {
+                self.sockets
+                    .get_mut::<smoltcp::socket::dhcpv4::Socket>(h)
+                    .poll()
+            })
+            .map(|e| match e {
+                smoltcp::socket::dhcpv4::Event::Deconfigured => AddressEvent::Deconfigured,
+                smoltcp::socket::dhcpv4::Event::Configured(c) => AddressEvent::Configured {
+                    address: c.address.address().octets(),
+                    mask: c.address.netmask().octets(),
+                    router: c.router.map(|ip| ip.octets()).unwrap_or([0; 4]),
+                },
+            });
+        if let Some(event) = event {
+            let next = match event {
+                AddressEvent::Configured { address, .. } => address,
+                AddressEvent::Deconfigured => [0; 4],
+            };
+            if next != self.address {
+                for h in self.handles {
+                    self.sockets.get_mut::<Socket>(h).abort();
+                }
+            }
+            match event {
+                AddressEvent::Configured {
+                    address,
+                    mask,
+                    router,
+                } => self.configure(address, mask, router).expect("DHCP config"),
+                AddressEvent::Deconfigured => {
+                    self.iface.update_ip_addrs(|a| a.clear());
+                    self.iface.routes_mut().remove_default_ipv4_route();
+                    self.address = [0; 4];
+                }
+            }
+            self.address_event = Some(event);
+        }
         for i in 0..SLOTS {
             let socket = self.sockets.get_mut::<Socket>(self.handles[i]);
             if !self.counted[i] && !matches!(socket.state(), State::Listen | State::Closed) {
@@ -159,6 +225,15 @@ impl<'a> Stack<'a> {
             remaining -= used;
         }
         self.stats.rx_consumed += n as u64;
+    }
+    /// A requested cleanup can free a long FAT chain. Keep its control connection
+    /// alive until the completed reply; restore the normal idle timeout afterwards.
+    pub fn pause_idle_timeout(&mut self, i: usize, paused: bool) {
+        self.socket_mut(i).set_timeout(if paused {
+            None
+        } else {
+            Some(Duration::from_secs(30))
+        });
     }
     pub fn hold(&mut self, i: usize) {
         self.held[i] = true;
@@ -207,6 +282,9 @@ impl<'a> Stack<'a> {
 impl Drop for Stack<'_> {
     fn drop(&mut self) {
         // SocketStorage must not retain references after its SRAM lease is returned.
+        if let Some(handle) = self.dhcp.take() {
+            let _ = self.sockets.remove(handle);
+        }
         for handle in self.handles {
             let _ = self.sockets.remove(handle);
         }
@@ -298,6 +376,115 @@ mod tests {
         let ih = (frame[14] & 15) as usize * 4;
         let th = (frame[14 + ih + 12] >> 4) as usize * 4;
         u16::from_be_bytes([frame[16], frame[17]]) as usize > ih + th
+    }
+    fn dhcp_response(xid: u32, kind: u8) -> Vec<u8> {
+        use crate::net::{checksum, dhcp_for_mac, Lease, FRAME};
+        let mut out = [0; FRAME];
+        let ip = [192, 0, 2, 44];
+        let server = [192, 0, 2, 1];
+        let n = dhcp_for_mac(
+            &mut out,
+            xid,
+            Some(Lease {
+                address: ip,
+                server,
+                mask: [255, 255, 255, 0],
+                router: server,
+                seconds: 16,
+            }),
+            crate::net::MAC,
+        );
+        out[6..12].copy_from_slice(&[2, 0, 0, 0, 0, 1]);
+        out[26..30].copy_from_slice(&server);
+        out[30..34].fill(255);
+        out[34..38].copy_from_slice(&[0, 67, 0, 68]);
+        out[42] = 2;
+        out[58..62].copy_from_slice(&ip);
+        out[282..n].fill(0);
+        let options = [
+            53, 1, kind, 54, 4, 192, 0, 2, 1, 51, 4, 0, 0, 0, 16, 1, 4, 255, 255, 255, 0, 3, 4,
+            192, 0, 2, 1, 58, 4, 0, 0, 0, 2, 59, 4, 0, 0, 0, 8, 255,
+        ];
+        out[282..282 + options.len()].copy_from_slice(&options);
+        out[24..26].fill(0);
+        let sum = checksum(&out[14..34]);
+        out[24..26].copy_from_slice(&sum.to_be_bytes());
+        out[..n].into()
+    }
+    fn take_dhcp(wire: &mut Wire, kind: u8) -> Option<Vec<u8>> {
+        let at = wire.outgoing.iter().position(|b| {
+            b.len() > 285
+                && b[12..14] == [8, 0]
+                && b[23] == 17
+                && b[34..38] == [0, 68, 0, 67]
+                && b[282..285] == [53, 1, kind]
+        });
+        at.and_then(|i| wire.outgoing.remove(i))
+    }
+    fn request_xid(frame: &[u8]) -> u32 {
+        u32::from_be_bytes(frame[46..50].try_into().unwrap())
+    }
+    #[test]
+    fn dhcp_acquires_renews_same_ip_and_deconfigures_expired_lease() {
+        let mut buffers = Buffers::new();
+        let mut storage = [const { SocketStorage::EMPTY }; STORAGE_SLOTS];
+        let mut stack = Stack::new(&mut storage, &mut buffers, crate::net::MAC, 1);
+        let mut wire = Wire::default();
+        stack.start_dhcp();
+        stack.poll(1, &mut wire);
+        let discover = take_dhcp(&mut wire, 1).expect("discover");
+        wire.incoming
+            .push_back(dhcp_response(request_xid(&discover), 2));
+        stack.poll(1000, &mut wire);
+        let request = take_dhcp(&mut wire, 3).expect("initial request");
+        wire.incoming
+            .push_back(dhcp_response(request_xid(&request), 5));
+        stack.poll(2000, &mut wire);
+        assert!(matches!(
+            stack.take_address_event(),
+            Some(AddressEvent::Configured {
+                address: [192, 0, 2, 44],
+                ..
+            })
+        ));
+        // Renew needs ARP resolution for the DHCP server. Answer that exchange.
+        let mut renew = None;
+        for i in 0..1000 {
+            stack.poll(2_010_000 + i * 1000, &mut wire);
+            if let Some(frame) = take_dhcp(&mut wire, 3) {
+                renew = Some(frame);
+                break;
+            }
+            while let Some(mut frame) = wire.outgoing.pop_front() {
+                if frame.len() >= 42 && frame[12..14] == [8, 6] && frame[20..22] == [0, 1] {
+                    let client_mac: [u8; 6] = frame[6..12].try_into().unwrap();
+                    let client_ip: [u8; 4] = frame[28..32].try_into().unwrap();
+                    frame[..6].copy_from_slice(&client_mac);
+                    frame[6..12].copy_from_slice(&[2, 0, 0, 0, 0, 1]);
+                    frame[20..22].copy_from_slice(&[0, 2]);
+                    frame[22..28].copy_from_slice(&[2, 0, 0, 0, 0, 1]);
+                    frame[28..32].copy_from_slice(&[192, 0, 2, 1]);
+                    frame[32..38].copy_from_slice(&client_mac);
+                    frame[38..42].copy_from_slice(&client_ip);
+                    wire.incoming.push_back(frame);
+                }
+            }
+        }
+        let renew = renew.expect("renew request");
+        assert_eq!(&renew[54..58], &[192, 0, 2, 44]);
+        wire.incoming
+            .push_back(dhcp_response(request_xid(&renew), 5));
+        stack.poll(3_100_000, &mut wire);
+        // smoltcp deliberately emits no event for an unchanged renewed config.
+        assert_eq!(stack.take_address_event(), None);
+        assert_eq!(stack.address, [192, 0, 2, 44]);
+        stack.poll(17_000_000, &mut wire); // Original lease expired; renewed one did not.
+        assert_eq!(stack.take_address_event(), None);
+        assert_eq!(stack.address, [192, 0, 2, 44]);
+        // With no subsequent ACK, the lease really expires; no stale IP remains.
+        stack.poll(25_000_000, &mut wire);
+        assert_eq!(stack.take_address_event(), Some(AddressEvent::Deconfigured));
+        assert_eq!(stack.address, [0; 4]);
     }
     #[test]
     fn sliding_window_recovers_loss_and_reordering_without_duplicate_stream_bytes() {

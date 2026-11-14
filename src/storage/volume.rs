@@ -493,6 +493,51 @@ mod tests {
         d
     }
     #[test]
+    fn live_cleanup_aborts_partial_create_preserves_append_and_reuses_volume() {
+        use crate::storage::files::{FileTable, OpenMode};
+        let mut stream = RefCell::new(Stream::new(run(io::Partition::mbr(disk(), 0)).unwrap()));
+        run(async {
+            let mut volume = Volume::mount(&mut stream).await.unwrap();
+            let mut files = FileTable::<_, 5>::new(&mut volume);
+            let kept = files.open("/kept.txt", OpenMode::CreateNew).await.unwrap();
+            files.write(kept, b"kept").await.unwrap();
+            files.close(kept).await.unwrap();
+            let partial = files
+                .open("/partial.bin", OpenMode::CreateNew)
+                .await
+                .unwrap();
+            files.write(partial, &[9; 8192]).await.unwrap();
+            let append = files.open("/events.log", OpenMode::Append).await.unwrap();
+            files.write(append, b"event\n").await.unwrap();
+            let read = files.open("/kept.txt", OpenMode::Read).await.unwrap();
+            files.release_caches().await.unwrap();
+            assert_eq!(files.open_count(), 0);
+            assert!(!files.is_poisoned());
+            assert!(files.info(partial).is_err());
+            assert!(files.info(read).is_err());
+            assert!(files.open("/partial.bin", OpenMode::Read).await.is_err());
+            for (path, expected) in [
+                ("/kept.txt", &b"kept"[..]),
+                ("/events.log", &b"event\n"[..]),
+            ] {
+                let handle = files.open(path, OpenMode::Read).await.unwrap();
+                let mut data = [0; 16];
+                let n = files.read(handle, &mut data).await.unwrap();
+                assert_eq!(&data[..n], expected);
+                files.close(handle).await.unwrap();
+            }
+            let again = files.open("/again.txt", OpenMode::CreateNew).await.unwrap();
+            files.write(again, b"new").await.unwrap();
+            files.close(again).await.unwrap();
+            files.release_caches().await.unwrap();
+            drop(files);
+            drop(volume);
+            let mut remount = Volume::mount(&mut stream).await.unwrap();
+            assert!(!remount.needs_recovery());
+            assert_eq!(remount.open("/again.txt").await.unwrap().len(), 3);
+        });
+    }
+    #[test]
     fn long_names_streams_abort_rename_remount_and_independent_image() {
         let disk = disk();
         let yields = disk.yields.clone();
@@ -824,6 +869,11 @@ mod tests {
                 volume.create_dir("/forbidden").await,
                 Err(Error::NeedsRecovery)
             ));
+            {
+                let mut files = crate::storage::files::FileTable::<_, 5>::new(&mut volume);
+                files.release_caches().await.unwrap();
+                assert!(files.needs_recovery());
+            }
             volume.sync().await.unwrap();
             drop(volume);
             assert!(Volume::mount(&mut stream).await.unwrap().needs_recovery());

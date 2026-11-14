@@ -1,5 +1,6 @@
 //! Board integration for the bounded TCP/HTTP file server. Single cooperative
 //! task owns SD+EMAC. RefCell serializes their access to the sole SYSTIMER handle.
+mod alarm_audio;
 mod files;
 #[cfg(feature = "diagnostics")]
 mod storage_lab;
@@ -82,8 +83,8 @@ impl Port for hal::ethernet::Emac<'_, '_> {
         hal::ethernet::Emac::status(self)
     }
 }
-static mut SOCKETS: [tcp::Storage<'static>; tcp::SLOTS] =
-    [const { tcp::Storage::EMPTY }; tcp::SLOTS];
+static mut SOCKETS: [tcp::Storage<'static>; tcp::STORAGE_SLOTS] =
+    [const { tcp::Storage::EMPTY }; tcp::STORAGE_SLOTS];
 static mut CLIPBOARD: http::Text<1024> = http::Text::new();
 #[derive(Clone, Copy, Debug, Default)]
 struct WriteStats {
@@ -337,7 +338,11 @@ impl<P: Port> smoltcp::phy::Device for NetDevice<'_, P> {
         })
     }
 }
-struct Network<'a, 'c, P: Port> {
+struct Network<'a, 'c, 's, P: Port> {
+    services: Option<&'s RefCell<dyn crate::background::Services + 's>>,
+    player: Option<alarm_audio::Player<'a>>,
+    spare_frames: Option<memory::Buffer<'a, memory::Internal>>,
+    console_input: esp32_p4::console::Input,
     port: &'a RefCell<P>,
     tcp: tcp::Stack<'a>,
     console: &'c mut hal::usb_serial::Console,
@@ -360,7 +365,7 @@ struct Network<'a, 'c, P: Port> {
     writes: &'a Cell<WriteStats>,
     busy: &'a Cell<bool>,
 }
-impl<P: Port> Network<'_, '_, P> {
+impl<P: Port> Network<'_, '_, '_, P> {
     #[cfg(feature = "diagnostics")]
     fn sample_losses(&mut self) -> [u64; 4] {
         let raw = self.port.borrow_mut().take_rx_losses();
@@ -369,6 +374,17 @@ impl<P: Port> Network<'_, '_, P> {
         self.losses[2] += u64::from((raw >> 16) & 1);
         self.losses[3] += u64::from((raw >> 28) & 1);
         self.losses
+    }
+    fn stop_background(&mut self) {
+        if let Some(mut player) = self.player.take() {
+            if let Some(services) = self.services {
+                self.port.borrow_mut().with_timer(|timer| {
+                    player.stop(&mut *services.borrow_mut(), timer, self.console)
+                });
+            }
+            player.report(self.console);
+            self.spare_frames = player.take_workspace();
+        }
     }
     // Complete the current bounded FS operation before honoring ESC/deadline.
     // Cancelling its DMA halfway through would quarantine the shared controller.
@@ -380,12 +396,71 @@ impl<P: Port> Network<'_, '_, P> {
     }
     #[inline(never)]
     fn tick(&mut self) -> Result<(), web::Error> {
-        if self.console.read_byte() == Some(27) {
-            self.stop = true;
-        }
         let now = self.port.borrow_mut().now_us();
+        for _ in 0..32 {
+            let Some(byte) = self.console.read_byte() else {
+                break;
+            };
+            if byte == 27 {
+                self.stop = true;
+                self.console_input.clear();
+                break;
+            }
+            if let Some(frame) = self.console_input.feed(byte, now) {
+                match frame {
+                    Ok("help") => {
+                        let _=writeln!(self.console,"WEB CONSOLE (other hardware commands require ESC)\n  net web serve [arguments]\n  rtc [arguments]\n  display clock [arguments]\n  system services [arguments]\nCONSOLE HELP END");
+                    }
+                    Ok("system services") => {
+                        if let Some(player) = self.player.as_ref() {
+                            player.report(self.console);
+                        }
+                        if let Some(ui) = self.services {
+                            ui.borrow().report(self.console);
+                        }
+                    }
+                    Ok(command)
+                        if command == "net web serve" || command.starts_with("net web serve ") =>
+                    {
+                        let _ = writeln!(
+                            self.console,
+                            "WEB RUN ACTIVE; current session unchanged, ESC stops"
+                        );
+                    }
+                    Ok(command) => {
+                        let handled = self.services.is_some_and(|ui| {
+                            self.port.borrow_mut().with_timer(|timer| {
+                                ui.borrow_mut().command(command, timer, self.console)
+                            })
+                        });
+                        if !handled {
+                            let _ = writeln!(
+                                self.console,
+                                "WEB COMMAND unavailable while serving; ESC exits"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        let _ = writeln!(self.console, "COMMAND ERROR {}", error);
+                    }
+                }
+            }
+        }
         if self.stop || now >= self.deadline {
+            self.stop_background();
             return Err(web::Error::Transport);
+        }
+        if let Some(services) = self.services {
+            let mut ui = services.borrow_mut();
+            self.port.borrow_mut().with_timer(|timer| {
+                if let Some(player) = self.player.as_mut() {
+                    player.poll(&mut *ui, timer, self.console);
+                }
+                ui.poll(timer, self.console);
+                if let Some(player) = self.player.as_mut() {
+                    player.poll(&mut *ui, timer, self.console);
+                }
+            });
         }
         #[cfg(feature = "diagnostics")]
         {
@@ -407,6 +482,25 @@ impl<P: Port> Network<'_, '_, P> {
             tx_budget: 16,
         };
         self.tcp.poll(now, &mut device);
+        if let Some(event) = self.tcp.take_address_event() {
+            match event {
+                tcp::AddressEvent::Configured { address, .. } => {
+                    self.ip = address;
+                    let _ = writeln!(
+                        self.console,
+                        "WEB DHCP CONFIGURED {}.{}.{}.{}",
+                        address[0], address[1], address[2], address[3]
+                    );
+                }
+                tcp::AddressEvent::Deconfigured => {
+                    self.ip = [0; 4];
+                    let _ = writeln!(
+                        self.console,
+                        "WEB DHCP DECONFIGURED; reacquiring without stopping UI/FS"
+                    );
+                }
+            }
+        }
         self.ticks += 1;
         #[cfg(feature = "diagnostics")]
         if self.ticks.is_multiple_of(256) {
@@ -420,13 +514,21 @@ impl<P: Port> Network<'_, '_, P> {
         Ok(())
     }
 }
-struct Connection<'a, 'n, 'c, P: Port> {
-    network: &'a RefCell<Network<'n, 'c, P>>,
+impl<P: Port> Drop for Network<'_, '_, '_, P> {
+    fn drop(&mut self) {
+        self.stop_background();
+        if let Some(services) = self.services {
+            services.borrow().report(self.console);
+        }
+    }
+}
+struct Connection<'a, 'n, 'c, 's, P: Port> {
+    network: &'a RefCell<Network<'n, 'c, 's, P>>,
     slot: usize,
     buffer: [u8; tcp::MSS],
     used: usize,
 }
-impl<P: Port> Connection<'_, '_, '_, P> {
+impl<P: Port> Connection<'_, '_, '_, '_, P> {
     fn now(&self) -> u64 {
         self.network.borrow().port.borrow_mut().now_us()
     }
@@ -445,7 +547,7 @@ impl<P: Port> Connection<'_, '_, '_, P> {
         Ok(())
     }
 }
-impl<P: Port> Transport for Connection<'_, '_, '_, P> {
+impl<P: Port> Transport for Connection<'_, '_, '_, '_, P> {
     fn read(&mut self, out: &mut [u8]) -> Result<usize, web::Error> {
         let start = self.now();
         loop {
@@ -498,7 +600,8 @@ impl<P: Port> Transport for Connection<'_, '_, '_, P> {
     }
 }
 #[inline(never)]
-pub fn run(
+#[allow(clippy::too_many_arguments)]
+pub fn run<'s>(
     seconds: u32,
     arena: &memory::Arena<'_, memory::Internal>,
     working: &memory::Arena<'_, memory::Internal>,
@@ -506,6 +609,7 @@ pub fn run(
     console: &mut hal::usb_serial::Console,
     panel: &mut esp32_p4::devices::jd9165::Display,
     external: &mut memory::Arena<'_, memory::External>,
+    services: Option<&'s RefCell<dyn crate::background::Services + 's>>,
 ) -> Result<(), web::Error> {
     if external.stats().used != 0 {
         return Err(web::Error::Storage);
@@ -517,6 +621,7 @@ pub fn run(
         console,
         panel,
         Resources {
+            services,
             working,
             external: Some(external),
             benchmark: None,
@@ -525,7 +630,8 @@ pub fn run(
     external.reset();
     result
 }
-struct Resources<'a, 'mem> {
+struct Resources<'a, 'mem, 's> {
+    services: Option<&'s RefCell<dyn crate::background::Services + 's>>,
     working: &'a memory::Arena<'mem, memory::Internal>,
     external: Option<&'a memory::Arena<'mem, memory::External>>,
     benchmark: Option<StorageBench<'a>>,
@@ -563,6 +669,7 @@ pub fn run_storage_bench(
             console,
             panel,
             Resources {
+                services: None,
                 working,
                 external: None,
                 benchmark: Some(StorageBench {
@@ -585,7 +692,7 @@ fn run_mode(
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
     panel: &mut esp32_p4::devices::jd9165::Display,
-    resources: Resources<'_, '_>,
+    resources: Resources<'_, '_, '_>,
 ) -> Result<(), web::Error> {
     let cache = hal::memory::cache_snapshot();
     if cache.l1_bypass & 16 == 0 || cache.l2_size != 0 {
@@ -644,6 +751,7 @@ pub fn run_wifi(
                 console,
                 panel,
                 Resources {
+                    services: None,
                     working,
                     external: None,
                     benchmark: None,
@@ -669,9 +777,10 @@ fn serve<P: Port>(
     seconds: u32,
     console: &mut hal::usb_serial::Console,
     panel: &mut esp32_p4::devices::jd9165::Display,
-    resources: Resources<'_, '_>,
+    resources: Resources<'_, '_, '_>,
 ) -> Result<(), web::Error> {
     let Resources {
+        services,
         working,
         external,
         benchmark: benchmark_mib,
@@ -679,7 +788,6 @@ fn serve<P: Port>(
     #[cfg(not(feature = "diagnostics"))]
     let _ = benchmark_mib;
     let mut asset = FlashPage::open()?;
-    let xid = port.borrow_mut().now_us() as u32;
     let busy = Cell::new(false);
     let writes = Cell::new(WriteStats::default());
     // Queue storage is a scoped SRAM lease; 88KiB is reclaimed when web-run ends.
@@ -697,7 +805,7 @@ fn serve<P: Port>(
     let address = port.borrow().address();
     let tcp = unsafe {
         tcp::Stack::new(
-            &mut *core::ptr::addr_of_mut!(SOCKETS).cast::<[tcp::Storage<'_>; tcp::SLOTS]>(),
+            &mut *core::ptr::addr_of_mut!(SOCKETS).cast::<[tcp::Storage<'_>; tcp::STORAGE_SLOTS]>(),
             buffers,
             address,
             port.borrow_mut().now_us(),
@@ -705,13 +813,21 @@ fn serve<P: Port>(
     };
     let start = port.borrow_mut().now_us();
     let mut network = Network {
+        services,
+        player: None,
+        spare_frames: None,
+        console_input: esp32_p4::console::Input::default(),
         port,
         tcp,
         console,
         rx: [0; net::FRAME],
         tx: [0; net::FRAME],
         ip: [0; 4],
-        deadline: start + u64::from(seconds) * 1_000_000,
+        deadline: if seconds == 0 {
+            u64::MAX
+        } else {
+            start + u64::from(seconds) * 1_000_000
+        },
         stop: false,
         rx_errors: 0,
         #[cfg(feature = "diagnostics")]
@@ -727,52 +843,20 @@ fn serve<P: Port>(
         busy: &busy,
         writes: &writes,
     };
-    let mut offer = None;
-    let mut next = 0;
-    let mut lease = None;
-    while port.borrow_mut().now_us() < network.deadline {
-        let now = port.borrow_mut().now_us();
-        if now >= next {
-            let n = net::dhcp_for_mac(&mut network.tx, xid, offer, address);
-            port.borrow_mut()
-                .transmit(&network.tx[..n])
-                .map_err(|_| web::Error::Transport)?;
-            next = now + 3_000_000;
+    network.tcp.start_dhcp();
+    let dhcp_deadline = port.borrow_mut().now_us() + 30_000_000;
+    while network.ip == [0; 4] {
+        if let Err(error) = network.tick() {
+            return if network.stop || port.borrow_mut().now_us() >= network.deadline {
+                Ok(())
+            } else {
+                Err(error)
+            };
         }
-        if network.console.read_byte() == Some(27) {
-            return Ok(());
-        }
-        let n = port
-            .borrow_mut()
-            .receive(&mut network.rx)
-            .map_err(|_| web::Error::Transport)?;
-        if let Some(n) = n {
-            if let Some((kind, got)) = net::dhcp_reply_for_mac(&network.rx[..n], xid, address) {
-                if kind == 2 && offer.is_none() && got.address != [0; 4] && got.server != [0; 4] {
-                    offer = Some(got);
-                    next = now;
-                } else if kind == 5
-                    && got.seconds != 0
-                    && offer.is_some_and(|o| o.address == got.address && o.server == got.server)
-                {
-                    lease = Some(got);
-                    break;
-                } else if kind == 6 && offer.is_some_and(|o| o.server == got.server) {
-                    offer = None;
-                    next = now + 3_000_000;
-                }
-            }
+        if port.borrow_mut().now_us() >= dhcp_deadline {
+            return Err(web::Error::Link);
         }
     }
-    let lease = lease.ok_or(web::Error::Transport)?;
-    network.ip = lease.address;
-    network
-        .tcp
-        .configure(lease.address, lease.mask, lease.router)
-        .map_err(|_| web::Error::Transport)?;
-    network.deadline = network
-        .deadline
-        .min(port.borrow_mut().now_us() + u64::from(lease.seconds) * 1_000_000);
     let a = network.ip;
     let network = RefCell::new(network);
     let _irq = unsafe { hal::interrupt::Guard::enter() };
@@ -828,6 +912,35 @@ fn serve<P: Port>(
         }
         hal::sdmmc::profile::reset();
     }
+    if services.is_some() {
+        if let Some(external) = external {
+            match alarm_audio::load(&mut fs, &network, external, working, scratch) {
+                Ok(player) => network.borrow_mut().player = Some(player),
+                Err(error) => {
+                    let _ = writeln!(
+                        network.borrow_mut().console,
+                        "WEB ALARM UNAVAILABLE {}",
+                        error
+                    );
+                    if fs.is_poisoned() {
+                        return Err(web::Error::Storage);
+                    }
+                }
+            }
+        }
+    }
+    let cancelled = {
+        let net = network.borrow();
+        net.stop || port.borrow_mut().now_us() >= net.deadline
+    };
+    if cancelled {
+        let _ = writeln!(network.borrow_mut().console, "WEB START CANCELLED");
+        return esp32_p4::runtime::run(fs.shutdown(), || network.borrow_mut().io_tick())?
+            .map_err(|_| web::Error::Storage);
+    }
+    if let Some(ui) = services {
+        ui.borrow_mut().reset_metrics();
+    }
     let _ = writeln!(
         network.borrow_mut().console,
         "WEB READY http://{}.{}.{}.{}/ seconds={} FS=async-fat handles=5 metadata={}B parallel-files staging={} ESC=stop",
@@ -849,12 +962,38 @@ fn serve<P: Port>(
         hal::sdmmc::MAX_TRANSFER,
         HTTP_SCRATCH
     );
+    if seconds == 0 {
+        let _ = writeln!(
+            network.borrow_mut().console,
+            "WEB RUN ACTIVE persistent; ESC stops, resource release keeps server online"
+        );
+    }
     let mut staging = web::upload::UploadPool::<{ tcp::SLOTS }>::new(external);
     let mut requests = 0;
     let mut transfers = [files::Transfer::Idle; tcp::SLOTS];
     let mut progress = [port.borrow_mut().now_us(); tcp::SLOTS];
     let mut turn = 0;
+    let mut alarm_load_attempted = false;
     let outcome = 'service: loop {
+        let active = services.is_some_and(|ui| ui.borrow().alarm_active());
+        if !active {
+            alarm_load_attempted = false;
+        }
+        if active && !alarm_load_attempted && network.borrow().player.is_none() {
+            alarm_load_attempted = true;
+            if let Some(external) = external {
+                match alarm_audio::load(&mut fs, &network, external, working, scratch) {
+                    Ok(player) => network.borrow_mut().player = Some(player),
+                    Err(error) => {
+                        let _ = writeln!(
+                            network.borrow_mut().console,
+                            "WEB ALARM UNAVAILABLE {}",
+                            error
+                        );
+                    }
+                }
+            }
+        }
         #[cfg(feature = "diagnostics")]
         if transfers.iter().filter(|t| !t.idle()).count() > 1 {
             for t in &mut transfers {
@@ -960,6 +1099,19 @@ fn serve<P: Port>(
                     r.path(),
                     r.length
                 );
+                if fs.open_count() >= 4 {
+                    let mut io = Connection {
+                        network: &network,
+                        slot,
+                        buffer: [0; tcp::MSS],
+                        used: 0,
+                    };
+                    let _ = web::error(&mut io, 503, r.method == http::Method::Head)
+                        .and_then(|_| io.finish());
+                    let mut net = network.borrow_mut();
+                    net.tcp.release(slot);
+                    continue;
+                }
                 let mut connection = Connection {
                     network: &network,
                     slot,
@@ -1032,6 +1184,9 @@ fn serve<P: Port>(
             buffer: [0; tcp::MSS],
             used: 0,
         };
+        let releasing = request
+            .as_ref()
+            .is_ok_and(|r| r.route == http::Route::Release);
         let result = match request {
             Ok(ref r) => {
                 let _ = writeln!(
@@ -1041,7 +1196,55 @@ fn serve<P: Port>(
                     r.path(),
                     r.length
                 );
-                if matches!(
+                if r.route == http::Route::Release {
+                    if services.is_some_and(|ui| ui.borrow().alarm_active()) {
+                        web::error(&mut connection, 409, false)
+                    } else {
+                        network.borrow_mut().tcp.pause_idle_timeout(slot, true);
+                        for (id, state) in transfers.iter_mut().enumerate() {
+                            if !state.idle() {
+                                let mut net = network.borrow_mut();
+                                net.tcp.abort(id);
+                                net.tcp.release(id);
+                                *state = files::Transfer::Idle;
+                            }
+                        }
+                        let closed = esp32_p4::runtime::run(fs.release_caches(), || {
+                            network.borrow_mut().io_tick()
+                        })
+                        .and_then(|r| r.map_err(|_| web::Error::Storage));
+                        if closed.is_err() {
+                            web::error(&mut connection, 503, false)
+                        } else if services.is_some_and(|ui| ui.borrow().alarm_active()) {
+                            // AF may have arrived while freeing a long chain. Keep
+                            // cached PCM and let it play; do not cut an active alarm.
+                            drop(staging);
+                            staging = web::upload::UploadPool::<{ tcp::SLOTS }>::new(external);
+                            web::error(&mut connection, 409, false)
+                        } else {
+                            network.borrow_mut().stop_background();
+                            drop(staging);
+                            let before = external.map(|a| a.stats().used).unwrap_or(0);
+                            let reset = external.is_none_or(|a| a.reset_if_unused());
+                            staging = web::upload::UploadPool::<{ tcp::SLOTS }>::new(external);
+                            alarm_load_attempted = false;
+                            let used = external.map(|a| a.stats().used).unwrap_or(0);
+                            let _ = writeln!(
+                                network.borrow_mut().console,
+                                "WEB RESOURCES RELEASE reset={} before={} used={} open_files={}",
+                                reset,
+                                before,
+                                used,
+                                fs.open_count()
+                            );
+                            if !reset {
+                                web::error(&mut connection, 503, false)
+                            } else {
+                                web::resources_released(&mut connection, before - used, used)
+                            }
+                        }
+                    }
+                } else if matches!(
                     r.route,
                     http::Route::NetTest
                         | http::Route::Clipboard
@@ -1080,6 +1283,9 @@ fn serve<P: Port>(
             Err(code) => web::error(&mut connection, code, false),
         };
         let result = result.and_then(|()| connection.finish());
+        if releasing {
+            network.borrow_mut().tcp.pause_idle_timeout(slot, false);
+        }
         if result.is_err() {
             network.borrow_mut().tcp.abort(slot);
         }
