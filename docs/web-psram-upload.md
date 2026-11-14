@@ -1,4 +1,7 @@
-# HTTP upload через PSRAM — 2026-11-14
+# HTTP upload через PSRAM — исходный одиночный буфер
+
+Историческое описание первого этапа от 2026-11-14. Текущий приём использует
+[PSRAM-кольцо с перекрытием TCP/SD](http-upload-ring.md), а не один блок.
 
 Обычный проводной web-run теперь использует:
 TCP RX SRAM → общий scratch SRAM8KiB → очередь файла PSRAM32KiB → SDMMC DMA.

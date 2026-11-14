@@ -9,7 +9,11 @@ const HOST_DIV: u32 = 2;
 const MASK: u64 = (1 << 48) - 1;
 /// Maximum bytes per sector transfer (16 sectors), bounded internal SRAM use.
 #[cfg(not(feature = "sd-wide-bench"))]
-pub const MAX_TRANSFER: usize = 8192;
+pub const MAX_TRANSFER: usize = match option_env!("P4_SD_BOUNCE_KIB") {
+    Some(v) if v.as_bytes()[0] == b'3' => 32768,
+    Some(v) if v.as_bytes()[0] == b'1' => 16384,
+    _ => 8192,
+};
 #[cfg(feature = "sd-wide-bench")]
 pub const MAX_TRANSFER: usize = 32768;
 pub const MAX_DIRECT_TRANSFER: usize = 32768;
@@ -18,7 +22,12 @@ const DMA_CHUNK: usize = 4096;
 struct DmaBuffer([u32; MAX_TRANSFER / 4]);
 // The unsafe constructor grants exclusive controller AND workspace ownership.
 // Static SRAM avoids placing an 8 KiB bounce buffer on the small boot stack.
-#[cfg_attr(not(feature = "sd-wide-bench"), link_section = ".dma.fixed")]
+// Experimental sizes use upper SRAM BSS: the fixed low workspace is only 16KiB
+// and also holds I2S. All experiment sizes, including 8KiB, use the same region.
+#[cfg_attr(
+    not(any(feature = "sd-wide-bench", sd_bounce_experiment)),
+    link_section = ".dma.fixed"
+)]
 static mut DMA_BUFFER: DmaBuffer = DmaBuffer([0; MAX_TRANSFER / 4]);
 #[cfg(feature = "wifi")]
 static mut COMMAND_LEVELS: [u32; 2] = [u32::MAX, 0];

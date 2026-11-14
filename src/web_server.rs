@@ -17,6 +17,11 @@ use esp32_p4::{
     },
     web::{self, Asset, Transport},
 };
+const HTTP_SCRATCH: usize = match option_env!("P4_HTTP_SCRATCH_KIB") {
+    Some(v) if v.as_bytes()[0] == b'3' => 32768,
+    Some(v) if v.as_bytes()[0] == b'1' => 16384,
+    _ => 8192,
+};
 /// One owner serializes controller I/O and lends its sole timer to SD.
 pub(crate) trait Port {
     #[cfg(feature = "wifi")]
@@ -496,6 +501,7 @@ impl<P: Port> Transport for Connection<'_, '_, '_, P> {
 pub fn run(
     seconds: u32,
     arena: &memory::Arena<'_, memory::Internal>,
+    working: &memory::Arena<'_, memory::Internal>,
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
     panel: &mut esp32_p4::devices::jd9165::Display,
@@ -511,6 +517,7 @@ pub fn run(
         console,
         panel,
         Resources {
+            working,
             external: Some(external),
             benchmark: None,
         },
@@ -519,6 +526,7 @@ pub fn run(
     result
 }
 struct Resources<'a, 'mem> {
+    working: &'a memory::Arena<'mem, memory::Internal>,
     external: Option<&'a memory::Arena<'mem, memory::External>>,
     benchmark: Option<StorageBench<'a>>,
 }
@@ -533,6 +541,7 @@ struct StorageBench<'a> {
 pub fn run_storage_bench(
     mib: u32,
     arena: &memory::Arena<'_, memory::Internal>,
+    working: &memory::Arena<'_, memory::Internal>,
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
     panel: &mut esp32_p4::devices::jd9165::Display,
@@ -554,6 +563,7 @@ pub fn run_storage_bench(
             console,
             panel,
             Resources {
+                working,
                 external: None,
                 benchmark: Some(StorageBench {
                     mib,
@@ -609,6 +619,7 @@ fn run_mode(
 pub fn run_wifi(
     seconds: u32,
     arena: &memory::Arena<'_, memory::Internal>,
+    working: &memory::Arena<'_, memory::Internal>,
     timer: &mut hal::time::Timer,
     console: &mut hal::usb_serial::Console,
     panel: &mut esp32_p4::devices::jd9165::Display,
@@ -633,6 +644,7 @@ pub fn run_wifi(
                 console,
                 panel,
                 Resources {
+                    working,
                     external: None,
                     benchmark: None,
                 },
@@ -660,6 +672,7 @@ fn serve<P: Port>(
     resources: Resources<'_, '_>,
 ) -> Result<(), web::Error> {
     let Resources {
+        working,
         external,
         benchmark: benchmark_mib,
     } = resources;
@@ -786,8 +799,8 @@ fn serve<P: Port>(
     })?
     .map_err(|_| web::Error::Storage)?;
     let mut fs = FileTable::<_, 5>::new(&mut volume);
-    let mut scratch_allocation = arena
-        .allocate(core::alloc::Layout::from_size_align(8192, 64).unwrap())
+    let mut scratch_allocation = working
+        .allocate(core::alloc::Layout::from_size_align(HTTP_SCRATCH, 64).unwrap())
         .map_err(|_| web::Error::Storage)?;
     let scratch = scratch_allocation.as_mut_slice();
     #[cfg(feature = "diagnostics")]
@@ -824,9 +837,18 @@ fn serve<P: Port>(
         a[3],
         seconds,
         core::mem::size_of_val(&fs),
-        if external.is_some() { "PSRAM32K" } else { "SRAM" }
+        if external.is_some() { "PSRAM-ring" } else { "SRAM" }
     );
 
+    let _ = writeln!(
+        network.borrow_mut().console,
+        "WEB RING blocks={} block={} capacity={} per-upload sd_bounce={} http_scratch={}",
+        web::upload::BLOCKS,
+        web::upload::BLOCK,
+        web::upload::CHUNK,
+        hal::sdmmc::MAX_TRANSFER,
+        HTTP_SCRATCH
+    );
     let mut staging = web::upload::UploadPool::<{ tcp::SLOTS }>::new(external);
     let mut requests = 0;
     let mut transfers = [files::Transfer::Idle; tcp::SLOTS];
@@ -1096,10 +1118,11 @@ fn serve<P: Port>(
     };
     let _ = writeln!(
         network.borrow_mut().console,
-        "WEB STAGING allocated_slots={} peak_active={} chunk={}",
+        "WEB STAGING allocated_slots={} peak_active={} chunk={} sd_bounce={}",
         staging.stats().0,
         staging.stats().1,
-        web::upload::CHUNK
+        web::upload::CHUNK,
+        hal::sdmmc::MAX_TRANSFER
     );
     let cleanup = esp32_p4::runtime::run(fs.shutdown(), || network.borrow_mut().io_tick())
         .and_then(|r| r.map_err(|_| web::Error::Storage));

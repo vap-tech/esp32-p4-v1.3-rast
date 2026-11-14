@@ -1,4 +1,32 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=P4_HTTP_SCRATCH_KIB");
+    if let Ok(value) = std::env::var("P4_HTTP_SCRATCH_KIB") {
+        assert!(
+            ["8", "16", "32"].contains(&value.as_str()),
+            "invalid P4_HTTP_SCRATCH_KIB"
+        );
+        println!("cargo:rustc-env=P4_HTTP_SCRATCH_KIB={value}");
+    }
+    println!("cargo:rustc-check-cfg=cfg(sd_bounce_experiment)");
+    println!("cargo:rerun-if-env-changed=P4_SD_BOUNCE_KIB");
+    if let Ok(value) = std::env::var("P4_SD_BOUNCE_KIB") {
+        assert!(
+            ["8", "16", "32"].contains(&value.as_str()),
+            "invalid P4_SD_BOUNCE_KIB"
+        );
+        println!("cargo:rustc-env=P4_SD_BOUNCE_KIB={value}");
+        println!("cargo:rustc-cfg=sd_bounce_experiment");
+    }
+    for (name, allowed) in [
+        ("P4_UPLOAD_BLOCK_KIB", ["32", "64"]),
+        ("P4_UPLOAD_BLOCKS", ["2", "3"]),
+    ] {
+        println!("cargo:rerun-if-env-changed={name}");
+        if let Ok(value) = std::env::var(name) {
+            assert!(allowed.contains(&value.as_str()), "invalid {name}");
+            println!("cargo:rustc-env={name}={value}");
+        }
+    }
     println!("cargo:rerun-if-changed=link.x");
     for filename in ["commands.tsv", "command-routes.tsv"] {
         println!("cargo:rerun-if-changed={filename}");

@@ -10,6 +10,9 @@ pub(super) struct Upload {
     left: u32,
     total: u32,
     queued: usize,
+    head: usize,
+    overlap_bytes: u32,
+    peak_queued: usize,
     flushes: u32,
     started: u64,
     #[cfg(feature = "diagnostics")]
@@ -129,6 +132,9 @@ pub(super) async fn start<D: disk::BlockDevice, const N: usize>(
             left: len,
             total: len,
             queued: 0,
+            head: 0,
+            overlap_bytes: 0,
+            peak_queued: 0,
             flushes: 0,
             started: now,
             #[cfg(feature = "diagnostics")]
@@ -216,87 +222,131 @@ pub(super) async fn step<P: Port, D: disk::BlockDevice, const N: usize>(
         }
         Transfer::Upload(mut upload) => {
             let available = network.borrow().tcp.read_available(slot);
-            if network.borrow().tcp.input_finished(slot) && available < upload.left as usize {
-                return Err(web::Error::Transport);
-            }
-            let room = if staging.enabled() {
-                CHUNK - upload.queued
-            } else {
-                scratch.len()
-            };
-            let want = web::asyncfs::upload_chunk(
-                available,
-                upload.left as usize,
-                scratch.len().min(room),
-            );
-            if want == 0 {
-                #[cfg(feature = "diagnostics")]
+            #[cfg(feature = "diagnostics")]
+            if available == 0 && upload.left != 0 {
                 upload
                     .trace
                     .empty(network.borrow().port.borrow_mut().now_us());
-                *state = Transfer::Upload(upload);
-                return if network.borrow().tcp.eof(slot) {
-                    Err(web::Error::Transport)
-                } else {
-                    Ok(Step::Waiting)
-                };
             }
-            // Join already queued TCP ring fragments without a network wait.
-            #[cfg(feature = "diagnostics")]
-            let read_start = network.borrow().port.borrow_mut().now_us();
-            let mut n = 0;
-            while n < want {
-                let got = network.borrow_mut().tcp.read(slot, &mut scratch[n..want]);
-                if got == 0 {
-                    return Err(web::Error::Transport);
-                }
-                n += got;
+            if network.borrow().tcp.input_finished(slot) && available < upload.left as usize {
+                return Err(web::Error::Transport);
             }
-            #[cfg(feature = "diagnostics")]
-            upload
-                .trace
-                .read(network.borrow().port.borrow_mut().now_us() - read_start);
-            upload.left -= n as u32;
-            #[cfg(feature = "diagnostics")]
-            upload
-                .trace
-                .available(network.borrow().port.borrow_mut().now_us());
             if staging.enabled() {
+                let tail = (upload.head + upload.queued) % CHUNK;
+                let want = available
+                    .min(upload.left as usize)
+                    .min(scratch.len())
+                    .min(CHUNK - upload.queued)
+                    .min(CHUNK - tail);
+                if want != 0 {
+                    #[cfg(feature = "diagnostics")]
+                    let read_start = network.borrow().port.borrow_mut().now_us();
+                    let n = network.borrow_mut().tcp.read(slot, &mut scratch[..want]);
+                    #[cfg(feature = "diagnostics")]
+                    let copy_start = {
+                        let now = network.borrow().port.borrow_mut().now_us();
+                        upload.trace.read(now - read_start);
+                        upload.trace.available(now);
+                        now
+                    };
+                    staging
+                        .append(slot, tail, &scratch[..n])
+                        .map_err(|_| web::Error::Storage)?;
+                    #[cfg(feature = "diagnostics")]
+                    upload
+                        .trace
+                        .copied(network.borrow().port.borrow_mut().now_us() - copy_start, n);
+                    upload.left -= n as u32;
+                    upload.queued += n;
+                    upload.peak_queued = upload.peak_queued.max(upload.queued);
+                }
+                if upload.queued < esp32_p4::web::upload::BLOCK && upload.left != 0 {
+                    *state = Transfer::Upload(upload);
+                    return Ok(if want == 0 {
+                        Step::Waiting
+                    } else {
+                        Step::Progress
+                    });
+                }
+                let length = upload.queued.min(QUANTUM).min(CHUNK - upload.head);
+                let (source, before, after) = staging.parts(slot, upload.head, length);
+                let source_end = upload.head + length;
+                // The filesystem future owns only the immutable in-flight range.
+                // While SD is pending, receive into other, disjoint ring regions.
                 #[cfg(feature = "diagnostics")]
-                let copy_start = network.borrow().port.borrow_mut().now_us();
-                staging
-                    .append(slot, upload.queued, &scratch[..n])
-                    .map_err(|_| web::Error::Storage)?;
+                let write_start = network.borrow().port.borrow_mut().now_us();
+                let write = files.write(upload.file, source);
+                let mut write = core::pin::pin!(write);
+                let wrote = core::future::poll_fn(|cx| {
+                    use core::{future::Future, task::Poll};
+                    if let Poll::Ready(result) = write.as_mut().poll(cx) {
+                        return Poll::Ready(result);
+                    }
+                    let tail = (upload.head + upload.queued) % CHUNK;
+                    let available = network.borrow().tcp.read_available(slot);
+                    let want = available
+                        .min(upload.left as usize)
+                        .min(scratch.len())
+                        .min(CHUNK - upload.queued)
+                        .min(CHUNK - tail);
+                    if want != 0 {
+                        #[cfg(feature = "diagnostics")]
+                        let read_start = network.borrow().port.borrow_mut().now_us();
+                        let n = network.borrow_mut().tcp.read(slot, &mut scratch[..want]);
+                        #[cfg(feature = "diagnostics")]
+                        let copy_start = {
+                            let now = network.borrow().port.borrow_mut().now_us();
+                            upload.trace.read(now - read_start);
+                            upload.trace.available(now);
+                            now
+                        };
+                        let dst = if tail < upload.head {
+                            &mut before[tail..tail + n]
+                        } else {
+                            &mut after[tail - source_end..tail - source_end + n]
+                        };
+                        esp32_p4::web::upload::copy_paced(dst, &scratch[..n]);
+                        #[cfg(feature = "diagnostics")]
+                        upload
+                            .trace
+                            .copied(network.borrow().port.borrow_mut().now_us() - copy_start, n);
+                        upload.queued += n;
+                        upload.overlap_bytes += n as u32;
+                        upload.peak_queued = upload.peak_queued.max(upload.queued);
+                        upload.left -= n as u32;
+                        if n != 0 {
+                            cx.waker().wake_by_ref();
+                        }
+                    }
+                    Poll::Pending
+                })
+                .await
+                .map_err(|_| web::Error::Storage)?;
                 #[cfg(feature = "diagnostics")]
                 upload
                     .trace
-                    .copied(network.borrow().port.borrow_mut().now_us() - copy_start, n);
-                upload.queued += n;
-                if upload.queued != CHUNK && upload.left != 0 {
-                    *state = Transfer::Upload(upload);
-                    return Ok(Step::Progress);
+                    .wrote(network.borrow().port.borrow_mut().now_us() - write_start);
+                if wrote != length {
+                    return Err(web::Error::Storage);
                 }
-            }
-            let data = if staging.enabled() {
-                staging.data(slot, upload.queued)
+                upload.head = (upload.head + wrote) % CHUNK;
+                upload.queued -= wrote;
             } else {
-                &scratch[..n]
-            };
-            #[cfg(feature = "diagnostics")]
-            let begun = network.borrow().port.borrow_mut().now_us();
-            let wrote = files
-                .write(upload.file, data)
-                .await
-                .map_err(|_| web::Error::Storage)?;
-            #[cfg(feature = "diagnostics")]
-            upload
-                .trace
-                .wrote(network.borrow().port.borrow_mut().now_us() - begun);
-            if wrote != data.len() {
-                return Err(web::Error::Storage);
+                let want =
+                    web::asyncfs::upload_chunk(available, upload.left as usize, scratch.len());
+                if want == 0 {
+                    return Ok(Step::Waiting);
+                }
+                let n = network.borrow_mut().tcp.read(slot, &mut scratch[..want]);
+                let wrote = files
+                    .write(upload.file, &scratch[..n])
+                    .await
+                    .map_err(|_| web::Error::Storage)?;
+                if wrote != n {
+                    return Err(web::Error::Storage);
+                }
+                upload.left -= n as u32;
             }
-            // Await completed: SD no longer reads this queue, so it can be refilled.
-            upload.queued = 0;
             upload.flushes += 1;
             if upload.flushes.is_multiple_of(2048) {
                 let _ = writeln!(
@@ -307,7 +357,7 @@ pub(super) async fn step<P: Port, D: disk::BlockDevice, const N: usize>(
                     upload.total
                 );
             }
-            if upload.left == 0 {
+            if upload.left == 0 && upload.queued == 0 {
                 #[cfg(feature = "diagnostics")]
                 let append = files
                     .info(upload.file)
@@ -332,10 +382,18 @@ pub(super) async fn step<P: Port, D: disk::BlockDevice, const N: usize>(
                     upload.flushes,
                     now - upload.started,
                     if staging.enabled() {
-                        "PSRAM32K"
+                        "PSRAM-ring"
                     } else {
                         "SRAM"
                     }
+                );
+                let _ = writeln!(
+                    network.borrow_mut().console,
+                    "WEB RING USE slot={} received_during_sd={} peak_queued={} capacity={}",
+                    slot,
+                    upload.overlap_bytes,
+                    upload.peak_queued,
+                    if staging.enabled() { CHUNK } else { 0 }
                 );
                 let stats = network.borrow().writes.get();
                 let _ = writeln!(network.borrow_mut().console, "SD WRITE TOTALS {:?}", stats);

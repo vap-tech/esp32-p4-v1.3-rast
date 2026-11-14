@@ -41,6 +41,49 @@ pub async fn serve<D: BlockDevice, const N: usize>(
     let head = r.method == Method::Head;
     match r.route {
         Route::Index => {
+            // SD page is streamed, never retained as a whole in SRAM. Flash is
+            // the recovery UI when the editable page has not been installed.
+            if r.argument() != "flash=1" {
+                match fs
+                    .open("/www/index.html", crate::storage::files::OpenMode::Read)
+                    .await
+                {
+                    Ok(file) => {
+                        let len = fs.info(file).map_err(|_| Error::Storage)?.len;
+                        let result = async {
+                            headers(
+                                io,
+                                200,
+                                Some(u32::try_from(len).map_err(|_| Error::Storage)?),
+                                "text/html; charset=utf-8",
+                                "",
+                            )?;
+                            if !head {
+                                let mut left = len;
+                                while left != 0 {
+                                    let want = scratch.len().min(left as usize);
+                                    let n = fs
+                                        .read(file, &mut scratch[..want])
+                                        .await
+                                        .map_err(|_| Error::Storage)?;
+                                    if n == 0 {
+                                        return Err(Error::Storage);
+                                    }
+                                    io.write_all(&scratch[..n])?;
+                                    left -= n as u64;
+                                }
+                            }
+                            Ok(())
+                        }
+                        .await;
+                        fs.close(file).await.map_err(|_| Error::Storage)?;
+                        return result;
+                    }
+                    Err(FsError::Fs(embedded_fatfs::Error::NotFound) | FsError::NotFile) => {}
+                    Err(e) => return error(io, status(&e), head),
+                }
+            }
+
             headers(
                 io,
                 200,

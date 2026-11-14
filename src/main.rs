@@ -250,7 +250,11 @@ extern "C" fn rust_main() -> ! {
                             let _ = writeln!(console, "SD FILE BENCH DONE Err(size 1..64 MiB)");
                             continue;
                         };
-                        if camera_live || alarm_active || dma_arena.stats().used != 0 {
+                        if camera_live
+                            || alarm_active
+                            || dma_arena.stats().used != 0
+                            || internal_arena.stats().used != 0
+                        {
                             let _ = writeln!(console, "SD FILE BENCH DONE Err(busy)");
                             continue;
                         }
@@ -261,6 +265,7 @@ extern "C" fn rust_main() -> ! {
                         let result = web_server::run_storage_bench(
                             mib,
                             &dma_arena,
+                            &internal_arena,
                             &mut timer,
                             &mut console,
                             panel,
@@ -274,6 +279,7 @@ extern "C" fn rust_main() -> ! {
                             },
                         );
                         dma_arena.reset();
+                        internal_arena.reset();
                         let framebuffer_guards =
                             framebuffer.as_ref().is_some_and(|fb| fb.guards_ok());
                         let _ = writeln!(
@@ -468,7 +474,11 @@ extern "C" fn rust_main() -> ! {
                     #[cfg(feature = "wifi")]
                     {
                         if let Ok(seconds @ 1..=3600) = seconds.parse::<u32>() {
-                            if camera_live || alarm_active || dma_arena.stats().used != 0 {
+                            if camera_live
+                                || alarm_active
+                                || dma_arena.stats().used != 0
+                                || internal_arena.stats().used != 0
+                            {
                                 let _ = writeln!(console, "WEB RUN DONE Err(busy)");
                                 continue;
                             }
@@ -478,11 +488,13 @@ extern "C" fn rust_main() -> ! {
                             let result = web_server::run_wifi(
                                 seconds,
                                 &dma_arena,
+                                &internal_arena,
                                 &mut timer,
                                 &mut console,
                                 panel,
                             );
                             dma_arena.reset();
+                            internal_arena.reset();
                             let _ = writeln!(
                                 console,
                                 "WEB RUN DONE {:?} stack={:?}",
@@ -498,7 +510,10 @@ extern "C" fn rust_main() -> ! {
                     let _ = seconds;
                 } else if let Some(seconds) = line.strip_prefix("web-run ") {
                     if let Ok(seconds @ 1..=86400) = seconds.parse::<u32>() {
-                        if camera_live || dma_arena.stats().used != 0 {
+                        if camera_live
+                            || dma_arena.stats().used != 0
+                            || internal_arena.stats().used != 0
+                        {
                             let _ = writeln!(console, "WEB RUN DONE Err(state)");
                             continue;
                         }
@@ -513,12 +528,14 @@ extern "C" fn rust_main() -> ! {
                         let result = web_server::run(
                             seconds,
                             &dma_arena,
+                            &internal_arena,
                             &mut timer,
                             &mut console,
                             panel,
                             external,
                         );
                         dma_arena.reset();
+                        internal_arena.reset();
                         let _ = writeln!(
                             console,
                             "WEB RUN DONE {:?} stack={:?}",

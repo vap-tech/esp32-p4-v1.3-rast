@@ -130,7 +130,13 @@ pub fn parse(bytes: &[u8]) -> Result<Request, u16> {
     let (target, query) = target.split_once('?').unwrap_or((target, ""));
     let mut argument = "";
     let mut download = false;
-    let (route, path) = if matches!(target, "/" | "/index.html") && query.is_empty() {
+    let (route, path) = if target == "/flash" && (query.is_empty() || query.starts_with("path=")) {
+        // The UI stores its current directory in history; /flash stays the
+        // recovery endpoint after directory navigation and browser reload.
+        argument = "flash=1";
+        (Route::Index, "/")
+    } else if matches!(target, "/" | "/index.html") && matches!(query, "" | "flash=1") {
+        argument = query;
         (Route::Index, "/")
     } else if target == "/api/list" {
         (Route::List, query.strip_prefix("path=").ok_or(400u16)?)
@@ -336,6 +342,29 @@ pub fn json_string(out: &mut impl fmt::Write, s: &str) -> fmt::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_flash_page_only_accepts_get_head_and_exact_flag() {
+        extern crate std;
+        for target in [
+            "/?flash=1",
+            "/index.html?flash=1",
+            "/flash",
+            "/flash?path=%2Fwww",
+        ] {
+            for method in ["GET", "HEAD"] {
+                let text = std::format!("{method} {target} HTTP/1.1\r\nHost: p4\r\n\r\n");
+                let r = parse(text.as_bytes()).unwrap();
+                assert_eq!(r.route, Route::Index);
+                assert_eq!(r.argument(), "flash=1");
+            }
+        }
+        assert!(parse(b"GET /?flash=0 HTTP/1.1\r\nHost: p4\r\n\r\n").is_err());
+        assert!(parse(b"GET /?flash=1&x=1 HTTP/1.1\r\nHost: p4\r\n\r\n").is_err());
+        assert_eq!(
+            parse(b"POST /?flash=1 HTTP/1.1\r\nHost: p4\r\nContent-Length: 0\r\n\r\n").unwrap_err(),
+            405
+        );
+    }
     #[test]
     fn diagnostic_append_requires_bounded_body() {
         let result = parse(b"POST /fs/LOG.TXT HTTP/1.1\r\nHost: p4\r\nContent-Length: 32\r\n\r\n");

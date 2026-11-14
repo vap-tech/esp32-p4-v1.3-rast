@@ -43,7 +43,7 @@ Flashbox — лёгкий файловый менеджер для ESP32-P4. О�
 Предел FAT32 — 4 ГиБ − 1 байт. Имена не обрезаются и не переименовываются молча.
 LFN и короткие aliases создаёт новый async FAT backend.
 
-На борде работает собственный bounded TCP/HTTP backend: страница из Flash,
+На борде работает собственный bounded TCP/HTTP backend: страница из `/www/index.html` на SD (запасной gzip-вариант во Flash),
 GET/HEAD файлов, список и потоковый PUT на SD. Запуск и ограничения —
 [docs/web.md](../docs/web.md). FAT32 публикует файл только после finish;
 обрыв при здоровом носителе вызывает abort. I/O failure оставляет dirty volume.
@@ -150,3 +150,7 @@ Demo использует тот же UI и локальный XHR-адапте�
 подтверждение сохранения только после ответа сервера. Второй4MiB PUT отменён
 кнопкой: дождались исчезновения writer, незавершённый файл удалён, root совпал.
 Превью: target/upload-ui-preview.png; лог: target/frontend-checks/p4-ui-live.log.
+
+Страница на SD устанавливается `python3 scripts/install-web.py`; [правила установки и fallback](../docs/web-sd-page.md).
+
+Запасной интерфейс из Flash: `/flash` (или `/?flash=1`), независимо от HTML в `/www`.

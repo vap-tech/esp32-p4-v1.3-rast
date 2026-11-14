@@ -585,3 +585,19 @@ Default CMD53 image прошит, профиль R4-2G-TEST, веб-сервер
 Профиль реального HTTP upload64MiB: [http-upload-profile.md](http-upload-profile.md). Главные затраты — FAT21,27s и CPU→PSRAM10,32s; EMAC losses0, TCP zero-window37,61s.
 
 Реализован общий четырёхсекторный write-back кеш FAT с барьерами sync/close и тестами отказов: [fat-writeback.md](fat-writeback.md). HTTP64MiB:2,14MiB/s вместо1,29;117 записей метаданных вместо8243.
+
+Страница теперь устанавливается в `/www/index.html` на SD и потоково отдаётся
+по `/`; встроенный gzip во Flash остаётся fallback. HEAD и переключение источника
+проверены: [web-sd-page.md](web-sd-page.md).
+
+HTTP upload получил PSRAM-кольцо с приёмом TCP во время ожидания SD. Проверены
+2×32, 2×64, 3×32, 3×64 КиБ. На 64-МиБ файле PUT 2,59–2,75 МиБ/с против прежних
+2,14, GET около 3,7; выбран 2×32. SRAM bounce остаётся 8 КиБ, прямой SD batch
+32 КиБ. Все тестовые файлы побайтово проверены и удалены; детали и ограничения
+TCP: [http-upload-ring.md](http-upload-ring.md).
+
+Проверены SRAM SD bounce и HTTP scratch по 8/16/32 КиБ: увеличение bounce не
+дало эффекта; HTTP scratch 16/32 снизил чтение примерно с 3,72 до 3,50 МиБ/с.
+Оба оставлены 8 КиБ. CPU scratch перенесён из DMA-арены в рабочую Internal-арену
+с освобождением после web-run. Добавлены `/flash` и `/?flash=1` для принудительного
+открытия встроенной страницы, даже если `/www/index.html` существует, но сломан.
