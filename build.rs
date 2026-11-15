@@ -50,7 +50,9 @@ fn main() {
                             "software-jpeg",
                             "audio-lab",
                             "hp-worker",
-                            "lp-timer"
+                            "lp-timer",
+                            "jpeg-lab",
+                            "ppa-lab"
                         ]
                         .contains(&feature),
                         "unknown command feature"

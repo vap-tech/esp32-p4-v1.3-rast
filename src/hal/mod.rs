@@ -9,6 +9,7 @@ pub mod gpio;
 pub mod i2c;
 pub mod i2s;
 pub mod interrupt;
+pub mod jpeg;
 pub mod ledc;
 #[cfg(target_arch = "riscv32")]
 pub mod lp;
@@ -22,3 +23,10 @@ pub mod usb_serial;
 pub mod watchdog;
 
 pub mod arbitration;
+
+#[cfg(all(
+    target_arch = "riscv32",
+    any(feature = "jpeg-lab", feature = "ppa-lab")
+))]
+pub(crate) mod dma2d;
+pub mod ppa;

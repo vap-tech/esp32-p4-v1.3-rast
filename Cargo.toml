@@ -10,6 +10,9 @@ hp-worker = []
 pie-lab = ["hp-worker"]
 # A/B: HP0 PIE copies of CPU-owned Ethernet SRAM frames; DMA policy unchanged.
 ethernet-pie = []
+# Polled JPEG + 2D-DMA hardware bring-up, independent of software JPEG.
+jpeg-lab = []
+ppa-lab = []
 lp-timer = []
 # Boot-time second HP core experiment; not part of the normal image.
 multicore-lab = []

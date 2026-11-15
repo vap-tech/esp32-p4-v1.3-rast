@@ -152,3 +152,16 @@ wifi/software-jpeg/audio-lab/diagnostics; Clippy default, wifi-only, JPEG-only
 Обновление sd-wide-bench: теперь четыре пути SRAM/PSRAM × bounce/direct, все по 32 КиБ; [результаты и контракт DMA](sd-psram-dma.md).
 
 Прямой TX и 32-КиБ FileTable теперь доступны в default для проводного PSRAM upload; большие SRAM statics остаются диагностическими. [Описание](web-psram-upload.md).
+
+`jpeg-lab` — аппаратный JPEG + 2D-DMA, отдельная экспериментальная команда
+`display jpeg hardware`. Не включает software-jpeg. Ограничения и workaround
+AXI RID counter описаны в [jpeg.md](jpeg.md); обычная сборка не меняется.
+
+`ppa-lab` — offscreen PPA RGB565 FILL/SRM; команды `display ppa test`,
+`display ppa srm`, `display ppa srm-large`, `display ppa srm-stress`.
+Не включает JPEG и не меняет scanout; [контракт и замеры](ppa.md).
+
+SRM: [геометрия, качество и измерения](ppa-srm.md).
+
+`ppa-lab` также содержит экспериментальный BLEND и отдельные `blend*-probe`
+команды; RID error остаётся открытым. [Контракт](ppa-blend.md).

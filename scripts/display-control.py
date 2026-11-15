@@ -48,6 +48,7 @@ parser.add_argument('--web-run', nargs='?', const=0, type=int, metavar='SECONDS'
 parser.add_argument('--eth-run', type=int, metavar='SECONDS', help='poll Ethernet DHCP/ARP/ping for 1..600 seconds (D-cache OFF)')
 parser.add_argument('--memory-test', action='store_true', help='destructive full PSRAM test before framebuffer initialization')
 parser.add_argument('--memory-bench', action='store_true', help='benchmark SRAM/PSRAM scratch buffers; preserves display pixels')
+parser.add_argument('--jpeg-hardware', nargs='?', const='test', metavar='PATH', help='jpeg-lab: offscreen hardware decode or built-in tests; stop web first')
 parser.add_argument('--jpeg-bench', nargs='?', const='HOME.JPG', metavar='PATH', help='compare JPEG decode with framebuffer writes vs checksum only (ABBA)')
 parser.add_argument('--jpeg-profile', nargs='?', const='HOME.JPG', metavar='PATH', help='profile JPEG stages vs uninstrumented controls (PUUP)')
 parser.add_argument('--clock', action='store_true', help='read CPU root/dividers and calibrate mcycle without changing frequency')
@@ -72,7 +73,7 @@ if args.eth_run is not None and not 1 <= args.eth_run <= 600:
     parser.error('--eth-run requires 1..600 seconds')
 if not 1 <= args.record_seconds <= 600:
     parser.error('--record-seconds requires 1..600')
-for path in (args.record, args.image, args.play, args.jpeg_bench, args.jpeg_profile, args.jpeg_idct_bench, args.play_stall):
+for path in (args.jpeg_hardware, args.record, args.image, args.play, args.jpeg_bench, args.jpeg_profile, args.jpeg_idct_bench, args.play_stall):
     if path is not None and (not path or not path.isascii() or any(c.isspace() for c in path) or len(path) > 80):
         parser.error('media paths must be ASCII without whitespace, at most 80 characters (FAT32 8.3 components)')
 if any(not c or not c.isascii() or any(x in c for x in '\r\n') for c in args.commands) or args.hold < 0:
@@ -395,6 +396,11 @@ try:
         line = receive(b'MEDIA IMAGE DONE', timeout=120)
         if b'Err(' in line or b'active=false' in line:
             raise RuntimeError('Image command failed; see firmware reply')
+    if args.jpeg_hardware is not None:
+        send(fd, (':display jpeg hardware ' + args.jpeg_hardware + '\n').encode('ascii'))
+        line = receive(b'JPEG HW DONE', timeout=120)
+        if b'JPEG HW DONE Err(' in line:
+            raise SystemExit('Hardware JPEG failed; see firmware reply')
     if args.jpeg_bench is not None:
         print('HOST -> jpeg-bench ' + args.jpeg_bench, flush=True)
         send(fd, (':jpeg-bench ' + args.jpeg_bench + '\n').encode('ascii'))

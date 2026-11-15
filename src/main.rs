@@ -1,6 +1,11 @@
 #![no_std]
 #![no_main]
 
+#[cfg(feature = "jpeg-lab")]
+mod jpeg_lab;
+#[cfg(feature = "ppa-lab")]
+mod ppa_lab;
+
 use esp32_p4::{
     devices::{
         gt911::{Gt911, Tracker},
@@ -921,6 +926,101 @@ extern "C" fn rust_main() -> ! {
                             timer.now_us().wrapping_sub(start) & ((1 << 48) - 1),
                             hal::memory::stack_usage()
                         );
+                    }
+                } else if line == "ppa test"
+                    || line == "ppa srm"
+                    || line == "ppa srm-large"
+                    || line == "ppa srm-stress"
+                    || line == "ppa blend"
+                    || line == "ppa blend-probe"
+                    || line == "ppa blend-large-probe"
+                    || line == "ppa blend-stress-probe"
+                {
+                    #[cfg(feature = "ppa-lab")]
+                    {
+                        if camera_live
+                            || alarm_active
+                            || dma_arena.stats().used != 0
+                            || internal_arena.stats().used != 0
+                        {
+                            let _ = writeln!(console, "PPA DONE Err(busy)");
+                            continue;
+                        }
+                        if let Some(external) = large_arena.as_ref() {
+                            let result = if line == "ppa blend-stress-probe" {
+                                ppa_lab::blend_stress_probe(
+                                    external,
+                                    &dma_arena,
+                                    &mut timer,
+                                    &mut console,
+                                )
+                            } else if line == "ppa blend-large-probe" {
+                                ppa_lab::blend_large(
+                                    external,
+                                    &dma_arena,
+                                    &mut timer,
+                                    &mut console,
+                                    true,
+                                )
+                            } else if line == "ppa blend" || line == "ppa blend-probe" {
+                                ppa_lab::blend(
+                                    external,
+                                    &dma_arena,
+                                    &mut timer,
+                                    &mut console,
+                                    line == "ppa blend-probe",
+                                )
+                            } else if line == "ppa srm-stress" {
+                                ppa_lab::srm_stress(external, &dma_arena, &mut timer, &mut console)
+                            } else if line == "ppa srm-large" {
+                                ppa_lab::srm_large(external, &dma_arena, &mut timer, &mut console)
+                            } else if line == "ppa srm" {
+                                ppa_lab::srm(external, &dma_arena, &mut timer, &mut console)
+                            } else {
+                                ppa_lab::run(external, &dma_arena, &mut timer, &mut console)
+                            };
+                            assert!(external.reset_if_unused());
+                            assert!(dma_arena.reset_if_unused());
+                            let _ = writeln!(
+                                console,
+                                "PPA DONE {:?} stack={:?}",
+                                result,
+                                hal::memory::stack_usage()
+                            );
+                        }
+                    }
+                } else if let Some(path) = line.strip_prefix("jpeg-hw ") {
+                    #[cfg(not(feature = "jpeg-lab"))]
+                    let _ = path;
+                    #[cfg(feature = "jpeg-lab")]
+                    {
+                        if camera_live
+                            || alarm_active
+                            || dma_arena.stats().used != 0
+                            || internal_arena.stats().used != 0
+                        {
+                            let _ = writeln!(console, "JPEG HW DONE Err(busy)");
+                            continue;
+                        }
+                        if let Some(external) = large_arena.as_ref() {
+                            let result = jpeg_lab::run(
+                                path,
+                                external,
+                                &internal_arena,
+                                &dma_arena,
+                                &mut timer,
+                                &mut console,
+                            );
+                            assert!(external.reset_if_unused());
+                            assert!(internal_arena.reset_if_unused());
+                            assert!(dma_arena.reset_if_unused());
+                            let _ = writeln!(
+                                console,
+                                "JPEG HW DONE {:?} stack={:?}",
+                                result,
+                                hal::memory::stack_usage()
+                            );
+                        }
                     }
                 } else if let Some(path) = line.strip_prefix("image ") {
                     #[cfg(feature = "software-jpeg")]

@@ -46,3 +46,6 @@ MabezDev/embedded-fatfs, MIT, vendored revision
 [Происхождение и исправления](../vendor/embedded-fatfs/UPSTREAM.md).
 Без default features, с lfn/unicode. embedded-io-async 0.7 и atomic-waker 1.1.2
 зафиксированы Cargo.lock; без std/alloc и async runtime.
+
+* Локальный C-reference `vap-tech/esp-32-p4-v1.3` (MIT): PPA compositor,
+  USB High-Speed GID2 и Python host. [Разбор и план переноса](ppa-usb-reference.md).
