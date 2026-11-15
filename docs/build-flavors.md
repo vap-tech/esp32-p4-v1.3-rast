@@ -9,10 +9,16 @@ Default image теперь содержит рабочие Ethernet/HTTP/SD/FAT,
 Лабораторные команды, ESP-Hosted Wi-Fi и программный JPEG не включены по умолчанию.
 Код и предыдущие исследования сохранены; зависимости C/ESP-IDF runtime не добавлены.
 
+В default включён также `photoframe`: аппаратные JPEG/SRM и управление показом
+из веба. Лабораторные команды не включаются вместе с ним автоматически.
+Ограничения вывода и исходных JPEG: [photoframe.md](photoframe.md).
+
 ## Features
 
 | Feature | Что добавляет |
 |---|---|
+| `photoframe` | Включён по умолчанию: веб-фоторамка, hardware-jpeg и hardware-ppa; без BLEND |
+| `hardware-jpeg` / `hardware-ppa` | HAL аппаратуры без лабораторных команд |
 | `lp-timer` | Включён по умолчанию: LP TIMER target1, собственный LP код и периодический сон/reset-entry |
 | `ethernet-pie` | Опциональные128-bit копии Ethernet SRAM frames на HP0, без смены DMA/cache policy; [A/B/A](ethernet-pie.md) |
 | `pie-lab` | Опциональные PIE2.1 SIMD/HWLOOP тесты на HP1; включает hp-worker, не добавляет C/runtime. См. [pie.md](pie.md) |
@@ -155,7 +161,8 @@ wifi/software-jpeg/audio-lab/diagnostics; Clippy default, wifi-only, JPEG-only
 
 `jpeg-lab` — аппаратный JPEG + 2D-DMA, отдельная экспериментальная команда
 `display jpeg hardware`. Не включает software-jpeg. Ограничения и workaround
-AXI RID counter описаны в [jpeg.md](jpeg.md); обычная сборка не меняется.
+AXI RID counter описаны в [jpeg.md](jpeg.md). Команда остаётся opt-in,
+а HAL также используется штатной фоторамкой.
 
 `ppa-lab` — offscreen PPA RGB565 FILL/SRM; команды `display ppa test`,
 `display ppa srm`, `display ppa srm-large`, `display ppa srm-stress`.

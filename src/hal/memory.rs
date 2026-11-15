@@ -136,7 +136,7 @@ pub const INTERNAL_END: usize = if cfg!(feature = "l2-128") {
 } else {
     0x4ffc_0000
 };
-pub const STACK_BYTES: usize = 64 * 1024;
+pub const STACK_BYTES: usize = 80 * 1024;
 pub const STACK_START: usize = INTERNAL_END - STACK_BYTES;
 pub const STACK_PATTERN: u32 = 0xa55a_6996;
 #[derive(Debug)]

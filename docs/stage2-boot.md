@@ -17,7 +17,7 @@
    ELF; payload не может пересечь runtime stack. Затем CRC32 всего payload.
 5. После `fence rw,rw` / `fence.i` обнуляется только BSS. Rust проверяет cache
    configuration, linker/HAL boundaries и заполняет runtime stack watermark.
-   SP переключается на верхний 64-KiB stack, запускается `rust_main`.
+   SP переключается на верхний 80-KiB stack, запускается `rust_main`.
 
 Полный destructive SRAM health-test не возвращён: CRC проверяет только новый
 загружаемый image, который больше не защищён ROM checksum исходного контейнера.
@@ -36,8 +36,8 @@
 | `4ff28000..4ff40000` | ROM-reserved 96 KiB, не трогаем |
 | `4ff40000.._upper_load_end` | Загружаемые text / rodata / initialized data |
 | `_bss_start.._bss_end` | Статические zero-initialized данные, без вынесенных fixed DMA workspaces |
-| `_bss_end..4ffb0000` | Динамически вычисляемая work arena, 64-B aligned |
-| `4ffb0000..4ffc0000` | Runtime stack 64 KiB с guard/watermark |
+| `_bss_end..4ffac000` | Динамически вычисляемая work arena, 64-B aligned |
+| `4ffac000..4ffc0000` | Runtime stack 80 KiB с guard/watermark |
 
 На этапе объединённого default image до HTTP: payload около **163 KiB**, BSS **19.25 KiB**,
 work около **314 KiB**, отдельно DMA **152 KiB**, то есть около **466 KiB** свободных
@@ -128,3 +128,8 @@ JPEG/camera качество, длительный audio stress и XIP/PSRAM exe
 
 Без wifi используются136/16KiB нижних регионов; с wifi build.rs/HAL возвращают
 116/36KiB по прежним адресам. [Текущий состав и размеры](build-flavors.md).
+
+После добавления фоторамки mixed photo+HTTP/gray проверка достигла64356B
+стека из прежних65536B. Резерв увеличен до80KiB за счёт16KiB work arena;
+линкер, HAL, l2-128 template и packer согласованы. Контрольная зона64B и
+watermark сохранены. Размер физической SRAM и cache policy не менялись.

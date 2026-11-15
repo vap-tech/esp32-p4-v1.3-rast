@@ -51,8 +51,9 @@ extern "C" fn rust_memory_boot() {
         Ok(()) => {
             let _ = writeln!(
                 console,
-                "MEMORY SRAM configured {}KiB; stack=64KiB work={}KiB",
+                "MEMORY SRAM configured {}KiB; stack={}KiB work={}KiB",
                 (hal::memory::INTERNAL_END - hal::memory::UPPER_BASE) / 1024,
+                hal::memory::STACK_BYTES / 1024,
                 (hal::memory::STACK_START - hal::memory::internal_start()) / 1024
             );
         }

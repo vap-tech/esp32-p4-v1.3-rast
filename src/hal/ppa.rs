@@ -185,7 +185,7 @@ pub enum Error {
     Hardware(Status),
     Timeout(Status),
 }
-#[cfg(all(target_arch = "riscv32", feature = "ppa-lab"))]
+#[cfg(all(target_arch = "riscv32", feature = "hardware-ppa"))]
 mod hardware {
     use super::*;
     use crate::hal::{
@@ -783,7 +783,7 @@ mod hardware {
         result
     }
 }
-#[cfg(all(target_arch = "riscv32", feature = "ppa-lab"))]
+#[cfg(all(target_arch = "riscv32", feature = "hardware-ppa"))]
 pub use hardware::{blend_rgb565, fill_rgb565, probe_blend_rgb565, srm_rgb565};
 #[cfg(test)]
 mod tests {

@@ -48,8 +48,8 @@ python scripts/monitor.py /dev/ttyACM0
 настраивает L2MEM как SRAM. Затем собственный bootstrap читает runtime payload
 из Flash, проверяет CRC32 и только после этого запускает Rust из верхней SRAM.
 Код/константы/статика начинаются с `0x4FF40000`; рабочая арена динамически идёт
-за ними. Нижние **152 KiB** разделены на арену **116 KiB** и fixed DMA **36 KiB**;
-runtime stack — **64 KiB**,
+за ними. Нижние **152 KiB** разделены на арену **136 KiB** и fixed DMA **16 KiB**;
+runtime stack — **80 KiB**,
 область ROM сохранена. Полного destructive SRAM test при старте больше нет.
 PSRAM остаётся 32 MiB uncached: 4 MiB display/screenshot + 28 MiB bulk arena.
 [Актуальная загрузка и карта](docs/stage2-boot.md), [история экспериментов](docs/memory.md).
@@ -189,3 +189,8 @@ cp src/wifi_profile.example.rs src/wifi_profile.rs
 
 Веб-файлы по Wi-Fi: `python3 scripts/display-control.py --wifi-web 3600`
 (встроенный профиль, URL из WEB READY; [подробности](docs/wifi.md)).
+
+Фоторамка запускается из веба: открыть `/PHOTOS/100D3100`, нажать
+«Фоторамка», выбрать срок/интервал и эффекты. Часы скрыты до остановки;
+будильник имеет приоритет. [Показ, ограничения и проверки](docs/photoframe.md).
+Подготовленные фото и оригиналы на SD; в Git они не включены.

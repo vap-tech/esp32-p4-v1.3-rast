@@ -2,6 +2,8 @@
 //! task owns SD+EMAC. RefCell serializes their access to the sole SYSTIMER handle.
 mod alarm_audio;
 mod files;
+#[cfg(feature = "photoframe")]
+mod photoframe;
 #[cfg(feature = "diagnostics")]
 mod storage_lab;
 use core::{
@@ -1012,7 +1014,11 @@ fn serve<P: Port>(
     let mut progress = [port.borrow_mut().now_us(); tcp::SLOTS];
     let mut turn = 0;
     let mut alarm_load_attempted = false;
+    #[cfg(feature = "photoframe")]
+    let mut photo = photoframe::Frame::default();
     let outcome = 'service: loop {
+        #[cfg(feature = "photoframe")]
+        photo.step(&mut fs, &network, panel, scratch);
         let active = services.is_some_and(|ui| ui.borrow().alarm_active());
         if !active {
             alarm_load_attempted = false;
@@ -1234,40 +1240,75 @@ fn serve<P: Port>(
                     r.path(),
                     r.length
                 );
-                if r.route == http::Route::Release {
-                    if services.is_some_and(|ui| ui.borrow().alarm_active()) {
-                        web::error(&mut connection, 409, false)
-                    } else {
-                        network.borrow_mut().tcp.pause_idle_timeout(slot, true);
-                        for (id, state) in transfers.iter_mut().enumerate() {
-                            if !state.idle() {
-                                let mut net = network.borrow_mut();
-                                net.tcp.abort(id);
-                                net.tcp.release(id);
-                                *state = files::Transfer::Idle;
+                'response: {
+                    #[cfg(not(feature = "photoframe"))]
+                    if matches!(
+                        r.route,
+                        http::Route::PhotoStart | http::Route::PhotoStop | http::Route::PhotoStatus
+                    ) {
+                        break 'response web::error(&mut connection, 501, false);
+                    }
+                    #[cfg(feature = "photoframe")]
+                    if r.route == http::Route::PhotoStart {
+                        let options = esp32_p4::photoframe::Options::parse(r.argument());
+                        let result = match (options, external) {
+                            (Some(options), Some(external)) => {
+                                photo.start(r.path(), options, &mut fs, &network, external, working)
                             }
+                            _ => Err("invalid options or no PSRAM"),
+                        };
+                        let _ = writeln!(network.borrow_mut().console, "PHOTO START {:?}", result);
+                        if let Err(message) = result {
+                            // A failed request does not claim the display or hide the clock.
+                            break 'response return_photo_error(&mut connection, message);
+                        } else {
+                            break 'response photo.status(&mut connection);
                         }
-                        let closed = esp32_p4::runtime::run(fs.release_caches(), || {
-                            network.borrow_mut().io_tick()
-                        })
-                        .and_then(|r| r.map_err(|_| web::Error::Storage));
-                        if closed.is_err() {
-                            web::error(&mut connection, 503, false)
-                        } else if services.is_some_and(|ui| ui.borrow().alarm_active()) {
-                            // AF may have arrived while freeing a long chain. Keep
-                            // cached PCM and let it play; do not cut an active alarm.
-                            drop(staging);
-                            staging = web::upload::UploadPool::<{ tcp::SLOTS }>::new(external);
+                    } else if r.route == http::Route::PhotoStop {
+                        photo.stop(&network, panel, "stopped by web");
+                        break 'response photo.status(&mut connection);
+                    } else if r.route == http::Route::PhotoStatus {
+                        break 'response photo.status(&mut connection);
+                    }
+                    if r.route == http::Route::Release {
+                        #[cfg(feature = "photoframe")]
+                        {
+                            photo.stop(&network, panel, "resources released");
+                            photo.release();
+                        }
+                        if services.is_some_and(|ui| ui.borrow().alarm_active()) {
                             web::error(&mut connection, 409, false)
                         } else {
-                            network.borrow_mut().stop_background();
-                            drop(staging);
-                            let before = external.map(|a| a.stats().used).unwrap_or(0);
-                            let reset = external.is_none_or(|a| a.reset_if_unused());
-                            staging = web::upload::UploadPool::<{ tcp::SLOTS }>::new(external);
-                            alarm_load_attempted = false;
-                            let used = external.map(|a| a.stats().used).unwrap_or(0);
-                            let _ = writeln!(
+                            network.borrow_mut().tcp.pause_idle_timeout(slot, true);
+                            for (id, state) in transfers.iter_mut().enumerate() {
+                                if !state.idle() {
+                                    let mut net = network.borrow_mut();
+                                    net.tcp.abort(id);
+                                    net.tcp.release(id);
+                                    *state = files::Transfer::Idle;
+                                }
+                            }
+                            let closed = esp32_p4::runtime::run(fs.release_caches(), || {
+                                network.borrow_mut().io_tick()
+                            })
+                            .and_then(|r| r.map_err(|_| web::Error::Storage));
+                            if closed.is_err() {
+                                web::error(&mut connection, 503, false)
+                            } else if services.is_some_and(|ui| ui.borrow().alarm_active()) {
+                                // AF may have arrived while freeing a long chain. Keep
+                                // cached PCM and let it play; do not cut an active alarm.
+                                drop(staging);
+                                staging = web::upload::UploadPool::<{ tcp::SLOTS }>::new(external);
+                                web::error(&mut connection, 409, false)
+                            } else {
+                                network.borrow_mut().stop_background();
+                                drop(staging);
+                                let before = external.map(|a| a.stats().used).unwrap_or(0);
+                                let reset = external.is_none_or(|a| a.reset_if_unused());
+                                staging = web::upload::UploadPool::<{ tcp::SLOTS }>::new(external);
+                                alarm_load_attempted = false;
+                                let used = external.map(|a| a.stats().used).unwrap_or(0);
+                                let _ = writeln!(
                                 network.borrow_mut().console,
                                 "WEB RESOURCES RELEASE reset={} before={} used={} open_files={}",
                                 reset,
@@ -1275,47 +1316,51 @@ fn serve<P: Port>(
                                 used,
                                 fs.open_count()
                             );
-                            if !reset {
-                                web::error(&mut connection, 503, false)
-                            } else {
-                                web::resources_released(&mut connection, before - used, used)
+                                if !reset {
+                                    web::error(&mut connection, 503, false)
+                                } else {
+                                    web::resources_released(&mut connection, before - used, used)
+                                }
                             }
                         }
-                    }
-                } else if matches!(
-                    r.route,
-                    http::Route::NetTest
-                        | http::Route::Clipboard
-                        | http::Route::State
-                        | http::Route::Brightness
-                ) {
-                    struct Controls<'a> {
-                        panel: &'a mut esp32_p4::devices::jd9165::Display,
-                        uptime: u64,
-                        capacity: u64,
-                    }
-                    impl web::Control for Controls<'_> {
-                        fn state(&mut self, out: &mut http::Text<512>) -> Result<(), web::Error> {
-                            write!(out, "{{\"brightness\":{},\"uptime_us\":{},\"capacity_bytes\":{},\"clipboard_limit\":1024}}", self.panel.brightness(), self.uptime, self.capacity).map_err(|_| web::Error::Format)
+                    } else if matches!(
+                        r.route,
+                        http::Route::NetTest
+                            | http::Route::Clipboard
+                            | http::Route::State
+                            | http::Route::Brightness
+                    ) {
+                        struct Controls<'a> {
+                            panel: &'a mut esp32_p4::devices::jd9165::Display,
+                            uptime: u64,
+                            capacity: u64,
                         }
-                        fn brightness(&mut self, value: u8) -> Result<(), web::Error> {
-                            self.panel.set_brightness(value);
-                            Ok(())
+                        impl web::Control for Controls<'_> {
+                            fn state(
+                                &mut self,
+                                out: &mut http::Text<512>,
+                            ) -> Result<(), web::Error> {
+                                write!(out, "{{\"brightness\":{},\"uptime_us\":{},\"capacity_bytes\":{},\"clipboard_limit\":1024}}", self.panel.brightness(), self.uptime, self.capacity).map_err(|_| web::Error::Format)
+                            }
+                            fn brightness(&mut self, value: u8) -> Result<(), web::Error> {
+                                self.panel.set_brightness(value);
+                                Ok(())
+                            }
                         }
+                        let mut controls = Controls {
+                            panel,
+                            uptime: port.borrow_mut().now_us(),
+                            capacity: fs.volume_capacity(),
+                        };
+                        let clipboard = unsafe { &mut *core::ptr::addr_of_mut!(CLIPBOARD) };
+                        web::serve_control(r, &mut connection, scratch, clipboard, &mut controls)
+                    } else {
+                        esp32_p4::runtime::run(
+                            web::asyncfs::serve(r, &mut fs, &mut connection, &mut asset, scratch),
+                            || network.borrow_mut().io_tick(),
+                        )
+                        .and_then(|r| r)
                     }
-                    let mut controls = Controls {
-                        panel,
-                        uptime: port.borrow_mut().now_us(),
-                        capacity: fs.volume_capacity(),
-                    };
-                    let clipboard = unsafe { &mut *core::ptr::addr_of_mut!(CLIPBOARD) };
-                    web::serve_control(r, &mut connection, scratch, clipboard, &mut controls)
-                } else {
-                    esp32_p4::runtime::run(
-                        web::asyncfs::serve(r, &mut fs, &mut connection, &mut asset, scratch),
-                        || network.borrow_mut().io_tick(),
-                    )
-                    .and_then(|r| r)
                 }
             }
             Err(code) => web::error(&mut connection, code, false),
@@ -1374,6 +1419,11 @@ fn serve<P: Port>(
         web::upload::CHUNK,
         hal::sdmmc::MAX_TRANSFER
     );
+    #[cfg(feature = "photoframe")]
+    {
+        photo.stop(&network, panel, "server stopped");
+        photo.release();
+    }
     let cleanup = esp32_p4::runtime::run(fs.shutdown(), || network.borrow_mut().io_tick())
         .and_then(|r| r.map_err(|_| web::Error::Storage));
     for (slot, transfer) in transfers.iter().enumerate() {
@@ -1395,4 +1445,17 @@ fn serve<P: Port>(
         port.borrow().status()
     );
     outcome.and(cleanup)
+}
+
+#[cfg(feature = "photoframe")]
+fn return_photo_error(io: &mut impl Transport, message: &str) -> Result<(), web::Error> {
+    let mut body = http::Text::<256>::new();
+    write!(body, "{{\"error\":").map_err(|_| web::Error::Format)?;
+    http::json_string(&mut body, message).map_err(|_| web::Error::Format)?;
+    write!(body, "}}").map_err(|_| web::Error::Format)?;
+    // Conflict: the request is valid HTTP, but unavailable in current board state.
+    let mut header = http::Text::<256>::new();
+    write!(header,"HTTP/1.1 409 Conflict\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\n\r\n",body.data().len()).map_err(|_|web::Error::Format)?;
+    io.write_all(header.data())?;
+    io.write_all(body.data())
 }

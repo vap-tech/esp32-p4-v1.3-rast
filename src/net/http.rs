@@ -34,6 +34,9 @@ pub enum Route {
     Brightness,
     Release,
     NetTest,
+    PhotoStatus,
+    PhotoStart,
+    PhotoStop,
 }
 impl Request {
     pub fn argument(&self) -> &str {
@@ -136,9 +139,24 @@ pub fn parse(bytes: &[u8]) -> Result<Request, u16> {
         // recovery endpoint after directory navigation and browser reload.
         argument = "flash=1";
         (Route::Index, "/")
-    } else if matches!(target, "/" | "/index.html") && matches!(query, "" | "flash=1") {
-        argument = query;
+    } else if matches!(target, "/" | "/index.html")
+        && (matches!(query, "" | "flash=1") || query.starts_with("path="))
+    {
+        // Directory history belongs to the browser; a reload still serves the UI.
+        argument = if query == "flash=1" { query } else { "" };
         (Route::Index, "/")
+    } else if target == "/api/photoframe" && query.is_empty() {
+        (Route::PhotoStatus, "/")
+    } else if target == "/api/photoframe/stop" && query.is_empty() {
+        (Route::PhotoStop, "/")
+    } else if target == "/api/photoframe/start" {
+        let (path, options) = query
+            .strip_prefix("path=")
+            .ok_or(400u16)?
+            .split_once("&options=")
+            .ok_or(400u16)?;
+        argument = options;
+        (Route::PhotoStart, path)
     } else if target == "/api/list" {
         (Route::List, query.strip_prefix("path=").ok_or(400u16)?)
     } else if target == "/api/rename" {
@@ -178,7 +196,12 @@ pub fn parse(bytes: &[u8]) -> Result<Request, u16> {
                 Method::Get | Method::Head | Method::Put | Method::Delete | Method::Mkcol
             ) || cfg!(feature = "diagnostics") && method == Method::Post
         }
-        Route::Rename | Route::Brightness | Route::Release => method == Method::Post,
+        Route::PhotoStatus => method == Method::Get,
+        Route::PhotoStart
+        | Route::PhotoStop
+        | Route::Rename
+        | Route::Brightness
+        | Route::Release => method == Method::Post,
         Route::NetTest | Route::Clipboard => {
             matches!(method, Method::Get | Method::Head | Method::Post)
         }
@@ -345,6 +368,37 @@ pub fn json_string(out: &mut impl fmt::Write, s: &str) -> fmt::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn folder_history_reload_serves_ui_without_becoming_a_file_request() {
+        for bytes in [
+            b"GET /?path=%2FPHOTOS%2F100D3100 HTTP/1.1\r\nHost: p4\r\n\r\n".as_slice(),
+            b"GET /index.html?path=%2FPHOTOS HTTP/1.1\r\nHost: p4\r\n\r\n".as_slice(),
+        ] {
+            let r = parse(bytes).unwrap();
+            assert_eq!(r.route, Route::Index);
+            assert_eq!(r.path(), "/");
+            assert_eq!(r.argument(), "");
+        }
+    }
+    #[test]
+    fn photoframe_start_is_explicit_post_with_a_decoded_folder() {
+        let r=parse(b"POST /api/photoframe/start?path=%2FPHOTOS%2F%D0%A2%D0%B5%D1%81%D1%82&options=10,0,0,12 HTTP/1.1\r\nHost: p4\r\n\r\n").unwrap();
+        assert_eq!(r.route, Route::PhotoStart);
+        assert_eq!(r.path(), "/PHOTOS/Тест");
+        assert_eq!(r.argument(), "10,0,0,12");
+        assert!(parse(
+            b"GET /api/photoframe/start?path=%2F&options=10,0,0,0 HTTP/1.1\r\nHost: p4\r\n\r\n"
+        )
+        .is_err());
+        assert!(parse(
+            b"POST /api/photoframe/start?path=%2F..&options=10,0,0,0 HTTP/1.1\r\nHost: p4\r\n\r\n"
+        )
+        .is_err());
+        assert!(parse(
+            b"POST /api/photoframe/stop HTTP/1.1\r\nHost: p4\r\nContent-Length: 1\r\n\r\n"
+        )
+        .is_err());
+    }
     #[test]
     fn resource_release_is_explicit_empty_post() {
         let r =

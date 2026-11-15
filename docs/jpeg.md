@@ -1,7 +1,12 @@
 # Аппаратный JPEG: экспериментальный драйвер
 
-Первичный bring-up ESP32-P4 rev1.3, 2026-11-15. Опциональная feature `jpeg-lab`,
-в обычную сборку драйвер аппаратуры и команды не входят. C/IDF runtime не добавлен.
+Первичный bring-up ESP32-P4 rev1.3, 2026-11-15.
+Позднее HAL выделен в `hardware-jpeg`: его включает штатная
+[фоторамка](photoframe.md), а лабораторные команды по-прежнему opt-in.
+Далее — исходные результаты лаборатории.
+
+Лабораторные команды включает опциональная feature `jpeg-lab`.
+Сам HAL используется и фоторамкой. C/IDF runtime не добавлен.
 HAL написан на Rust по TRM и локальным исходникам ESP-IDF v6.1:
 `esp_driver_jpeg/jpeg_decode.c`, `jpeg_parse_marker.c`, `esp_hal_jpeg/jpeg_hal.c`,
 `esp_hal_dma/esp32p4/include/hal/dma2d_ll.h` и `esp_driver_dma/src/dma2d.c`.

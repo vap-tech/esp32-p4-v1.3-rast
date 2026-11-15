@@ -33,7 +33,7 @@ pub enum Error {
     Hardware(Snapshot),
     Timeout(Snapshot),
 }
-#[cfg(all(target_arch = "riscv32", feature = "jpeg-lab"))]
+#[cfg(all(target_arch = "riscv32", feature = "hardware-jpeg"))]
 mod hardware {
     use super::*;
     use crate::hal::dma2d::{bus_address, Claim};
@@ -384,5 +384,5 @@ mod hardware {
         result
     }
 }
-#[cfg(all(target_arch = "riscv32", feature = "jpeg-lab"))]
+#[cfg(all(target_arch = "riscv32", feature = "hardware-jpeg"))]
 pub use hardware::decode;

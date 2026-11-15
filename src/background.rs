@@ -26,6 +26,12 @@ pub struct Stats {
 pub trait Services {
     fn poll(&mut self, timer: &mut Timer, console: &mut Console);
     fn alarm_active(&self) -> bool;
+    #[cfg(feature = "photoframe")]
+    fn photo_mode(&mut self, enabled: bool);
+    #[cfg(feature = "photoframe")]
+    fn photo_row(&mut self, y: usize, pixels: &[u16]) -> Result<(), &'static str>;
+    #[cfg(feature = "photoframe")]
+    fn photo_available(&self) -> bool;
     fn command(&mut self, command: &str, timer: &mut Timer, console: &mut Console) -> bool;
     fn reset_metrics(&mut self);
     fn codec(&mut self, timer: &mut Timer) -> Result<Es8311, esp32_p4::hal::i2c::Error>;
@@ -187,6 +193,37 @@ impl Services for Ui<'_> {
             return true;
         }
         false
+    }
+    #[cfg(feature = "photoframe")]
+    fn photo_available(&self) -> bool {
+        self.framebuffer.is_some()
+    }
+    #[cfg(feature = "photoframe")]
+    fn photo_row(&mut self, y: usize, pixels: &[u16]) -> Result<(), &'static str> {
+        let fb = self.framebuffer.as_mut().ok_or("display unavailable")?;
+        fb.write_run(0, y, pixels);
+        for x in [0, 511, 1023] {
+            if fb.pixel(x, y) != pixels.get(x).copied() {
+                return Err("framebuffer readback mismatch");
+            }
+        }
+        if y == 599 && !fb.guards_ok() {
+            return Err("framebuffer guard damaged");
+        }
+        Ok(())
+    }
+    #[cfg(feature = "photoframe")]
+    fn photo_mode(&mut self, enabled: bool) {
+        *self.clock_enabled = !enabled;
+        if !enabled {
+            if let Some(fb) = self.framebuffer.as_mut() {
+                if *self.active {
+                    clock_face::alarm_button(fb, true);
+                }
+            }
+            self.face.invalidate();
+            *self.clock_due = self.clock_due.wrapping_sub(1_000_000);
+        }
     }
     fn reset_metrics(&mut self) {
         *self.stats = Stats::default();

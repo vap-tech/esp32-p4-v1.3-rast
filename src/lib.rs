@@ -21,3 +21,5 @@ pub mod console;
 pub mod clock_face;
 
 pub mod runtime;
+
+pub mod photoframe;

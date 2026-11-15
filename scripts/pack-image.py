@@ -79,7 +79,7 @@ def pack(image, html=None):
     for address, data in segments:
         if 0x30100000 <= address and address + len(data) <= 0x30102000:
             resident.append((address, data))
-        elif 0x4ff40000 <= address and address + len(data) <= 0x4ffb0000:
+        elif 0x4ff40000 <= address and address + len(data) <= 0x4ffac000:
             upper.append((address, data))
         else:
             raise ValueError(f'unexpected load region {address:#x}')

@@ -57,6 +57,10 @@ fn headers(
     write!(text, "{extra}\r\n").map_err(|_| Error::Format)?;
     io.write_all(text.data())
 }
+pub fn json(io: &mut impl Transport, body: &[u8]) -> Result<(), Error> {
+    headers(io, 200, Some(body.len() as u32), "application/json", "")?;
+    io.write_all(body)
+}
 pub fn resources_released(io: &mut impl Transport, freed: usize, used: usize) -> Result<(), Error> {
     let mut body = Text::<128>::new();
     write!(
@@ -109,6 +113,7 @@ pub fn serve<D: BlockDevice>(
 ) -> Result<(), Error> {
     let head = request.method == Method::Head;
     match request.route {
+        Route::PhotoStatus | Route::PhotoStart | Route::PhotoStop => return error(io, 501, head),
         Route::Index => {
             headers(
                 io,

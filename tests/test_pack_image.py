@@ -62,7 +62,7 @@ class PackImage(unittest.TestCase):
                 packer.pack(candidate)
 
     def test_rejects_unknown_regions_stack_and_nonresident_entry(self):
-        for address in [0x4ff28000, 0x88000000, 0x4ffbc000, 0x4ffbbfc0]:
+        for address in [0x4ff28000, 0x88000000, 0x4ffac000, 0x4ffabfc0, 0x4ffbc000, 0x4ffbbfc0]:
             with self.assertRaises(ValueError):
                 packer.pack(self.raw(address))
         with self.assertRaises(ValueError):

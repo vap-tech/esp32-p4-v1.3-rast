@@ -7,8 +7,8 @@ MEMORY {
   DMA_FIXED (rw) : ORIGIN = 0x4ff22000, LENGTH = 16K
   BOOT_STACK (rw) : ORIGIN = 0x4ff26000, LENGTH = 8K
   /* 0x4ff28000..0x4ff40000 remains reserved for ROM. */
-  UPPER (rwx) : ORIGIN = 0x4ff40000, LENGTH = 448K
-  STACK (rw) : ORIGIN = 0x4ffb0000, LENGTH = 64K
+  UPPER (rwx) : ORIGIN = 0x4ff40000, LENGTH = 432K
+  STACK (rw) : ORIGIN = 0x4ffac000, LENGTH = 80K
 }
 SECTIONS {
   .entry : ALIGN(16) {

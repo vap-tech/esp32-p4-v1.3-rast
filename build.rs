@@ -92,18 +92,18 @@ fn main() {
 
         if std::env::var_os("CARGO_FEATURE_L2_128").is_some() {
             assert_eq!(
-                link.matches("LENGTH = 448K").count(),
+                link.matches("LENGTH = 432K").count(),
                 1,
                 "unexpected arena template"
             );
             assert_eq!(
-                link.matches("0x4ffb0000").count(),
+                link.matches("0x4ffac000").count(),
                 1,
                 "unexpected stack template"
             );
             link = link
-                .replace("LENGTH = 448K", "LENGTH = 320K")
-                .replace("0x4ffb0000", "0x4ff90000");
+                .replace("LENGTH = 432K", "LENGTH = 304K")
+                .replace("0x4ffac000", "0x4ff8c000");
         }
         let path = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("link.x");
         std::fs::write(&path, link).unwrap();

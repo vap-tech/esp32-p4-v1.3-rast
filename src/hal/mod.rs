@@ -26,7 +26,7 @@ pub mod arbitration;
 
 #[cfg(all(
     target_arch = "riscv32",
-    any(feature = "jpeg-lab", feature = "ppa-lab")
+    any(feature = "hardware-jpeg", feature = "hardware-ppa")
 ))]
 pub(crate) mod dma2d;
 pub mod ppa;

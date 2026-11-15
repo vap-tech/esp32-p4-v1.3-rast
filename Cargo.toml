@@ -4,15 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["hp-worker", "lp-timer"]
+default = ["hp-worker", "lp-timer", "photoframe"]
 hp-worker = []
 # Isolated PIE 2.1 / HWLOOP probe on the fixed HP1 worker.
 pie-lab = ["hp-worker"]
 # A/B: HP0 PIE copies of CPU-owned Ethernet SRAM frames; DMA policy unchanged.
 ethernet-pie = []
 # Polled JPEG + 2D-DMA hardware bring-up, independent of software JPEG.
-jpeg-lab = []
-ppa-lab = []
+hardware-jpeg = []
+hardware-ppa = []
+photoframe = ["hardware-jpeg", "hardware-ppa"]
+jpeg-lab = ["hardware-jpeg"]
+ppa-lab = ["hardware-ppa"]
 lp-timer = []
 # Boot-time second HP core experiment; not part of the normal image.
 multicore-lab = []

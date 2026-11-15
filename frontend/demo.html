@@ -147,6 +147,15 @@
     .upload-metrics { font-size: 13px; font-variant-numeric: tabular-nums; }
     .upload-phase { margin: 10px 0 4px; font-size: 14px; }
     .upload-note { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    [hidden] { display: none !important; }
+    dialog { border: 1px solid var(--line); border-radius: 16px; padding: 24px; max-width: min(92vw, 520px); background: var(--bg); color: inherit; }
+    dialog::backdrop { background: #0008; }
+    #photo-form > label, #photo-form fieldset label { display: block; margin: 12px 0; }
+    #photo-form input[type=number] { width: 110px; }
+    #photo-form fieldset { border: 1px solid var(--line); border-radius: 8px; }
+    #photo-folder, #photo-state { overflow-wrap: anywhere; }
+    #photo-state { padding: 0 20px; }
+    #photo-error { color: #dc4545; }
   </style>
 </head>
 <body>
@@ -172,12 +181,15 @@
         <div class="actions">
           <button class="btn" id="refresh" type="button">↻ &nbsp;Обновить</button>
           <label class="btn primary" for="picker">＋ &nbsp;Загрузить</label>
+          <button class="btn" id="photo-open" type="button">Фоторамка</button>
+          <button class="btn" id="photo-stop" type="button" hidden>Остановить фоторамку</button>
           <button class="btn" id="mkdir" type="button">Новая папка</button>
           <label class="btn" for="folderpicker">Загрузить папку</label>
           <input id="folderpicker" type="file" webkitdirectory multiple hidden>
           <input id="picker" type="file" multiple aria-label="Выбрать файлы">
         </div>
       </div>
+      <p id="photo-state" role="status">Фоторамка: запрос состояния…</p>
       <div class="status" id="status" role="status" aria-live="polite"></div>
       <section class="upload-panel" id="upload-panel" aria-label="Загрузка файлов" hidden>
         <div class="upload-head"><span class="upload-name" id="upload-name"></span><button class="btn" id="upload-stop" type="button" disabled>Отменить всё</button></div>
@@ -214,6 +226,25 @@
     </details>
     <p class="footnote">Минимальный интерфейс · HTML + CSS + JavaScript</p>
   </main>
+  <dialog id="photo-dialog" aria-labelledby="photo-title">
+    <form id="photo-form">
+      <h2 id="photo-title">Фоторамка</h2>
+      <p id="photo-folder"></p>
+      <label>Смена фото, секунд <input id="photo-interval" type="number" min="2" max="3600" value="10" required></label>
+      <label>Работать, минут <input id="photo-duration" type="number" min="1" max="1440" placeholder="До остановки"></label>
+      <label>Размер <select id="photo-fit"><option value="0">Вписать целиком</option><option value="1">Заполнить с обрезкой</option></select></label>
+      <fieldset><legend>Эффекты</legend>
+        <label><input id="photo-mirror" type="checkbox"> Зеркальное отражение</label>
+        <label><input id="photo-rotate" type="checkbox"> Каждое второе фото переворачивать на 180°</label>
+        <label><input id="photo-wipe" type="checkbox"> Раскрытие слева направо</label>
+        <label><input id="photo-slide" type="checkbox"> Сдвиг</label>
+      </fieldset>
+      <p>JPEG из этой папки, без подпапок. На время показа часы скрыты. Будильник прервёт фоторамку.</p>
+      <p>Для больших оригиналов нужны уменьшенные копии. Неподдерживаемые JPEG пропускаются. Переходы пока ступенчатые; при смене фото видна полоса обновления.</p>
+      <p id="photo-error" role="alert"></p>
+      <div class="actions"><button class="btn primary" id="photo-submit" type="submit">Запустить</button><button class="btn" id="photo-cancel" type="button">Отмена</button></div>
+    </form>
+  </dialog>
   <script>
     'use strict';
     const demoDB = {
@@ -221,10 +252,18 @@
       '/DOCS': [{name:'README.TXT',dir:false,size:123}]
     };
     let demoClipboard = '', demoBrightness = 25;
+    let demoPhoto = {running:false,message:'idle'};
     const fetch = async (url, opts = {}) => {
       const u = new URL(url, 'http://local'), method = opts.method || 'GET';
       const reply = (status, data = {}) => ({ok:status >= 200 && status < 300,status,json:async()=>data,text:async()=>typeof data === 'string' ? data : JSON.stringify(data)});
       const find = p => {const i=p.lastIndexOf('/');return [demoDB[p.slice(0,i)||'/'],p.slice(i+1)];};
+      if(u.pathname==='/api/photoframe') return reply(200,demoPhoto);
+      if(u.pathname==='/api/photoframe/start') {
+        const folder=u.searchParams.get('path'), items=demoDB[folder];
+        if(!items?.some(e=>!e.dir&&/\.jpe?g$/i.test(e.name))) return reply(409,{error:'В папке нет JPEG'});
+        demoPhoto={running:true,folder,file:items.find(e=>!e.dir&&/\.jpe?g$/i.test(e.name)).name,shown:1,skipped:0};return reply(200,demoPhoto);
+      }
+      if(u.pathname==='/api/photoframe/stop') {demoPhoto={running:false,message:'stopped by web'};return reply(200,demoPhoto);}
       if(u.pathname==='/api/resources/release') return reply(200,{freed_bytes:5875040,psram_used:0,open_files:0});
       if(u.pathname==='/api/state') return reply(200,{brightness:demoBrightness,uptime_us:123000000,capacity_bytes:8*1024**3});
       if(u.pathname==='/api/brightness'){demoBrightness=Number(u.searchParams.get('value'));return reply(204);}
@@ -700,6 +739,60 @@
       } catch (e) { $('release-status').textContent = 'Освобождение не подтверждено: ' + e.message; }
       finally { cleanupRunning = false; $('release-resources').disabled = false; }
     };
+    let photoFolder = '/', photoBusy = false;
+    function photoMessage(message) {
+      return ({'time elapsed':'время истекло','stopped by web':'остановлена из веба','alarm or server stop':'прервана будильником или остановкой сервиса','resources released':'ресурсы освобождены','no supported JPEG files':'в папке нет поддерживаемых JPEG'})[message] || message;
+    }
+    function renderPhoto(state) {
+      $('photo-stop').hidden = !state.running;
+      $('photo-open').disabled = Boolean(state.running);
+      $('photo-state').textContent = state.running
+        ? 'Фоторамка · ' + state.folder + ' · ' + (state.file || 'Подготовка…') + ' · показано ' + state.shown + ', пропущено ' + state.skipped
+        : 'Фоторамка остановлена' + (state.message && state.message !== 'idle' ? ' · ' + photoMessage(state.message) : '') + '. Часы и будильник доступны.';
+    }
+    async function photoRequest(url, method = 'GET') {
+      const response = await fetch(url, {method, cache: 'no-store'});
+      const state = await response.json();
+      if (!response.ok) throw Error(state.error || 'HTTP ' + response.status);
+      renderPhoto(state);
+      return state;
+    }
+    async function photoStatus() {
+      if (photoBusy) return;
+      photoBusy = true;
+      try { await photoRequest('/api/photoframe'); }
+      catch (e) { $('photo-state').textContent = 'Состояние фоторамки недоступно: ' + e.message; }
+      finally { photoBusy = false; }
+    }
+    $('photo-open').onclick = () => {
+      photoFolder = current;
+      $('photo-folder').textContent = 'Папка: ' + photoFolder;
+      $('photo-error').textContent = '';
+      $('photo-dialog').showModal();
+    };
+    $('photo-cancel').onclick = () => $('photo-dialog').close();
+    $('photo-form').onsubmit = async event => {
+      event.preventDefault();
+      const interval = Number($('photo-interval').value), minutes = $('photo-duration').value === '' ? 0 : Number($('photo-duration').value);
+      if (!Number.isInteger(interval) || interval < 2 || interval > 3600 || !Number.isInteger(minutes) || minutes < 0 || minutes > 1440) {
+        $('photo-error').textContent = 'Интервал: 2–3600 секунд, время: 1–1440 минут либо пусто.'; return;
+      }
+      const effects = ( $('photo-mirror').checked ? 1 : 0 ) | ( $('photo-rotate').checked ? 2 : 0 ) | ( $('photo-wipe').checked ? 4 : 0 ) | ( $('photo-slide').checked ? 8 : 0 );
+      $('photo-submit').disabled = true;
+      try {
+        await photoRequest('/api/photoframe/start?path=' + encodeURIComponent(photoFolder) + '&options=' + [interval, minutes * 60, $('photo-fit').value, effects].join(','), 'POST');
+        $('photo-dialog').close();
+      } catch (e) { $('photo-error').textContent = e.message; }
+      finally { $('photo-submit').disabled = false; }
+    };
+    $('photo-stop').onclick = async () => {
+      $('photo-stop').disabled = true;
+      try { await photoRequest('/api/photoframe/stop', 'POST'); }
+      catch (e) { $('photo-state').textContent = 'Остановка не подтверждена: ' + e.message; }
+      finally { $('photo-stop').disabled = false; }
+    };
+    if (typeof setInterval === 'function') setInterval(photoStatus, 2000);
+    photoStatus();
     $('refresh').onclick = () => load();
     $('picker').onchange = e => upload(e.target.files);
     const panel = $('panel');
