@@ -1,5 +1,28 @@
 # Состояние проекта — обновлено 2026-11-15
 
+## 2026-11-15: PIE-копирование Ethernet на HP0 — A/B/A
+
+Опциональный `ethernet-pie`: выровненные SRAM frame copies, scalar fallback
+для коротких/невыравненных кадров и хвостов, прежний OWN/fence/DMA контракт.
+RAM GET4.32→5.28МиБ/с, POST4.96–5.06→6.42; SD PUT2.40–2.48→2.97,
+GET3.44→4.01. Возврат к scalar воспроизводит прежний уровень.
+Файлы считались точно и удалены, проверены короткие/параллельные загрузки
+и IRQ/SMP нагрузка. Под тяжёлым параллельным трафиком missed frames есть
+в обоих вариантах; это не lossless-сеть. Состав и ограничения:
+[ethernet-pie.md](ethernet-pie.md).
+
+## 2026-11-15: PIE2.1 SIMD и HWLOOP на HP1
+
+Опциональный `pie-lab`, без C/IDF runtime: public Rust HAL, эксклюзивный HP1
+PIE token, assembler-verified words для stock LLVM. Проверены128-bit copy,
+saturating ALU, logical operations, shifts32, signed int8/int16 dot,
+fused MAC+load и HWLOOP. 695100 сравнений и600 IRQ под SD/HTTP чтением без ошибок.
+С проверками границ API: copy≈2.95×, add16≈8.75×, fused dot≈13.57× относительно
+текущих scalar kernels. Только маленький SRAM working set, не PSRAM/miner.
+VST128 через0x8ff alias вызвал fault; через0x4ff при D OFF тест проходит.
+В default диагностическая нагрузка выключена. Источники rev1.3/2.2,
+инвентарь мнемоник и ограничения: [pie.md](pie.md).
+
 ## 2026-11-15: автономный LP TIMER
 
 В default добавлен `lp-timer`: LP сам просыпается от target1, публикует

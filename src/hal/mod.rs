@@ -14,6 +14,7 @@ pub mod ledc;
 pub mod lp;
 pub mod memory;
 pub mod multicore;
+pub mod pie;
 pub mod psram;
 pub mod sdmmc;
 pub mod time;

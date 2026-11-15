@@ -1,3 +1,6 @@
+#[cfg(feature = "pie-lab")]
+#[path = "pie_lab.rs"]
+mod pie_lab;
 use crate::{
     hal::{self, multicore, time::Timer, usb_serial::Console},
     intercore::{Consumer, Producer, Queue},
@@ -232,9 +235,15 @@ extern "C" fn hpw_worker() -> ! {
                 hpw_pause(status());
             }
         }
+        #[cfg(feature = "pie-lab")]
+        pie_lab::service();
         let Some(job) = ports.jobs.try_pop() else {
             unsafe {
                 multicore::wait_if(|| {
+                    #[cfg(feature = "pie-lab")]
+                    if pie_lab::pending() {
+                        return false;
+                    }
                     let idle =
                         ports.jobs.is_empty() && status().0[8].load(Ordering::Acquire) & 1 == 0;
                     if idle {
@@ -449,6 +458,27 @@ pub fn command(text: &str, timer: &mut Timer, console: &mut Console) -> bool {
     };
     let host = borrow.host();
     drain(host);
+    if args.trim().starts_with("pie ") {
+        #[cfg(feature = "pie-lab")]
+        if args.trim() == "pie run"
+            && (status().0[0].load(Ordering::Acquire) != 1
+                || status().0[8].load(Ordering::Acquire) & 1 != 0)
+        {
+            let _ = writeln!(
+                console,
+                "PIE LAB unavailable: HP1 must be running, not paused/faulted"
+            );
+        } else if pie_lab::command(args.trim(), console) {
+            host.notify.notify();
+        }
+        #[cfg(not(feature = "pie-lab"))]
+        let _ = writeln!(
+            console,
+            "PIE LAB unavailable: rebuild with --features pie-lab"
+        );
+        report(host, console);
+        return true;
+    }
     match args.trim() {
         "" | "status" => {}
         "load on" => host.load = true,

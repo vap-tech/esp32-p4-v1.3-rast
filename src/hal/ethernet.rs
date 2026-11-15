@@ -21,6 +21,7 @@ pub enum Error {
     Transmit(u32),
     Dma(u32),
     Frame(u32),
+    Pie,
 }
 
 pub struct Mdio {
@@ -110,6 +111,9 @@ pub struct Emac<'a, 't> {
     tx: usize,
     tx_pending: u8,
     active: bool,
+    copy_stats: [u32; 6], // RX/TX vector bytes, RX/TX scalar bytes, last CPU pointers
+    #[cfg(all(target_arch = "riscv32", feature = "ethernet-pie"))]
+    pie: super::pie::CopyEngine,
 }
 impl<'a, 't> Emac<'a, 't> {
     /// # Safety
@@ -155,7 +159,14 @@ impl<'a, 't> Emac<'a, 't> {
             tx: 0,
             tx_pending: 0,
             active: false,
+            copy_stats: [0; 6],
+            #[cfg(all(target_arch = "riscv32", feature = "ethernet-pie"))]
+            pie: unsafe { super::pie::CopyEngine::claim_hp0() }.map_err(|_| Error::Pie)?,
         };
+        #[cfg(all(target_arch = "riscv32", feature = "ethernet-pie"))]
+        if !copy_self_test(&mut emac.pie, base + DESCS) {
+            return Err(Error::Pie);
+        }
         for i in 0..RX_COUNT {
             let desc = base + i * 64;
             write(desc + 4, FRAME as u32 | (1 << 14) | (1 << 31));
@@ -200,7 +211,11 @@ impl<'a, 't> Emac<'a, 't> {
     pub fn stats(&self) -> [u32; 6] {
         core::array::from_fn(|i| PROFILE[i].load(core::sync::atomic::Ordering::Relaxed))
     }
+    pub fn copy_stats(&self) -> [u32; 6] {
+        self.copy_stats
+    }
     pub fn reset_stats(&mut self) {
+        self.copy_stats = [0; 6];
         for counter in &PROFILE {
             counter.store(0, core::sync::atomic::Ordering::Relaxed);
         }
@@ -247,7 +262,17 @@ impl<'a, 't> Emac<'a, 't> {
         if valid {
             profile(1, 1);
             let started = self.timer.now_us();
-            copy_from_dma(self.base + DESCS + self.rx * FRAME, &mut out[..len]);
+            let address = self.base + DESCS + self.rx * FRAME;
+            #[cfg(all(target_arch = "riscv32", feature = "ethernet-pie"))]
+            let copied = copy_rx_pie(&mut self.pie, address, &mut out[..len]);
+            #[cfg(not(all(target_arch = "riscv32", feature = "ethernet-pie")))]
+            let copied = {
+                copy_from_dma(address, &mut out[..len]);
+                0
+            };
+            self.copy_stats[0] = self.copy_stats[0].wrapping_add(copied as u32);
+            self.copy_stats[2] = self.copy_stats[2].wrapping_add((len - copied) as u32);
+            self.copy_stats[4] = out.as_ptr() as u32;
             profile(2, self.timer.now_us() - started);
         }
         fence();
@@ -273,7 +298,17 @@ impl<'a, 't> Emac<'a, 't> {
         profile(5, self.timer.now_us() - started);
         self.reap_tx()?;
         let started = self.timer.now_us();
-        copy_to_dma(self.base + DESCS + (RX_COUNT + self.tx) * FRAME, frame);
+        let address = self.base + DESCS + (RX_COUNT + self.tx) * FRAME;
+        #[cfg(all(target_arch = "riscv32", feature = "ethernet-pie"))]
+        let copied = copy_tx_pie(&mut self.pie, address, frame);
+        #[cfg(not(all(target_arch = "riscv32", feature = "ethernet-pie")))]
+        let copied = {
+            copy_to_dma(address, frame);
+            0
+        };
+        self.copy_stats[1] = self.copy_stats[1].wrapping_add(copied as u32);
+        self.copy_stats[3] = self.copy_stats[3].wrapping_add((frame.len() - copied) as u32);
+        self.copy_stats[5] = frame.as_ptr() as u32;
         profile(4, self.timer.now_us() - started);
         write(desc + 4, frame.len() as u32);
         fence();
@@ -354,6 +389,66 @@ fn copy_to_dma(address: usize, bytes: &[u8]) {
     for (i, byte) in tail.iter().enumerate() {
         unsafe { ((address + offset + i) as *mut u8).write_volatile(*byte) };
     }
+}
+#[cfg(all(target_arch = "riscv32", feature = "ethernet-pie"))]
+fn copy_rx_pie(pie: &mut super::pie::CopyEngine, address: usize, out: &mut [u8]) -> usize {
+    // Descriptor OWN is CPU-owned; D-cache OFF, frame immutable during copying.
+    let n = unsafe { pie.copy_prefix(out.as_mut_ptr(), address as *const u8, out.len()) };
+    copy_from_dma(address + n, &mut out[n..]);
+    n
+}
+#[cfg(all(target_arch = "riscv32", feature = "ethernet-pie"))]
+fn copy_tx_pie(pie: &mut super::pie::CopyEngine, address: usize, input: &[u8]) -> usize {
+    // DMA has returned OWN. Publish it only after both prefix and tail + fence.
+    let n = unsafe { pie.copy_prefix(address as *mut u8, input.as_ptr(), input.len()) };
+    copy_to_dma(address + n, &input[n..]);
+    n
+}
+#[cfg(all(target_arch = "riscv32", feature = "ethernet-pie"))]
+fn copy_self_test(pie: &mut super::pie::CopyEngine, base: usize) -> bool {
+    // Three fresh EMAC frame slots, before descriptors/DMA are started. No user
+    // data is touched and no extra permanent scratch is needed for the probe.
+    let dma = base as *mut u8;
+    let input = (base + FRAME) as *mut u8;
+    let output = (base + 2 * FRAME) as *mut u8;
+    for len in [
+        0, 1, 2, 3, 4, 5, 14, 15, 16, 17, 63, 64, 65, 511, 512, 513, 1500, 1514,
+    ] {
+        for shift in 0..16 {
+            unsafe {
+                for i in 0..FRAME {
+                    dma.add(i).write_volatile(0xa5);
+                    input
+                        .add(i)
+                        .write_volatile((i as u8).wrapping_mul(13) ^ 0x79);
+                    output.add(i).write_volatile(0xab);
+                }
+                let src = core::slice::from_raw_parts(input.add(shift), len);
+                copy_tx_pie(pie, base + 16, src);
+                let dst = core::slice::from_raw_parts_mut(output.add(shift), len);
+                copy_rx_pie(pie, base + 16, dst);
+                for i in 0..FRAME {
+                    let want = if (16..16 + len).contains(&i) {
+                        input.add(shift + i - 16).read_volatile()
+                    } else {
+                        0xa5
+                    };
+                    if dma.add(i).read_volatile() != want {
+                        return false;
+                    }
+                    let want = if (shift..shift + len).contains(&i) {
+                        input.add(i).read_volatile()
+                    } else {
+                        0xab
+                    };
+                    if output.add(i).read_volatile() != want {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 fn fence() {
     unsafe {

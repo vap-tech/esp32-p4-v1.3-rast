@@ -6,6 +6,10 @@ edition = "2021"
 [features]
 default = ["hp-worker", "lp-timer"]
 hp-worker = []
+# Isolated PIE 2.1 / HWLOOP probe on the fixed HP1 worker.
+pie-lab = ["hp-worker"]
+# A/B: HP0 PIE copies of CPU-owned Ethernet SRAM frames; DMA policy unchanged.
+ethernet-pie = []
 lp-timer = []
 # Boot-time second HP core experiment; not part of the normal image.
 multicore-lab = []

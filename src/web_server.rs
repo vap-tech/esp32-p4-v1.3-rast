@@ -37,6 +37,9 @@ pub(crate) trait Port {
     fn wired_stats(&self) -> Option<[u32; 6]> {
         None
     }
+    fn wired_copy_stats(&self) -> Option<[u32; 6]> {
+        None
+    }
     fn reset_stats(&mut self) {}
     fn shares_sdmmc(&self) -> bool {
         false
@@ -57,6 +60,9 @@ impl Port for hal::ethernet::Emac<'_, '_> {
     }
     fn wired_stats(&self) -> Option<[u32; 6]> {
         Some(self.stats())
+    }
+    fn wired_copy_stats(&self) -> Option<[u32; 6]> {
+        Some(self.copy_stats())
     }
     fn reset_stats(&mut self) {
         hal::ethernet::Emac::reset_stats(self);
@@ -338,6 +344,10 @@ impl<P: Port> smoltcp::phy::Device for NetDevice<'_, P> {
         })
     }
 }
+// Both A/B builds use the same aligned CPU frames. PIE never aligns down a
+// pointer or reads beyond the payload; unaligned users of Emac keep scalar copy.
+#[repr(C, align(16))]
+struct AlignedFrame([u8; net::FRAME]);
 struct Network<'a, 'c, 's, P: Port> {
     services: Option<&'s RefCell<dyn crate::background::Services + 's>>,
     player: Option<alarm_audio::Player<'a>>,
@@ -346,8 +356,8 @@ struct Network<'a, 'c, 's, P: Port> {
     port: &'a RefCell<P>,
     tcp: tcp::Stack<'a>,
     console: &'c mut hal::usb_serial::Console,
-    rx: [u8; net::FRAME],
-    tx: [u8; net::FRAME],
+    rx: AlignedFrame,
+    tx: AlignedFrame,
     ip: [u8; 4],
     deadline: u64,
     stop: bool,
@@ -500,8 +510,8 @@ impl<P: Port> Network<'_, '_, '_, P> {
         let mut error = None;
         let mut device = NetDevice {
             port: self.port,
-            rx: &mut self.rx,
-            tx: &mut self.tx,
+            rx: &mut self.rx.0,
+            tx: &mut self.tx.0,
             error: &mut error,
             rx_errors: &mut self.rx_errors,
             busy: self.busy,
@@ -848,8 +858,8 @@ fn serve<P: Port>(
         port,
         tcp,
         console,
-        rx: [0; net::FRAME],
-        tx: [0; net::FRAME],
+        rx: AlignedFrame([0; net::FRAME]),
+        tx: AlignedFrame([0; net::FRAME]),
         ip: [0; 4],
         deadline: if seconds == 0 {
             u64::MAX
@@ -1322,12 +1332,18 @@ fn serve<P: Port>(
             let wired = port.borrow().wired_stats();
             if let Some(stats) = wired {
                 let elapsed = port.borrow_mut().now_us() - request_started;
+                let copies = port.borrow().wired_copy_stats();
                 let mut n = network.borrow_mut();
                 let counters = (n.ticks, n.poll_us, n.read_empty, n.write_full);
                 let _ = writeln!(
                     n.console,
                     "EMAC NET us={} {:?} poll=(calls,us,read_empty,write_full) {:?}",
                     elapsed, stats, counters
+                );
+                let _ = writeln!(
+                    n.console,
+                    "EMAC COPY (rx_vec,tx_vec,rx_scalar,tx_scalar,rx_ptr,tx_ptr) {:x?}",
+                    copies
                 );
             }
         }

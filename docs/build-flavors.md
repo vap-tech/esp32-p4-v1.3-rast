@@ -14,6 +14,8 @@ Default image теперь содержит рабочие Ethernet/HTTP/SD/FAT,
 | Feature | Что добавляет |
 |---|---|
 | `lp-timer` | Включён по умолчанию: LP TIMER target1, собственный LP код и периодический сон/reset-entry |
+| `ethernet-pie` | Опциональные128-bit копии Ethernet SRAM frames на HP0, без смены DMA/cache policy; [A/B/A](ethernet-pie.md) |
+| `pie-lab` | Опциональные PIE2.1 SIMD/HWLOOP тесты на HP1; включает hp-worker, не добавляет C/runtime. См. [pie.md](pie.md) |
 | `hp-worker` | Включён по умолчанию: фиксированный HP1 worker, IRQ18, pause/resume и защита cache maintenance |
 | `multicore-lab` | Одноразовая HP1 boot probe; заменяет постоянный worker |
 | `multicore-queue-lab` / `multicore-cache-lab` | Boot queue/IRQ probes, без кешей / с I0+I1+D ON; заменяют постоянный worker |
@@ -24,6 +26,9 @@ Default image теперь содержит рабочие Ethernet/HTTP/SD/FAT,
 | `audio-lab` | Длительный WAV+JPEG/digital verification; включает diagnostics и software-jpeg |
 | `sdio-reg-cmd52` | Прежний контрольный способ чтения C6 registers; включает wifi |
 | `l2-128` | Историческая экспериментальная раскладка SRAM/L2; включает diagnostics |
+
+`pie-lab` требует runtime worker; сочетания `multicore-lab`/`l2-128`,
+отключающие его, также отключают доступ к PIE-командам.
 
 JPEG benchmarks и mixed JPEG+PCM stress требуют одновременно diagnostics и
 software-jpeg. Wi-Fi raw transport test требует wifi и diagnostics. Просто
