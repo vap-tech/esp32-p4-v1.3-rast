@@ -50,5 +50,24 @@ for (const page of ['index.html', 'demo.html']) {
   calls.length=0;
   await vm.runInContext('removeTree("/TREE",true)',ctx);
   assert.deepEqual(calls.map(c=>[c.opts.method,c.url]),[['GET','/api/list?path=%2FTREE'],['DELETE','/fs/TREE/A.TXT'],['DELETE','/fs/TREE']]);
+  // A DELETE keeps a visible waiting message until the board confirms completion.
+  let completeDelete, timers = 0;
+  ctx.setInterval = () => { timers++; return 123; };
+  ctx.clearInterval = () => { timers--; };
+  ctx.fetch = (url, opts={}) => new Promise(resolve => { completeDelete = resolve; });
+  const deletion = vm.runInContext('deleteSelection("/BIG.MKV",false)',ctx);
+  await flush();
+  assert.equal(get('delete-status').hidden, false);
+  assert.match(get('delete-status').textContent, /Идёт удаление: \/BIG.MKV/);
+  assert.doesNotMatch(get('delete-status').textContent, /^Удалено/);
+  assert.equal(timers, 1);
+  vm.runInContext('current="/OTHER"',ctx);
+  completeDelete({ok:true,status:204}); await deletion;
+  assert.match(get('delete-status').textContent, /^Удалено: \/BIG.MKV/);
+  assert.equal(timers, 0);
+  ctx.fetch = async () => ({ok:false,status:503});
+  await assert.rejects(vm.runInContext('deleteSelection("/FAIL.MKV",false)',ctx));
+  assert.match(get('delete-status').textContent, /не подтверждено/);
+  assert.equal(timers, 0);
   console.log(page+': preview, popover actions, directory uploads, captured destination, recursive delete OK');
 }

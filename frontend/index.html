@@ -195,6 +195,7 @@
       </div>
       <p id="photo-state" role="status">Фоторамка: запрос состояния…</p>
       <div class="status" id="status" role="status" aria-live="polite"></div>
+      <p id="delete-status" role="status" aria-live="polite" hidden></p>
       <section class="upload-panel" id="upload-panel" aria-label="Загрузка файлов" hidden>
         <div class="upload-head"><span class="upload-name" id="upload-name"></span><button class="btn" id="upload-stop" type="button" disabled>Отменить всё</button></div>
         <progress id="upload-progress" max="100" value="0" aria-label="Передано файла"></progress>
@@ -551,12 +552,31 @@
       try { await action(); await load(); } catch (e) { status(e.message, true); }
       finally { mutating = false; if (uploadQueue.length && !uploadRunning) drainUploads(); }
     }
+    let deleteStarted = null, deletePath = '';
+    function paintDeletion() {
+      if (deleteStarted === null) return;
+      $('delete-status').textContent = 'Идёт удаление: ' + deletePath + ' · ' + duration((performance.now() - deleteStarted) / 1000) + '. Подождите, освобождаем место на SD…';
+    }
+    async function deleteSelection(path, dir) {
+      deleteStarted = performance.now(); deletePath = path;
+      $('delete-status').hidden = false; paintDeletion();
+      const timer = setInterval(paintDeletion, 1000);
+      try {
+        await removeTree(path, dir);
+        $('delete-status').textContent = 'Удалено: ' + path + '. Место на SD освобождено.';
+      } catch (e) {
+        $('delete-status').textContent = 'Удаление не подтверждено: ' + path + '. ' + e.message + '. При потере связи начатая операция продолжается на плате; обновите список после восстановления связи.';
+        throw e;
+      } finally { clearInterval(timer); deleteStarted = null; }
+    }
     async function removeTree(path, dir) {
+      deletePath = path; paintDeletion();
       if (dir) {
         const res = await api('GET', '/api/list?path=' + encodeURIComponent(path));
         const data = await res.json();
         for (const child of data.entries) await removeTree(join(path, child.name), child.dir);
       }
+      deletePath = path; paintDeletion();
       await api('DELETE', fileURL(path));
     }
     function actionMenu(entry, path) {
@@ -589,7 +609,7 @@
           if (!validName(name)) { status('Имя до 255 символов, без служебных знаков и точки/пробела в конце.', true); return; }
           mutate(() => api('POST', '/api/rename?path=' + encodeURIComponent(path) + '&name=' + encodeURIComponent(name)));
         } else if (action === 'delete' && confirm('Удалить ' + path + (entry.dir ? ' со всем содержимым?' : '?'))) {
-          mutate(() => removeTree(path, entry.dir));
+          mutate(() => deleteSelection(path, entry.dir));
         }
         };
         popup.append(item);

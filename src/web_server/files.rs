@@ -25,6 +25,7 @@ pub(super) enum Transfer {
     Idle,
     Download { file: FileHandle, left: u32 },
     Upload(Upload),
+    Delete { started: u64 },
     Drain,
 }
 impl Transfer {
@@ -40,6 +41,9 @@ impl Transfer {
         if let Self::Upload(upload) = self {
             upload.trace.shared();
         }
+    }
+    pub fn deleting(&self) -> bool {
+        matches!(self, Self::Delete { .. })
     }
     pub fn idle(&self) -> bool {
         matches!(self, Self::Idle)
@@ -58,6 +62,14 @@ pub(super) async fn start<D: disk::BlockDevice, const N: usize>(
     slot: usize,
     now: u64,
 ) -> Result<Transfer, web::Error> {
+    if r.method == http::Method::Delete {
+        if let Err(e) = files.begin_remove(r.path()).await {
+            web::error(io, web::asyncfs::status(&e), false)?;
+            io.flush()?;
+            return Ok(Transfer::Drain);
+        }
+        return Ok(Transfer::Delete { started: now });
+    }
     let writing = matches!(r.method, http::Method::Put | http::Method::Post);
     let append = cfg!(feature = "diagnostics") && r.method == http::Method::Post;
     let mode = if append {
@@ -175,6 +187,12 @@ pub(super) async fn cancel<D: disk::BlockDevice, const N: usize>(
                 return Err(web::Error::Storage);
             }
         }
+        Transfer::Delete { .. } => {
+            // HTTP cancellation cannot abandon clusters already detached from the directory.
+            while files.removing() {
+                files.remove_step().await.map_err(|_| web::Error::Storage)?;
+            }
+        }
         Transfer::Download { file, .. } => {
             files.close(file).await.map_err(|_| web::Error::Storage)?;
         }
@@ -191,10 +209,40 @@ pub(super) async fn step<P: Port, D: disk::BlockDevice, const N: usize>(
     scratch: &mut [u8],
     staging: &mut UploadPool<'_, '_, { tcp::SLOTS }>,
 ) -> Result<Step, web::Error> {
-    if !network.borrow().tcp.alive(slot) {
+    if !state.deleting() && !network.borrow().tcp.alive(slot) {
         return Err(web::Error::Transport);
     }
     match *state {
+        Transfer::Delete { started } => {
+            if !files.remove_step().await.map_err(|_| web::Error::Storage)? {
+                return Ok(Step::Progress);
+            }
+            let elapsed = network.borrow().port.borrow_mut().now_us() - started;
+            let _ = writeln!(
+                network.borrow_mut().console,
+                "WEB DELETE DONE slot={} us={}",
+                slot,
+                elapsed
+            );
+            network.borrow_mut().tcp.pause_idle_timeout(slot, false);
+            if network.borrow().tcp.alive(slot) {
+                *state = Transfer::Drain;
+                let mut io = Connection {
+                    network,
+                    slot,
+                    buffer: [0; tcp::MSS],
+                    used: 0,
+                };
+                web::asyncfs::deleted(&mut io)?;
+                io.flush()?;
+                Ok(Step::Progress)
+            } else {
+                network.borrow_mut().tcp.release(slot);
+                *state = Transfer::Idle;
+                Ok(Step::Done)
+            }
+        }
+
         Transfer::Download { file, mut left } => {
             let want = scratch
                 .len()

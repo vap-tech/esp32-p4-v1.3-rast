@@ -1049,7 +1049,9 @@ fn serve<P: Port>(
             if transfers[slot].idle() {
                 continue;
             }
-            let operation = if port.borrow_mut().now_us() - progress[slot] > 30_000_000 {
+            let operation = if !transfers[slot].deleting()
+                && port.borrow_mut().now_us() - progress[slot] > 30_000_000
+            {
                 Err(web::Error::Transport)
             } else {
                 esp32_p4::runtime::run(
@@ -1132,7 +1134,11 @@ fn serve<P: Port>(
             if matches!(r.route, http::Route::File | http::Route::Static)
                 && matches!(
                     r.method,
-                    http::Method::Get | http::Method::Head | http::Method::Put | http::Method::Post
+                    http::Method::Get
+                        | http::Method::Head
+                        | http::Method::Put
+                        | http::Method::Post
+                        | http::Method::Delete
                 )
             {
                 let _ = writeln!(
@@ -1143,7 +1149,7 @@ fn serve<P: Port>(
                     r.path(),
                     r.length
                 );
-                if fs.open_count() >= 4 {
+                if fs.open_count() >= 4 && r.method != http::Method::Delete {
                     let mut io = Connection {
                         network: &network,
                         slot,
@@ -1185,6 +1191,9 @@ fn serve<P: Port>(
                     Ok(mut transfer) => {
                         #[cfg(feature = "diagnostics")]
                         transfer.set_trace(trace, port.borrow_mut().now_us());
+                        if transfer.deleting() {
+                            network.borrow_mut().tcp.pause_idle_timeout(slot, true);
+                        }
                         transfers[slot] = transfer;
                         progress[slot] = port.borrow_mut().now_us();
                     }

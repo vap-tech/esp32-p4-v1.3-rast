@@ -199,6 +199,9 @@ pub fn file_headers(r: &Request, len: u32, io: &mut impl Transport) -> Result<()
         },
     )
 }
+pub fn deleted(io: &mut impl Transport) -> Result<(), Error> {
+    headers(io, 204, Some(0), "text/plain", "")
+}
 pub fn created(io: &mut impl Transport) -> Result<(), Error> {
     headers(io, 201, Some(0), "text/plain", "")
 }

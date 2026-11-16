@@ -637,11 +637,29 @@ where
     pub(crate) async fn free(&mut self) -> Result<u32, Error<E>> {
         let mut num_free = 0;
         while let Some(n) = self.cluster {
-            self.next().await;
+            self.next().await.transpose()?;
             write_fat(self.fat.borrow_mut(), self.fat_type, n, FatValue::Free).await?;
             num_free += 1;
         }
         Ok(num_free)
+    }
+
+    /// Bounded reclamation of an already detached, exclusively owned chain.
+    pub(crate) async fn free_some(&mut self, limit: u32, max_cluster: u32) -> Result<(u32, Option<u32>), Error<E>> {
+        let mut freed = 0;
+        while let Some(n) = self.cluster {
+            if freed == limit { break; }
+            if n < 2 || n > max_cluster { return Err(Error::CorruptedFileSystem); }
+            let next = match read_fat(self.fat.borrow_mut(), self.fat_type, n).await? {
+                FatValue::Data(next) if next >= 2 && next <= max_cluster && next != n => Some(next),
+                FatValue::EndOfChain => None,
+                _ => return Err(Error::CorruptedFileSystem),
+            };
+            write_fat(self.fat.borrow_mut(), self.fat_type, n, FatValue::Free).await?;
+            self.cluster = next;
+            freed += 1;
+        }
+        Ok((freed, self.cluster))
     }
 
     pub async fn next(&mut self) -> Option<Result<u32, Error<E>>> {

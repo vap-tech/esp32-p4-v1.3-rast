@@ -25,6 +25,17 @@ use crate::time::{DefaultTimeProvider, TimeProvider};
 //   http://wiki.osdev.org/FAT
 //   https://www.win.tue.nl/~aeb/linux/fs/fat/fat-1.html
 
+/// Opaque ownership of clusters whose directory entry was durably detached.
+/// Must be reclaimed before marking the volume clean; not a recoverable on-disk journal.
+#[must_use]
+pub struct RemovedChain {
+    next: Option<u32>,
+    remaining: u32,
+}
+impl RemovedChain {
+    pub fn done(&self) -> bool { self.next.is_none() }
+}
+
 /// A type of FAT filesystem.
 ///
 /// `FatType` values are based on the size of File Allocation Table entry.
@@ -530,6 +541,23 @@ impl<IO: ReadWriteSeek, TP, OCC> FileSystem<IO, TP, OCC> {
         let mut fs_info = self.fs_info.borrow_mut();
         fs_info.map_free_clusters(|n| n + num_free);
         Ok(())
+    }
+
+    pub(crate) fn detached_chain(&self, next: Option<u32>) -> RemovedChain {
+        RemovedChain { next, remaining: self.total_clusters }
+    }
+
+    /// Reclaim a bounded number of detached clusters. Caller serializes all FS operations,
+    /// flushes FAT after each batch and preserves the dirty flag until the token is complete.
+    pub async fn reclaim_removed(&self, chain: &mut RemovedChain, limit: u32) -> Result<u32, Error<IO::Error>> {
+        let Some(first) = chain.next else { return Ok(0); };
+        if limit == 0 || chain.remaining == 0 { return Err(Error::CorruptedFileSystem); }
+        let mut iter = self.cluster_iter(first);
+        let (freed, next) = iter.free_some(limit.min(chain.remaining), max_valid_cluster(self.total_clusters)).await?;
+        chain.next = next;
+        chain.remaining -= freed;
+        self.fs_info.borrow_mut().map_free_clusters(|n| n + freed);
+        Ok(freed)
     }
 
     pub(crate) async fn free_cluster_chain(&self, cluster: u32) -> Result<(), Error<IO::Error>> {

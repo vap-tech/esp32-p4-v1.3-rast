@@ -1023,6 +1023,124 @@ mod tests {
         }
     }
     #[test]
+    fn bounded_delete_batches_fat_interleaves_io_and_preserves_dirty_until_done() {
+        use crate::storage::files::{FileTable, OpenMode};
+        let plan = crate::storage::format::Plan::new(131072).unwrap();
+        let fat1 = u64::from(plan.start + u32::from(plan.reserved));
+        let fat_end = fat1 + u64::from(plan.fat_sectors) * 2;
+        let events = Rc::new(RefCell::new(std::vec::Vec::new()));
+        let disk = AuditDisk {
+            disk: disk(),
+            events: events.clone(),
+            fail_lba: Rc::new(Cell::new(None)),
+        };
+        let mut stream = RefCell::new(Stream::new(run(io::Partition::mbr(disk, 0)).unwrap()));
+        let mut volume = run(Volume::mount(&mut stream)).unwrap();
+        let cluster = volume.fat().fs.cluster_size() as usize;
+        let mut files = FileTable::<_, 5>::new(&mut volume);
+        let h = run(files.open("/large.bin", OpenMode::CreateNew)).unwrap();
+        let block = std::vec![0x5a; cluster];
+        for _ in 0..385 {
+            run(files.write(h, &block)).unwrap();
+        }
+        assert!(matches!(
+            run(files.begin_remove("/large.bin")),
+            Err(Error::Busy)
+        ));
+        run(files.close(h)).unwrap();
+        let deletion_start = events.borrow().len();
+        run(files.begin_remove("/large.bin")).unwrap();
+        assert!(files.removing());
+        assert!(matches!(
+            run(files.open("/large.bin", OpenMode::Read)),
+            Err(Error::Fs(embedded_fatfs::Error::NotFound))
+        ));
+        assert!(!run(files.remove_step()).unwrap());
+        assert!(matches!(
+            run(files.begin_remove("/other.bin")),
+            Err(Error::Busy)
+        ));
+        // Reusing the detached name is safe; its new clusters must not be reclaimed.
+        let h = run(files.open("/large.bin", OpenMode::CreateNew)).unwrap();
+        run(files.write(h, b"new file")).unwrap();
+        run(files.close(h)).unwrap();
+        // A close/checkpoint during deletion must not mark an incomplete volume clean.
+        let mut snapshot = self::disk();
+        for event in events.borrow().iter() {
+            if let AuditEvent::Write(lba, bytes) = event {
+                crate::storage::BlockDevice::write(&mut snapshot, *lba, bytes).unwrap();
+            }
+        }
+        let mut copy = RefCell::new(Stream::new(run(io::Partition::mbr(snapshot, 0)).unwrap()));
+        let mounted = run(Volume::mount(&mut copy)).unwrap();
+        assert!(mounted.needs_recovery());
+        drop(mounted);
+        let mut steps = 1;
+        while files.removing() {
+            run(files.remove_step()).unwrap();
+            steps += 1;
+            let h = run(files.open("/large.bin", OpenMode::Read)).unwrap();
+            let mut data = [0; 8];
+            assert_eq!(run(files.read(h, &mut data)).unwrap(), 8);
+            assert_eq!(&data, b"new file");
+            run(files.close(h)).unwrap();
+        }
+        assert_eq!(steps, 4);
+        let writes = events.borrow()[deletion_start..]
+            .iter()
+            .filter(|e| matches!(e, AuditEvent::Write(lba,_) if *lba>=fat1 && *lba<fat_end))
+            .count();
+        assert!(writes < 32, "batched FAT writes: {writes}");
+        drop(files);
+        drop(volume);
+        let mut volume = run(Volume::mount(&mut stream)).unwrap();
+        assert!(!volume.needs_recovery());
+        assert_eq!(run(volume.open("/large.bin")).unwrap().len(), 8);
+    }
+    #[test]
+    fn delete_failure_or_abandoned_job_keeps_volume_dirty() {
+        use crate::storage::files::{FileTable, OpenMode};
+        for fail_write in [false, true] {
+            let plan = crate::storage::format::Plan::new(131072).unwrap();
+            let mirror = u64::from(plan.start + u32::from(plan.reserved) + plan.fat_sectors);
+            let fail = Rc::new(Cell::new(None));
+            let disk = AuditDisk {
+                disk: disk(),
+                events: Rc::new(RefCell::new(std::vec::Vec::new())),
+                fail_lba: fail.clone(),
+            };
+            let mut stream = RefCell::new(Stream::new(run(io::Partition::mbr(disk, 0)).unwrap()));
+            let mut volume = run(Volume::mount(&mut stream)).unwrap();
+            let mut files = FileTable::<_, 5>::new(&mut volume);
+            let h = run(files.open("/doomed.bin", OpenMode::CreateNew)).unwrap();
+            run(files.write(h, &[0x73; 8192])).unwrap();
+            run(files.close(h)).unwrap();
+            run(files.begin_remove("/doomed.bin")).unwrap();
+            if fail_write {
+                fail.set(Some(mirror));
+                assert!(run(files.remove_step()).is_err());
+                assert!(files.is_poisoned());
+                assert!(matches!(
+                    run(files.open("/unsafe.bin", OpenMode::CreateNew)),
+                    Err(Error::NeedsRecovery)
+                ));
+            }
+            drop(files);
+            assert!(volume.needs_recovery());
+            drop(volume);
+            fail.set(None);
+            // Simulate a cold reset: discard RAM caches and their failed-flush latch.
+            let partition = stream.into_inner().device;
+            let mut stream = RefCell::new(Stream::new(partition));
+            let mut mounted = run(Volume::mount(&mut stream)).unwrap();
+            assert!(mounted.needs_recovery());
+            assert!(matches!(
+                run(mounted.open("/doomed.bin")),
+                Err(Error::Fs(embedded_fatfs::Error::NotFound))
+            ));
+        }
+    }
+    #[test]
     fn fat_checkpoint_precedes_directory_publication_and_clean_marker() {
         use crate::storage::files::{FileTable, OpenMode};
         for fail_mirror in [false, true] {

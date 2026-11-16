@@ -526,6 +526,56 @@ impl<'a, IO: ReadWriteSeek, TP: TimeProvider, OCC: OemCpConverter> Dir<'a, IO, T
         Ok(())
     }
 
+    /// Unlink only, returning ownership of the old chain for bounded reclamation.
+    /// The caller must keep the volume dirty until reclamation and metadata flush complete.
+    pub async fn detach_for_removal(&self, path: &str) -> Result<crate::fs::RemovedChain, Error<IO::Error>> {
+        trace!("Dir::remove {}", path);
+
+        // traverse path
+        let mut split = split_path(path);
+        let mut e = self.clone();
+        loop {
+            let (name, rest_opt) = split;
+            match rest_opt {
+                Some(rest) => {
+                    split = split_path(rest);
+                    e = e.find_entry(name, Some(true), None).await?.to_dir();
+                }
+                None => {
+                    break;
+                }
+            }
+        }
+
+        // this is final filename in the path
+        let parent = e;
+        let (name, _) = split;
+
+        // in case of directory check if it is empty
+        let e = parent.find_entry(name, None, None).await?;
+        if e.is_dir() && !e.to_dir().is_empty().await? {
+            return Err(Error::DirectoryIsNotEmpty);
+        }
+        // Publish dirty status before unlink. A power cut may leak clusters but must
+        // never leave a live directory entry pointing into a partly freed chain.
+        self.fs.set_dirty_flag(true).await.map_err(Error::Io)?;
+        let chain = self.fs.detached_chain(e.first_cluster());
+        // free long and short name entries
+        let mut stream = parent.stream.clone();
+        stream.seek(SeekFrom::Start(e.offset_range.0)).await?;
+        let num = ((e.offset_range.1 - e.offset_range.0) / u64::from(DIR_ENTRY_SIZE)) as usize;
+        for _ in 0..num {
+            let mut data = DirEntryData::deserialize(&mut stream).await?;
+            trace!("removing dir entry {:?}", data);
+            data.set_deleted();
+            stream.seek(SeekFrom::Current(-i64::from(DIR_ENTRY_SIZE))).await?;
+            data.serialize(&mut stream).await?;
+        }
+        // remove requires stream flush
+        stream.flush().await?;
+        Ok(chain)
+    }
+
     /// Renames or moves existing file or directory.
     ///
     /// `src_path` is a '/' separated source file path relative to self directory.

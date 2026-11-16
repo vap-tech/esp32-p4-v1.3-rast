@@ -54,12 +54,14 @@ impl Slot {
 pub struct FileTable<'v, 'io, D: BlockDevice, const N: usize> {
     volume: &'v mut Volume<'io, D>,
     slots: [Slot; N],
+    removal: Option<embedded_fatfs::RemovedChain>,
 }
 impl<'v, 'io, D: BlockDevice, const N: usize> FileTable<'v, 'io, D, N> {
     pub fn new(volume: &'v mut Volume<'io, D>) -> Self {
         Self {
             volume,
             slots: [const { Slot::EMPTY }; N],
+            removal: None,
         }
     }
     pub const fn capacity(&self) -> usize {
@@ -94,7 +96,7 @@ impl<'v, 'io, D: BlockDevice, const N: usize> FileTable<'v, 'io, D, N> {
     }
     async fn checkpoint(&self, keep_dirty: bool) -> Result<(), Error<D::Error>> {
         let fat = self.volume.fat();
-        if keep_dirty {
+        if keep_dirty || self.removal.is_some() {
             fat.fs.flush_preserving_dirty().await?;
         } else {
             fat.fs.flush().await?;
@@ -336,6 +338,9 @@ impl<'v, 'io, D: BlockDevice, const N: usize> FileTable<'v, 'io, D, N> {
         Ok(())
     }
     pub async fn shutdown(&mut self) -> Result<(), Error<D::Error>> {
+        while self.removing() {
+            self.remove_step().await?;
+        }
         for i in 0..N {
             if !self.slots[i].live() {
                 continue;
@@ -433,8 +438,12 @@ impl<'v, 'io, D: BlockDevice, const N: usize> FileTable<'v, 'io, D, N> {
         }
         Ok(())
     }
-    pub async fn remove(&mut self, p: &str) -> Result<(), Error<D::Error>> {
+    /// Start one detached-chain job; unrelated file operations remain serialized and usable.
+    pub async fn begin_remove(&mut self, p: &str) -> Result<(), Error<D::Error>> {
         self.volume.writable()?;
+        if self.removal.is_some() {
+            return Err(Error::Busy);
+        }
         let p = volume::path(p)?;
         self.ensure_unlocked(p).await?;
         let fat = self.volume.fat();
@@ -443,9 +452,38 @@ impl<'v, 'io, D: BlockDevice, const N: usize> FileTable<'v, 'io, D, N> {
             return Err(embedded_fatfs::Error::DirectoryIsNotEmpty.into());
         }
         let guard = Mutation::begin(&fat.poisoned);
-        fat.fs.root_dir().remove(p).await?;
+        let chain = fat.fs.root_dir().detach_for_removal(p).await?;
+        self.removal = Some(chain);
+        self.checkpoint(true).await?;
+        guard.commit();
+        Ok(())
+    }
+    pub fn removing(&self) -> bool {
+        self.removal.is_some()
+    }
+    /// At most 128 clusters (~one FAT32 sector) per foreground turn.
+    pub async fn remove_step(&mut self) -> Result<bool, Error<D::Error>> {
+        self.volume.writable()?;
+        let Some(mut chain) = self.removal.take() else {
+            return Ok(true);
+        };
+        let fat = self.volume.fat();
+        let guard = Mutation::begin(&fat.poisoned);
+        {
+            let _scope = super::asynchronous::Stream::defer_file_fat(fat.stream);
+            fat.fs.reclaim_removed(&mut chain, 128).await?;
+        }
+        let done = chain.done();
+        if !done {
+            self.removal = Some(chain);
+        }
         self.checkpoint(self.writers() != 0).await?;
         guard.commit();
+        Ok(done)
+    }
+    pub async fn remove(&mut self, p: &str) -> Result<(), Error<D::Error>> {
+        self.begin_remove(p).await?;
+        while !self.remove_step().await? {}
         Ok(())
     }
     pub async fn rename(&mut self, a: &str, b: &str) -> Result<(), Error<D::Error>> {
@@ -487,7 +525,7 @@ impl<'v, 'io, D: BlockDevice, const N: usize> FileTable<'v, 'io, D, N> {
 }
 impl<D: BlockDevice, const N: usize> Drop for FileTable<'_, '_, D, N> {
     fn drop(&mut self) {
-        if self.writers() != 0 {
+        if self.writers() != 0 || self.removal.is_some() {
             self.volume.fat().poisoned.set(true);
         }
     }

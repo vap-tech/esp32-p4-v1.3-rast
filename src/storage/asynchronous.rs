@@ -123,7 +123,7 @@ impl FatLine {
     };
 }
 /// Byte I/O with two write-through partial-sector lines and a separate bounded
-/// FAT write-back cache. Only scoped regular-file writes admit dirty FAT lines.
+/// FAT write-back cache. Scoped file writes and bounded detached-chain reclamation admit dirty FAT lines.
 pub struct Stream<D> {
     pub(super) device: D,
     position: u64,
@@ -357,7 +357,7 @@ impl<D: BlockDevice> Write for Stream<D> {
         }
         let want = ((self.capacity() - self.position).min(b.len() as u64)) as usize;
         let offset = self.position as usize % 512;
-        // Outside a regular-file data write, metadata remains write-through.
+        // Outside a scoped file write/reclamation batch, metadata remains write-through.
         // Drain FAT before publishing a directory/FSInfo/dirty-marker update.
         if !self.defer_fat {
             self.flush_fat().await?;
