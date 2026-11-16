@@ -1129,7 +1129,7 @@ fn serve<P: Port>(
             (slot, request)
         };
         if let Ok(ref r) = request {
-            if r.route == http::Route::File
+            if matches!(r.route, http::Route::File | http::Route::Static)
                 && matches!(
                     r.method,
                     http::Method::Get | http::Method::Head | http::Method::Put | http::Method::Post

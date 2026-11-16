@@ -28,6 +28,7 @@ pub enum Route {
     Index,
     List,
     File,
+    Static,
     Rename,
     Clipboard,
     State,
@@ -185,11 +186,19 @@ pub fn parse(bytes: &[u8]) -> Result<Request, u16> {
         }
         download = query == "download=1";
         (Route::File, path)
+    } else if target.starts_with('/')
+        && !target.starts_with("/api/")
+        && !target.starts_with("/fs/")
+        && !matches!(target, "/" | "/index.html" | "/flash" | "/api" | "/fs")
+    {
+        (Route::Static, target)
     } else {
         return Err(404);
     };
     let allowed = match route {
-        Route::Index | Route::List | Route::State => matches!(method, Method::Get | Method::Head),
+        Route::Index | Route::List | Route::State | Route::Static => {
+            matches!(method, Method::Get | Method::Head)
+        }
         Route::File => {
             matches!(
                 method,
@@ -242,11 +251,28 @@ pub fn parse(bytes: &[u8]) -> Result<Request, u16> {
         argument_len: 0,
         download,
     };
+    if route == Route::Static && !path.starts_with("/www/") && path != "/www" {
+        request.path[..4].copy_from_slice(b"/www");
+        request.path_len = 4;
+    }
     if route == Route::File {
         request.path[0] = b'/';
         request.path_len = 1;
     }
     request.path_len += decode(path, &mut request.path[request.path_len..])?;
+    if route == Route::Static && (request.path() == "/www" || request.path().ends_with('/')) {
+        let suffix = if request.path() == "/www" {
+            b"/index.html".as_slice()
+        } else {
+            b"index.html".as_slice()
+        };
+        let end = request.path_len + suffix.len();
+        if end > request.path.len() {
+            return Err(414);
+        }
+        request.path[request.path_len..end].copy_from_slice(suffix);
+        request.path_len = end;
+    }
     request.argument_len = decode(argument, &mut request.argument)?;
     if !request.path().starts_with('/') || request.path().split('/').any(|s| s == ".." || s == ".")
     {
@@ -367,7 +393,29 @@ pub fn json_string(out: &mut impl fmt::Write, s: &str) -> fmt::Result {
 }
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
+    #[test]
+    fn static_assets_are_read_only_and_confined_to_www() {
+        for (target, path) in [
+            ("/photo-tools.js?v=2", "/www/photo-tools.js"),
+            ("/www/vendor/app.mjs", "/www/vendor/app.mjs"),
+            ("/www", "/www/index.html"),
+            ("/assets/", "/www/assets/index.html"),
+        ] {
+            for method in ["GET", "HEAD"] {
+                let raw = std::format!("{method} {target} HTTP/1.1\r\nHost: p4\r\n\r\n");
+                let r = parse(raw.as_bytes()).unwrap();
+                assert_eq!(r.route, Route::Static);
+                assert_eq!(r.path(), path);
+            }
+        }
+        for target in ["/www/../private", "/www/%2e%2e/private", "/../private"] {
+            assert!(parse(std::format!("GET {target} HTTP/1.1\r\n\r\n").as_bytes()).is_err());
+        }
+        assert!(parse(b"PUT /www/app.js HTTP/1.1\r\nContent-Length: 0\r\n\r\n").is_err());
+        assert!(parse(b"GET /api/unknown HTTP/1.1\r\n\r\n").is_err());
+    }
     #[test]
     fn folder_history_reload_serves_ui_without_becoming_a_file_request() {
         for bytes in [

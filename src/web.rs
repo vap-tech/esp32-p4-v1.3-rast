@@ -113,7 +113,9 @@ pub fn serve<D: BlockDevice>(
 ) -> Result<(), Error> {
     let head = request.method == Method::Head;
     match request.route {
-        Route::PhotoStatus | Route::PhotoStart | Route::PhotoStop => return error(io, 501, head),
+        Route::Static | Route::PhotoStatus | Route::PhotoStart | Route::PhotoStop => {
+            return error(io, 501, head)
+        }
         Route::Index => {
             headers(
                 io,
@@ -298,7 +300,31 @@ pub fn serve<D: BlockDevice>(
 
 fn mime_type(path: &str) -> &'static str {
     let ext = path.rsplit('.').next().unwrap_or("");
-    if ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg") {
+    if ext.eq_ignore_ascii_case("js") || ext.eq_ignore_ascii_case("mjs") {
+        "text/javascript; charset=utf-8"
+    } else if ext.eq_ignore_ascii_case("css") {
+        "text/css; charset=utf-8"
+    } else if ext.eq_ignore_ascii_case("html") || ext.eq_ignore_ascii_case("htm") {
+        "text/html; charset=utf-8"
+    } else if ext.eq_ignore_ascii_case("json") || ext.eq_ignore_ascii_case("map") {
+        "application/json"
+    } else if ext.eq_ignore_ascii_case("wasm") {
+        "application/wasm"
+    } else if ext.eq_ignore_ascii_case("svg") {
+        "image/svg+xml"
+    } else if ext.eq_ignore_ascii_case("ico") {
+        "image/vnd.microsoft.icon"
+    } else if ext.eq_ignore_ascii_case("woff2") {
+        "font/woff2"
+    } else if ext.eq_ignore_ascii_case("woff") {
+        "font/woff"
+    } else if ext.eq_ignore_ascii_case("ttf") {
+        "font/ttf"
+    } else if ext.eq_ignore_ascii_case("otf") {
+        "font/otf"
+    } else if ext.eq_ignore_ascii_case("webmanifest") {
+        "application/manifest+json"
+    } else if ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg") {
         "image/jpeg"
     } else if ext.eq_ignore_ascii_case("png") {
         "image/png"

@@ -189,6 +189,10 @@
           <input id="picker" type="file" multiple aria-label="Выбрать файлы">
         </div>
       </div>
+      <div style="padding: 12px 20px">
+        <label><input id="prepare-photos" type="checkbox"> Подготовить фотографии перед загрузкой</label>
+        <small>До 1536 пикселей, с учётом поворота. JPEG, имена: .frame.jpg. Исходники на компьютере не меняются.</small>
+      </div>
       <p id="photo-state" role="status">Фоторамка: запрос состояния…</p>
       <div class="status" id="status" role="status" aria-live="polite"></div>
       <section class="upload-panel" id="upload-panel" aria-label="Загрузка файлов" hidden>
@@ -240,7 +244,7 @@
         <label><input id="photo-slide" type="checkbox"> Сдвиг</label>
       </fieldset>
       <p>JPEG из этой папки, без подпапок. На время показа часы скрыты. Будильник прервёт фоторамку.</p>
-      <p>Для больших оригиналов нужны уменьшенные копии. Неподдерживаемые JPEG пропускаются. Переходы пока ступенчатые; при смене фото видна полоса обновления.</p>
+      <p>Для больших оригиналов включите подготовку фотографий при загрузке. Неподдерживаемые JPEG пропускаются. Переходы пока ступенчатые; при смене фото видна полоса обновления.</p>
       <p id="photo-error" role="alert"></p>
       <div class="actions"><button class="btn primary" id="photo-submit" type="submit">Запустить</button><button class="btn" id="photo-cancel" type="button">Отмена</button></div>
     </form>
@@ -511,10 +515,31 @@
       return name.length >= 1 && name.length <= 255 && !/^[. ]+$/.test(name)
         && !/[. ]$/.test(name) && !/[\u0000-\u001f\u007f-\u009f\ufffe\uffff"*\/:<>?\\|]/u.test(name);
     }
+    let photoToolsLoading = null;
+    async function photoTools() {
+      if (window.P4PhotoTools) return window.P4PhotoTools;
+      if (!photoToolsLoading) photoToolsLoading = new Promise((resolve, reject) => {
+        const script = document.createElement('script'); script.src = '/www/photo-tools.js';
+        script.onload = () => window.P4PhotoTools ? resolve(window.P4PhotoTools) : reject(Error('Модуль подготовки фото не загрузился'));
+        script.onerror = () => { photoToolsLoading = null; reject(Error('Не найден /www/photo-tools.js на SD. Обычная загрузка работает без него.')); };
+        document.head.append(script);
+      });
+      return photoToolsLoading;
+    }
+    async function preparePhoto(file) {
+      $('upload-panel').hidden = false; $('upload-stop').disabled = false;
+      $('upload-name').textContent = file.name;
+      $('upload-percent').textContent = ''; $('upload-speed').textContent = ''; $('upload-time').textContent = '';
+      $('upload-bytes').textContent = transferSize(file.size);
+      $('upload-phase').textContent = 'Подготовка фото на компьютере…';
+      const tools = await photoTools();
+      return tools.prepare(file, {cancelled: () => cancelUploads});
+    }
     function queueJobs(jobs) {
       if (cleanupRunning) { status('Дождитесь освобождения кешей.', true); return; }
       if (cancelUploads && uploadRunning) { status('Дождитесь завершения отмены.'); return; }
-      uploadQueue.push(...jobs);
+      const preparePhotos = Boolean($('prepare-photos').checked);
+      uploadQueue.push(...jobs.map(job => ({...job, preparePhotos})));
       if (!uploadRunning && !mutating && uploadQueue.length) return drainUploads();
     }
     function upload(files) {
@@ -530,9 +555,15 @@
       try {
         do {
           while (uploadQueue.length) {
-            const {file, dir, relative, directory} = uploadQueue.shift();
+            let {file, dir, relative, directory, preparePhotos} = uploadQueue.shift();
+            let beganUpload = false;
             status('Загрузка: ' + join(dir, relative) + ' · в очереди: ' + uploadQueue.length);
             try {
+              if (!directory && preparePhotos && ((file.type || '').startsWith('image/') || /\.(jpe?g|png|webp|gif|bmp|avif|heic)$/i.test(file.name))) {
+                file = await preparePhoto(file);
+                const slash = relative.lastIndexOf('/');
+                relative = (slash < 0 ? '' : relative.slice(0, slash + 1)) + file.name;
+              }
               const parts = relative.split('/');
               if (!parts.every(validName)) throw Error(relative + ' — недопустимое имя (до 255 символов UTF-16)');
               if (new TextEncoder().encode(join(dir, relative)).length > 768) throw Error('Путь длиннее 768 байт UTF-8');
@@ -541,11 +572,13 @@
               for (const component of parts.slice(0, directory ? parts.length : -1)) { parent = join(parent, component); await ensureDirectory(parent); if (cancelUploads) throw abortError(); }
               if (directory) continue;
               if (cancelUploads) throw abortError();
+              beganUpload = true;
               await sendUpload(file, join(dir, relative));
               done++;
             } catch (e) {
               if (e.name === 'AbortError') {
                 cancelled++;
+                if (!beganUpload) { $('upload-phase').textContent = 'Подготовка отменена. Передача файла не начиналась.'; continue; }
                 $('upload-phase').textContent = 'Ждём отмены загрузки на борде…';
                 try {
                   const code = await waitCancelled(join(dir, relative));
@@ -562,6 +595,7 @@
         status('Загружено файлов: ' + done + (cancelled ? '. Отменено: ' + cancelled : '') + (failed ? '. Ошибок: ' + failed + '. ' + lastError : ''), failed > 0);
       } finally {
         uploadRunning = false; cancelUploads = false;
+        $('upload-stop').disabled = true;
         $('refresh').disabled = false;
       }
     }
@@ -741,7 +775,17 @@
     };
     let photoFolder = '/', photoBusy = false;
     function photoMessage(message) {
-      return ({'time elapsed':'время истекло','stopped by web':'остановлена из веба','alarm or server stop':'прервана будильником или остановкой сервиса','resources released':'ресурсы освобождены','no supported JPEG files':'в папке нет поддерживаемых JPEG'})[message] || message;
+      return ({'time elapsed':'время истекло','stopped by web':'остановлена из веба','alarm or server stop':'прервана будильником или остановкой сервиса','resources released':'ресурсы освобождены','no supported JPEG files':'в папке нет поддерживаемых JPEG','no supported images':'ни один файл не удалось показать','directory read failed':'не удалось продолжить чтение папки'})[message] || message;
+    }
+    function photoFailure(state) {
+      const reasons = {
+        input_too_large: 'JPEG больше ' + transferSize(state.max_jpeg_bytes || 2097152) + '. Включите подготовку фото при загрузке.',
+        decoded_too_large: 'Изображение ' + state.width + '×' + state.height + ' требует ' + transferSize(state.decoded_bytes) + ', доступно ' + transferSize(state.max_decoded_bytes || 8388608) + '.',
+        dimensions_alignment: 'Ширина и высота JPEG должны быть кратны 8. Подготовьте фото при загрузке.',
+        jpeg_baseline_required: 'Нужен baseline JPEG; progressive пока не поддерживается.',
+        jpeg_unsupported: 'Этот тип JPEG пока не поддерживается.', jpeg_invalid: 'Повреждённый или неполный JPEG.',
+      };
+      return reasons[state.last_error] || state.last_error;
     }
     function renderPhoto(state) {
       $('photo-stop').hidden = !state.running;
@@ -749,11 +793,13 @@
       $('photo-state').textContent = state.running
         ? 'Фоторамка · ' + state.folder + ' · ' + (state.file || 'Подготовка…') + ' · показано ' + state.shown + ', пропущено ' + state.skipped
         : 'Фоторамка остановлена' + (state.message && state.message !== 'idle' ? ' · ' + photoMessage(state.message) : '') + '. Часы и будильник доступны.';
+      if (state.last_error) $('photo-state').textContent += '\nПоследний пропуск: ' + (state.error_file || state.file || '') + ' — ' + photoFailure(state);
+      $('photo-state').style && ($('photo-state').style.whiteSpace = 'pre-line');
     }
     async function photoRequest(url, method = 'GET') {
       const response = await fetch(url, {method, cache: 'no-store'});
       const state = await response.json();
-      if (!response.ok) throw Error(state.error || 'HTTP ' + response.status);
+      if (!response.ok) throw Error(({'already running':'Фоторамка уже работает','alarm active or display unavailable':'Активен будильник или дисплей недоступен','folder has no JPEG files':'В папке нет JPEG','folder unavailable':'Папка недоступна'})[state.error] || state.error || 'HTTP ' + response.status);
       renderPhoto(state);
       return state;
     }

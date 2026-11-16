@@ -190,7 +190,9 @@ pub fn file_headers(r: &Request, len: u32, io: &mut impl Transport) -> Result<()
         200,
         Some(len),
         mime_type(r.path()),
-        if r.download {
+        if r.route == Route::Static {
+            "X-Content-Type-Options: nosniff\r\n"
+        } else if r.download {
             "Content-Disposition: attachment\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: sandbox\r\n"
         } else {
             "Content-Disposition: inline\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: sandbox\r\n"

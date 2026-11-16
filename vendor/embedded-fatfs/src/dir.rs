@@ -125,6 +125,17 @@ impl<'a, IO: ReadWriteSeek, TP, OCC> Dir<'a, IO, TP, OCC> {
     pub fn iter(&self) -> DirIter<'a, IO, TP, OCC> {
         DirIter::new(self.stream.clone(), self.fs, true)
     }
+
+    /// Resume at a byte cookie returned after a complete directory entry.
+    /// Reopening resolves the directory again; no borrowed filesystem state is retained.
+    pub async fn iter_from(&self, offset: u64) -> Result<DirIter<'a, IO, TP, OCC>, Error<IO::Error>> {
+        if offset % u64::from(DIR_ENTRY_SIZE) != 0 {
+            return Err(Error::InvalidInput);
+        }
+        let mut stream = self.stream.clone();
+        stream.seek(SeekFrom::Start(offset)).await?;
+        Ok(DirIter::new(stream, self.fs, true))
+    }
 }
 
 impl<'a, IO: ReadWriteSeek, TP: TimeProvider, OCC: OemCpConverter> Dir<'a, IO, TP, OCC> {
@@ -808,6 +819,11 @@ impl<'a, IO: ReadWriteSeek, TP, OCC> DirIter<'a, IO, TP, OCC> {
 }
 
 impl<'a, IO: ReadWriteSeek, TP: TimeProvider, OCC> DirIter<'a, IO, TP, OCC> {
+    /// Cookie valid between complete `next` calls, not in the middle of an LFN.
+    pub async fn position(&mut self) -> Result<u64, Error<IO::Error>> {
+        self.stream.seek(SeekFrom::Current(0)).await
+    }
+
     fn should_skip_entry(&self, raw_entry: &DirEntryData) -> bool {
         if raw_entry.is_deleted() {
             return true;

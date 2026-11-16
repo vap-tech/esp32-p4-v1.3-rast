@@ -84,6 +84,29 @@ for (const page of ['index.html', 'demo.html']) {
     ['a..b', true], ['x.', false], ['a b.txt', true], ['файл.txt', true], ['a\\b.txt', false]]) {
     assert.equal(vm.runInContext('validName(' + JSON.stringify(name) + ')', sandbox), expected, name);
   }
+  // Photo settings and target are captured when queued, before asynchronous preparation.
+  const preparations = [];
+  sandbox.window.P4PhotoTools = {prepare(source, options) {
+    return new Promise((resolve, reject) => preparations.push({source, options, resolve, reject}));
+  }};
+  get('prepare-photos').checked = true;
+  vm.runInContext('current="/PREPARED"', sandbox);
+  const before = requests.length;
+  drop([file('one.jpg'), file('two.png')]); await flush();
+  get('prepare-photos').checked = false;
+  vm.runInContext('current="/ELSEWHERE"', sandbox);
+  const converted = file('one.frame.jpg');
+  preparations.shift().resolve(converted); await flush();
+  assert.equal(requests[before].url, '/fs/PREPARED/one.frame.jpg');
+  assert.equal(requests[before].opts.body, converted);
+  pending.shift()(201); await flush();
+  const count = requests.length;
+  get('upload-stop').onclick();
+  assert.equal(preparations[0].options.cancelled(), true);
+  const cancel = Error('cancel'); cancel.name = 'AbortError';
+  preparations.shift().reject(cancel); await flush();
+  assert.equal(requests.length, count); // Cancelled conversion never starts a PUT.
+  assert.match(get('upload-phase').textContent, /Передача файла не начиналась/);
   console.log(page + ': sequential PUT, captured paths, error continuation, refresh race, FAT32 limits OK');
 }
 assert.deepEqual(gunzipSync(readFileSync(new URL('../frontend/index.html.gz', import.meta.url))),

@@ -378,6 +378,13 @@ impl<'v, 'io, D: BlockDevice, const N: usize> FileTable<'v, 'io, D, N> {
     pub async fn read_dir(&mut self, p: &str) -> Result<Directory<'_, 'io, D>, Error<D::Error>> {
         self.volume.read_dir(p).await
     }
+    pub async fn read_dir_from(
+        &mut self,
+        p: &str,
+        offset: u64,
+    ) -> Result<Directory<'_, 'io, D>, Error<D::Error>> {
+        self.volume.read_dir_from(p, offset).await
+    }
     pub async fn create_dir(&mut self, p: &str) -> Result<(), Error<D::Error>> {
         self.volume.writable()?;
         let p = volume::path(p)?;

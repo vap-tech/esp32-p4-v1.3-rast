@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+const ctx = vm.createContext({Uint8Array, Uint32Array, DataView});
+vm.runInContext(fs.readFileSync('frontend/photo-tools.js', 'utf8'), ctx);
+const t = ctx.P4PhotoTools;
+assert.deepEqual(JSON.parse(JSON.stringify(t.dimensions(4608, 3456))), {width:1536,height:1152,drawWidth:1536,drawHeight:1152});
+assert.equal(t.dimensions(17, 9).width, 24);
+assert.equal(t.outputName('picture.JPG'), 'picture.frame.jpg');
+assert.throws(()=>t.dimensions(0,10));
+assert.equal(t.baseline(new Uint8Array([255,216,255,194,0,8,8,0,8,0,8,0])),false);
+console.log('Photo tools: dimensions, JPEG naming and rejection checks passed');

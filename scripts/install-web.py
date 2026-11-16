@@ -20,43 +20,51 @@ def main():
         with urlopen(Request(base + path, data=data, method=method), timeout=120) as response:
             return response.read()
 
-    data = args.page.read_bytes()
-    try:
-        current = request('/fs/www/index.html')
-    except HTTPError as error:
-        if error.code != 404:
-            raise
-    else:
-        if current == data:
-            assert request('/') == data, 'Root is not serving the SD page'
-            print('Already installed:', len(data), 'bytes')
-            return
-        if not args.replace:
-            raise SystemExit('Existing /www/index.html differs; use --replace to retain a backup and publish the new page.')
-        nonce=uuid.uuid4().hex[:7].upper()
-        temp='/www/W'+nonce+'.HTM';backup='/www/B'+nonce+'.BAK'
-        request('/fs'+temp, 'PUT', data)
-        assert request('/fs'+temp)==data, 'Temporary page readback differs'
-        request('/api/rename?path=/www/index.html&name='+backup.rsplit('/',1)[1], 'POST')
+    def publish(name, data):
+        path = '/www/' + name
         try:
-            request('/api/rename?path='+temp+'&name=index.html', 'POST')
+            current = request('/fs' + path)
+        except HTTPError as error:
+            if error.code != 404:
+                raise
+            current = None
+        if current == data:
+            print('Already installed:', path, len(data), 'bytes')
+            return
+        if current is not None and not args.replace:
+            raise SystemExit('Existing ' + path + ' differs; use --replace to retain a backup.')
+        nonce = uuid.uuid4().hex[:7].upper()
+        temp = '/www/W' + nonce + '.TMP'
+        backup = '/www/B' + nonce + '.BAK'
+        request('/fs' + temp, 'PUT', data)
+        assert request('/fs' + temp) == data, 'Temporary asset readback differs'
+        if current is not None:
+            request('/api/rename?path=' + path + '&name=' + backup.rsplit('/', 1)[1], 'POST')
+        try:
+            request('/api/rename?path=' + temp + '&name=' + name, 'POST')
         except Exception:
-            # CreateNew/rename never overwrites a racing writer's destination.
-            try: request('/api/rename?path='+backup+'&name=index.html', 'POST')
-            except HTTPError: print('Original preserved at',backup)
+            if current is not None:
+                try:
+                    request('/api/rename?path=' + backup + '&name=' + name, 'POST')
+                except HTTPError:
+                    print('Original preserved at', backup)
             raise
-        assert request('/fs/www/index.html')==data and request('/')==data, 'Published page differs; original preserved at '+backup
-        print('Installed:',len(data),'bytes; original preserved at',backup)
-        return
+        assert request('/fs' + path) == data, 'Published asset differs: ' + path
+        print('Installed:', path, len(data), 'bytes; SHA256', hashlib.sha256(data).hexdigest())
+        if current is not None:
+            print('Original preserved at', backup)
+
     try:
         request('/fs/www', 'MKCOL')
     except HTTPError as error:
         if error.code != 409:
             raise
-    request('/fs/www/index.html', 'PUT', data)
-    assert request('/fs/www/index.html') == data, 'SD readback differs'
-    assert request('/') == data, 'Root is not serving the SD page'
-    print('Installed /www/index.html:', len(data), 'bytes; SHA256', hashlib.sha256(data).hexdigest())
+    # Publish the helper first: an updated page must never reference a missing asset.
+    helper = args.page.parent / 'photo-tools.js'
+    if helper.exists():
+        publish(helper.name, helper.read_bytes())
+    publish('index.html', args.page.read_bytes())
+    assert request('/') == args.page.read_bytes(), 'Root is not serving the SD page'
 
 
 if __name__ == '__main__':

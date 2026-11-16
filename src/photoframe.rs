@@ -135,3 +135,6 @@ mod tests {
         assert!(!is_jpeg("jpg"));
     }
 }
+
+pub const MAX_JPEG_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_PIXELS_BYTES: usize = 8 * 1024 * 1024;

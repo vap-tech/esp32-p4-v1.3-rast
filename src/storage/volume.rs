@@ -177,6 +177,13 @@ impl<'io, D: BlockDevice> Volume<'io, D> {
         Ok(File { file, len })
     }
     pub async fn read_dir(&mut self, p: &str) -> Result<Directory<'_, 'io, D>, Error<D::Error>> {
+        self.read_dir_from(p, 0).await
+    }
+    pub async fn read_dir_from(
+        &mut self,
+        p: &str,
+        offset: u64,
+    ) -> Result<Directory<'_, 'io, D>, Error<D::Error>> {
         self.readable()?;
         let fat = self.fat();
         let root = fat.fs.root_dir();
@@ -185,7 +192,11 @@ impl<'io, D: BlockDevice> Volume<'io, D> {
         } else {
             root.open_dir(path(p)?).await?
         };
-        Ok(Directory { iter: dir.iter() })
+        Ok(Directory {
+            iter: dir.iter_from(offset).await?,
+            offset,
+            done: false,
+        })
     }
     pub async fn create_new(&mut self, p: &str) -> Result<Writer<'_, 'io, D>, Error<D::Error>> {
         self.writable()?;
@@ -283,12 +294,28 @@ impl<D: BlockDevice> File<'_, '_, D> {
 }
 pub struct Directory<'a, 'io, D: BlockDevice> {
     iter: FatIter<'a, 'io, D>,
+    offset: u64,
+    done: bool,
 }
 impl<D: BlockDevice> Directory<'_, '_, D> {
+    pub fn position(&self) -> u64 {
+        self.offset
+    }
+    pub fn done(&self) -> bool {
+        self.done
+    }
     pub async fn next(&mut self) -> Option<Result<Entry, Error<D::Error>>> {
         loop {
-            let e = match self.iter.next().await? {
+            let Some(result) = self.iter.next().await else {
+                self.done = true;
+                return None;
+            };
+            let e = match result {
                 Ok(e) => e,
+                Err(e) => return Some(Err(e.into())),
+            };
+            self.offset = match self.iter.position().await {
+                Ok(n) => n,
                 Err(e) => return Some(Err(e.into())),
             };
             let mut name = [0; NAME_BYTES];
@@ -491,6 +518,39 @@ mod tests {
         let mut scratch = [0; 8192];
         crate::storage::format::quick_format(&mut d, &mut scratch, 42, |_, _| {}).unwrap();
         d
+    }
+    #[test]
+    fn directory_cookies_resume_long_names_across_clusters() {
+        let mut stream = RefCell::new(Stream::new(run(io::Partition::mbr(disk(), 0)).unwrap()));
+        run(async {
+            let mut v = Volume::mount(&mut stream).await.unwrap();
+            v.create_dir("/photos").await.unwrap();
+            for i in 0..150 {
+                let path = std::format!("/photos/Фотография длинное имя {i:03}.r565");
+                let w = v.create_new(&path).await.unwrap();
+                w.finish().await.unwrap();
+            }
+            assert!(v.read_dir_from("/photos", 1).await.is_err());
+            let mut offset = 0;
+            let mut names = std::collections::BTreeSet::new();
+            loop {
+                let mut page = v.read_dir_from("/photos", offset).await.unwrap();
+                for _ in 0..16 {
+                    let Some(entry) = page.next().await else {
+                        break;
+                    };
+                    let entry = entry.unwrap();
+                    assert!(names.insert(std::string::String::from(entry.name())));
+                }
+                offset = page.position();
+                assert_eq!(offset % 32, 0);
+                if page.done() {
+                    break;
+                }
+            }
+            assert_eq!(names.len(), 150);
+            assert!(names.contains("Фотография длинное имя 149.r565"));
+        });
     }
     #[test]
     fn live_cleanup_aborts_partial_create_preserves_append_and_reuses_volume() {
