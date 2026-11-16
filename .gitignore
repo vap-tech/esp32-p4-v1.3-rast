@@ -8,3 +8,6 @@ __pycache__/
 
 # Local Wi-Fi credentials; copy the tracked example before enabling wifi.
 /src/wifi_profile.rs
+
+# Repo-local UI/UX skill and its databases/scripts.
+/.agents
