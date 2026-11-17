@@ -31,11 +31,11 @@ for (const page of ['index.html', 'demo.html']) {
   assert.equal(name.tag,'a');assert.equal(name.href,'/fs/PIC.JPG');assert.equal(name.target,'_blank');
   assert.equal(menu.children[0].tag,'button');
   const popup=menu.children[1]; popup.hidePopover=()=>{};
-  assert.deepEqual(popup.children.map(o=>o.textContent),['Открыть','Скачать','Переименовать','Удалить']);
-  popup.children[1].onclick();assert.equal(opens.pop(),'/fs/PIC.JPG?download=1');
-  popup.children[2].onclick();await flush();
+  assert.deepEqual(popup.children.map(o=>o.textContent),['Открыть','Редактировать','Скачать','Переименовать','Удалить']);
+  popup.children.find(x=>x.textContent==='Скачать').onclick();assert.equal(opens.pop(),'/fs/PIC.JPG?download=1');
+  popup.children.find(x=>x.textContent==='Переименовать').onclick();await flush();
   assert(calls.some(c=>c.opts.method==='POST'&&c.url==='/api/rename?path=%2FPIC.JPG&name=NEW.TXT'));
-  popup.children[3].onclick();await flush();assert(calls.some(c=>c.opts.method==='DELETE'&&c.url==='/fs/PIC.JPG'));
+  popup.children.find(x=>x.textContent==='Удалить').onclick();await flush();assert(calls.some(c=>c.opts.method==='DELETE'&&c.url==='/fs/PIC.JPG'));
   calls.length=0;
   get('folderpicker').onchange({target:{files:[{name:'A.TXT',size:1,webkitRelativePath:'DOCS/SUB/A.TXT'},{name:'B.TXT',size:1,webkitRelativePath:'DOCS/B.TXT'}]}});
   await flush();

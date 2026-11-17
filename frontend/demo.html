@@ -145,6 +145,13 @@
     .board-tools p { color: var(--muted); overflow-wrap: anywhere; }
     .footnote { margin: 18px 0 32px; color: var(--muted); text-align: center; font-size: 12px; }
     dialog { border: 1px solid var(--line); border-radius: 12px; padding: 24px; max-width: min(92vw, 520px); max-height: calc(100dvh - 32px); overflow: auto; overscroll-behavior: contain; background: var(--surface); color: var(--ink); }
+    #editor-dialog { width: min(960px, 94vw); max-width: 94vw; padding: 18px; }
+    .editor-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .editor-head h2 { margin: 0; font-size: 18px; }
+    #editor-path { margin: 8px 0 12px; overflow-wrap: anywhere; color: var(--muted); }
+    #editor-text { display: block; width: 100%; height: min(58dvh, 560px); resize: vertical; min-height: 120px; padding: 12px; border: 1px solid var(--control); border-radius: 8px; background: var(--bg); color: var(--ink); font: 14px/1.5 ui-monospace, monospace; tab-size: 4; }
+    #editor-message { min-height: 1.5em; margin: 8px 0; overflow-wrap: anywhere; }
+    #editor-info { color: var(--muted); font-size: 12px; }
     dialog::backdrop { background: #07172099; }
     #photo-form > label, #photo-form fieldset label { display: block; margin: 12px 0; }
     #photo-form input[type=number] { width: 110px; }
@@ -153,6 +160,7 @@
     #photo-error { color: var(--danger); }
     @media (max-width: 560px) {
       body { font-size: 16px; }
+      #editor-text { font-size: 16px; height: 50dvh; }
       .shell { width: calc(100% - 24px); }
       .topbar-inner { min-height: 58px; }
       .brand small { font-size: 11px; }
@@ -266,6 +274,14 @@
     </details>
     <p class="footnote">На вашей карте. В вашей сети.</p>
   </main>
+  <dialog id="editor-dialog" aria-labelledby="editor-title">
+    <div class="editor-head"><h2 id="editor-title">Текстовый редактор</h2><button class="btn icon-button" id="editor-close" type="button" aria-label="Закрыть редактор">×</button></div>
+    <p id="editor-path"></p>
+    <label class="sr-only" for="editor-text">Текст файла</label>
+    <textarea id="editor-text" spellcheck="false" wrap="off" aria-describedby="editor-info"></textarea>
+    <p id="editor-message" role="status" aria-live="polite"></p>
+    <div class="actions"><button class="btn primary" id="editor-save" type="button" disabled>Сохранить</button><button class="btn" id="editor-save-as" type="button" disabled>Сохранить как</button><span id="editor-info"></span></div>
+  </dialog>
   <dialog id="photo-dialog" aria-labelledby="photo-title">
     <form id="photo-form">
       <h2 id="photo-title">Фоторамка</h2>
@@ -291,12 +307,15 @@
       '/': [{name:'DOCS',dir:true},{name:'HOME.JPG',dir:false,size:114892},{name:'SATIE.WAV',dir:false,size:5874912}],
       '/DOCS': [{name:'README.TXT',dir:false,size:123}]
     };
+    const demoContents = new Map([['/DOCS/README.TXT',new TextEncoder().encode('Flashbox\n\nТекстовый редактор работает в браузере.\n')]]);
+    demoDB['/DOCS'][0].size=demoContents.get('/DOCS/README.TXT').length;
     let demoClipboard = '', demoBrightness = 25;
     let demoPhoto = {running:false,message:'idle'};
     const fetch = async (url, opts = {}) => {
       const u = new URL(url, 'http://local'), method = opts.method || 'GET';
       const reply = (status, data = {}) => ({ok:status >= 200 && status < 300,status,json:async()=>data,text:async()=>typeof data === 'string' ? data : JSON.stringify(data)});
       const find = p => {const i=p.lastIndexOf('/');return [demoDB[p.slice(0,i)||'/'],p.slice(i+1)];};
+      if(u.pathname==='/api/errors') return reply(200,{entries:[],next_cursor:null});
       if(u.pathname==='/api/photoframe') return reply(200,demoPhoto);
       if(u.pathname==='/api/photoframe/start') {
         const folder=u.searchParams.get('path'), items=demoDB[folder];
@@ -314,15 +333,17 @@
         if(!item)return reply(404);if(list.some(e=>e.name.toUpperCase()===name.toUpperCase()))return reply(409);
         const next=p.slice(0,p.lastIndexOf('/')+1)+name;
         if(item.dir)for(const key of Object.keys(demoDB)){if(key===p||key.startsWith(p+'/')){demoDB[next+key.slice(p.length)]=demoDB[key];delete demoDB[key];}}
+        for(const key of [...demoContents.keys()])if(key===p||(item.dir&&key.startsWith(p+'/'))){demoContents.set(next+key.slice(p.length),demoContents.get(key));demoContents.delete(key);}
         item.name=name;return reply(204);
       }
       if(u.pathname.startsWith('/fs/')) {
         const p=decodeURIComponent(u.pathname.slice(3)), [list,name]=find(p), item=list?.find(e=>e.name.toUpperCase()===name.toUpperCase());
         if(!list)return reply(404);
+        if(method==='GET'){if(!item||item.dir)return reply(404);const bytes=demoContents.get(p)||new Uint8Array([0]);return {...reply(200),headers:{get:()=>String(item.size)},arrayBuffer:async()=>bytes.slice().buffer};}
         if(method==='HEAD')return reply(item?200:404);
         if(method==='MKCOL'){if(item)return reply(409);list.push({name,dir:true});demoDB[p]=[];return reply(201);}
-        if(method==='PUT'){if(item)return reply(409);list.push({name,dir:false,size:opts.body.size});return reply(201);}
-        if(method==='DELETE'){if(!item)return reply(404);if(item.dir&&demoDB[p]?.length)return reply(409);list.splice(list.indexOf(item),1);delete demoDB[p];return reply(204);}
+        if(method==='PUT'){if(item)return reply(409);const bytes=opts.body instanceof Uint8Array?opts.body.slice():new Uint8Array(await opts.body.arrayBuffer());demoContents.set(p,bytes);list.push({name,dir:false,size:bytes.length});return reply(201);}
+        if(method==='DELETE'){if(!item)return reply(404);if(item.dir&&demoDB[p]?.length)return reply(409);list.splice(list.indexOf(item),1);delete demoDB[p];demoContents.delete(p);return reply(204);}
       }
       return reply(404);
     };
@@ -756,6 +777,113 @@
       deletePath = path; paintDeletion();
       await api('DELETE', fileURL(path));
     }
+    const EDITOR_LIMIT = 1024 * 1024;
+    let editorSession = null, editorOpening = 0;
+    function editorBytes(session) {
+      const text = $('editor-text').value;
+      if (text === session.initialText) return session.original;
+      const normalized = text.replace(/\r\n?/g,'\n');
+      return new TextEncoder().encode((session.bom ? '\uFEFF' : '') + normalized.replace(/\n/g,session.newline));
+    }
+    function paintEditor() {
+      const session = editorSession;
+      $('editor-save').disabled = $('editor-save-as').disabled = !session || session.saving;
+      if (!session) return;
+      const bytes = editorBytes(session);
+      $('editor-info').textContent = transferSize(bytes.length) + ' / 1 МиБ';
+      if (bytes.length > EDITOR_LIMIT) {
+        $('editor-message').textContent = 'Текст превышает 1 МиБ.';
+        $('editor-save').disabled = $('editor-save-as').disabled = true;
+      } else if ($('editor-message').textContent === 'Текст превышает 1 МиБ.') $('editor-message').textContent = '';
+    }
+    async function readEditorBytes(response) {
+      const announced = Number(response.headers?.get?.('Content-Length'));
+      if (announced > EDITOR_LIMIT) {await response.body?.cancel?.();throw Error('Файл превышает 1 МиБ.');}
+      if (!response.body?.getReader) {
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (bytes.length > EDITOR_LIMIT) throw Error('Файл превышает 1 МиБ.');
+        return bytes;
+      }
+      const reader = response.body.getReader(), chunks = []; let length = 0;
+      try {
+        while (true) {
+          const {done,value} = await reader.read(); if (done) break;
+          length += value.length;
+          if (length > EDITOR_LIMIT) {await reader.cancel();throw Error('Файл превышает 1 МиБ.');}
+          chunks.push(value);
+        }
+      } finally { reader.releaseLock(); }
+      const bytes = new Uint8Array(length);let at=0;
+      for(const chunk of chunks){bytes.set(chunk,at);at+=chunk.length;}
+      return bytes;
+    }
+    async function openEditor(path, entry = {}) {
+      const token = ++editorOpening; editorSession = null;
+      $('editor-path').textContent = path; $('editor-text').value = ''; $('editor-text').disabled = true;
+      $('editor-message').textContent = 'Чтение файла…'; $('editor-info').textContent = ''; paintEditor();
+      if (!$('editor-dialog').open) $('editor-dialog').showModal();
+      try {
+        if (entry.size > EDITOR_LIMIT) throw Error('Файл превышает 1 МиБ.');
+        const response = await fetch(fileURL(path),{cache:'no-store'});
+        if (!response.ok) throw Error('HTTP ' + response.status);
+        const original = await readEditorBytes(response);
+        let text;
+        try {text = new TextDecoder('utf-8',{fatal:true}).decode(original);}
+        catch {throw Error('Редактор поддерживает текст UTF-8.');}
+        if (/\u0000/.test(text)) throw Error('Файл содержит двоичные данные.');
+        if (token !== editorOpening || !$('editor-dialog').open) return;
+        const initialText = text.replace(/\r\n?/g,'\n');
+        editorSession = {path,original,initialText,newline:text.match(/\r\n|\r|\n/)?.[0] || '\n',bom:original[0]===239&&original[1]===187&&original[2]===191,saving:false};
+        $('editor-text').value = initialText; $('editor-text').disabled = false;
+        $('editor-message').textContent = ''; paintEditor(); $('editor-text').focus();
+      } catch(e) {if(token===editorOpening){$('editor-message').textContent=e.message;paintEditor();}}
+    }
+    async function saveEditor(saveAs = false) {
+      const session = editorSession; if (!session || session.saving) return;
+      if (uploadRunning || mutating || cleanupRunning) { $('editor-message').textContent='Дождитесь завершения файловой операции.'; return; }
+      const slash = session.path.lastIndexOf('/'), dir = session.path.slice(0,slash) || '/', oldName=session.path.slice(slash+1);
+      let name = oldName;
+      if(saveAs){name=prompt('Сохранить как:',oldName);if(name===null)return;}
+      if(!validName(name)){ $('editor-message').textContent='Недопустимое имя файла.';return; }
+      const destination=join(dir,name), bytes=editorBytes(session);
+      if(bytes.length>EDITOR_LIMIT){paintEditor();return;}
+      if(new TextEncoder().encode(destination).length>768){$('editor-message').textContent='Путь длиннее 768 байт UTF-8.';return;}
+      const nonce=Array.from(crypto.getRandomValues(new Uint32Array(2)),n=>n.toString(16).padStart(8,'0')).join('');
+      const tempName='.EDIT-'+nonce+'.TMP', temp=join(dir,tempName);
+      let uploaded=false, removed=false, published=false;
+      session.saving=true;mutating=true;$('editor-text').disabled=true;$('editor-message').textContent='Сохранение…';paintEditor();
+      const rename=(path,to)=>api('POST','/api/rename?path='+encodeURIComponent(path)+'&name='+encodeURIComponent(to));
+      try {
+        await api('PUT',fileURL(temp),bytes);uploaded=true;
+        if(destination===session.path){
+          const res=await fetch(fileURL(session.path),{method:'DELETE',cache:'no-store'});
+          if(!res.ok&&res.status!==404)throw Error('HTTP '+res.status);
+          removed=true;
+        }
+        await rename(temp,name);published=true;
+        session.path=destination;session.original=bytes;session.initialText=$('editor-text').value;
+        if(editorSession===session){$('editor-path').textContent=destination;$('editor-message').textContent='Сохранено.';}
+        notify('Сохранено: '+destination);
+        await load(true);
+      } catch(e) {
+        if(uploaded&&!published&&!removed){try{await api('DELETE',fileURL(temp));}catch{}}
+        if(editorSession===session)$('editor-message').textContent='Не удалось сохранить: '+e.message;
+      } finally {
+        session.saving=false;mutating=false;
+        if(editorSession===session){$('editor-text').disabled=false;paintEditor();}
+        if(uploadQueue.length&&!uploadRunning)drainUploads();
+      }
+    }
+    $('editor-text').oninput=paintEditor;
+    $('editor-save').onclick=()=>saveEditor(false);
+    $('editor-save-as').onclick=()=>saveEditor(true);
+    $('editor-close').onclick=()=>$('editor-dialog').close();
+    $('editor-dialog').onclose=()=>{editorOpening++;editorSession=null;};
+    document.addEventListener?.('keydown',event=>{
+      if($('editor-dialog').open&&(event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='s'){
+        event.preventDefault();saveEditor(Boolean(event.shiftKey));
+      }
+    });
     function actionMenu(entry, path) {
       const wrapper = document.createElement('div'); wrapper.className = 'file-actions';
       const trigger = document.createElement('button');
@@ -772,13 +900,19 @@
         popup.style.left = Math.max(8, Math.min(rect.right - 190, window.innerWidth - 198)) + 'px';
         popup.style.top = Math.max(8, Math.min(rect.bottom + 5, window.innerHeight - 210)) + 'px';
         popup.togglePopover();
+        if (popup.matches?.(':popover-open')) {
+          const height = popup.getBoundingClientRect().height;
+          popup.style.top = Math.max(8, Math.min(rect.bottom + 5, window.innerHeight - height - 8)) + 'px';
+        }
       };
-      for (const [action, label] of [['open', 'Открыть'], ...(!entry.dir ? [['download', 'Скачать']] : []), ['rename', 'Переименовать'], ['delete', 'Удалить']]) {
+      for (const [action, label] of [['open', 'Открыть'], ...(!entry.dir ? [['edit', 'Редактировать'], ['download', 'Скачать']] : []), ['rename', 'Переименовать'], ['delete', 'Удалить']]) {
         const item = document.createElement('button'); item.type = 'button'; item.textContent = label;
         item.onclick = () => {
           popup.hidePopover();
         if (action === 'open') {
           if (entry.dir) go(path); else window.open(fileURL(path), '_blank', 'noopener');
+        } else if (action === 'edit') {
+          openEditor(path,entry);
         } else if (action === 'download') {
           const link = document.createElement('a'); link.href = fileURL(path) + '?download=1'; link.download = entry.name; link.click();
         } else if (action === 'rename') {
