@@ -1,5 +1,5 @@
 //! File requests over the async, filesystem-neutral volume boundary.
-use super::{chunk, error, headers, mime_type, Asset, Error, Transport};
+use super::{chunk, error, headers, mime_type, Error, Transport};
 use crate::{
     net::http::{self, Method, Request, Route, Text},
     storage::{
@@ -35,73 +35,41 @@ pub async fn serve<D: BlockDevice, const N: usize>(
     r: &Request,
     fs: &mut FileTable<'_, '_, D, N>,
     io: &mut impl Transport,
-    asset: &mut impl Asset,
     scratch: &mut [u8],
 ) -> Result<(), Error> {
     let head = r.method == Method::Head;
     match r.route {
         Route::Index => {
-            // SD page is streamed, never retained as a whole in SRAM. Flash is
-            // the recovery UI when the editable page has not been installed.
-            if r.argument() != "flash=1" {
-                match fs
-                    .open("/www/index.html", crate::storage::files::OpenMode::Read)
-                    .await
-                {
-                    Ok(file) => {
-                        let len = fs.info(file).map_err(|_| Error::Storage)?.len;
-                        let result = async {
-                            headers(
-                                io,
-                                200,
-                                Some(u32::try_from(len).map_err(|_| Error::Storage)?),
-                                "text/html; charset=utf-8",
-                                "",
-                            )?;
-                            if !head {
-                                let mut left = len;
-                                while left != 0 {
-                                    let want = scratch.len().min(left as usize);
-                                    let n = fs
-                                        .read(file, &mut scratch[..want])
-                                        .await
-                                        .map_err(|_| Error::Storage)?;
-                                    if n == 0 {
-                                        return Err(Error::Storage);
-                                    }
-                                    io.write_all(&scratch[..n])?;
-                                    left -= n as u64;
-                                }
-                            }
-                            Ok(())
+            let file = match fs
+                .open("/www/index.html", crate::storage::files::OpenMode::Read)
+                .await
+            {
+                Ok(h) => h,
+                Err(e) => return error(io, status(&e), head),
+            };
+            let result = async {
+                let len = fs.info(file).map_err(|_| Error::Storage)?.len;
+                headers(
+                    io,
+                    200,
+                    Some(u32::try_from(len).map_err(|_| Error::Storage)?),
+                    "text/html; charset=utf-8",
+                    "",
+                )?;
+                if !head {
+                    loop {
+                        let n = fs.read(file, scratch).await.map_err(|_| Error::Storage)?;
+                        if n == 0 {
+                            break;
                         }
-                        .await;
-                        fs.close(file).await.map_err(|_| Error::Storage)?;
-                        return result;
+                        io.write_all(&scratch[..n])?;
                     }
-                    Err(FsError::Fs(embedded_fatfs::Error::NotFound) | FsError::NotFile) => {}
-                    Err(e) => return error(io, status(&e), head),
                 }
+                Ok(())
             }
-
-            headers(
-                io,
-                200,
-                Some(asset.len()),
-                "text/html; charset=utf-8",
-                "Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n",
-            )?;
-            if !head {
-                let mut at = 0;
-                while at < asset.len() {
-                    let n = asset.read(at, scratch)?;
-                    if n == 0 {
-                        return Err(Error::Asset);
-                    }
-                    io.write_all(&scratch[..n])?;
-                    at += n as u32;
-                }
-            }
+            .await;
+            fs.close(file).await.map_err(|_| Error::Storage)?;
+            result?;
         }
         Route::File if matches!(r.method, Method::Mkcol | Method::Delete) => {
             let result = if r.method == Method::Mkcol {
@@ -134,6 +102,31 @@ pub async fn serve<D: BlockDevice, const N: usize>(
                 return error(io, status(&e), false);
             }
             headers(io, 204, Some(0), "text/plain", "")?;
+        }
+        Route::Errors => {
+            let cursor = r.argument().parse::<u64>().map_err(|_| Error::Format)?;
+            let page = match crate::error_journal::page(fs, cursor).await {
+                Ok(p) => p,
+                Err(e) => return error(io, status(&e), head),
+            };
+            let mut body = Text::<256>::new();
+            body.write_str("{\"entries\":[")
+                .map_err(|_| Error::Format)?;
+            for (i, id) in page.ids[..page.len].iter().enumerate() {
+                if i != 0 {
+                    body.write_char(',').map_err(|_| Error::Format)?;
+                }
+                write!(body, "\"E{:08X}.JSON\"", id).map_err(|_| Error::Format)?;
+            }
+            body.write_str("],\"next_cursor\":")
+                .map_err(|_| Error::Format)?;
+            if let Some(next) = page.next {
+                write!(body, "{}", next).map_err(|_| Error::Format)?;
+            } else {
+                body.write_str("null").map_err(|_| Error::Format)?;
+            }
+            body.write_char('}').map_err(|_| Error::Format)?;
+            super::json(io, body.data())?;
         }
         Route::List => {
             let mut dir = match fs.read_dir(r.path()).await {

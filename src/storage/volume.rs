@@ -1263,4 +1263,84 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn error_journal_publish_seen_and_reboot_reserve_incomplete_ids() {
+        use crate::{
+            error_journal::Journal,
+            storage::files::{FileTable, OpenMode},
+        };
+        let mut stream = RefCell::new(Stream::new(run(io::Partition::mbr(disk(), 0)).unwrap()));
+        run(async {
+            {
+                let mut volume = Volume::mount(&mut stream).await.unwrap();
+                let mut fs = FileTable::<_, 5>::new(&mut volume);
+                let mut journal = Journal::default();
+                assert_eq!(
+                    journal
+                        .publish(&mut fs, b"{\"title\":\"test\"}")
+                        .await
+                        .unwrap(),
+                    1
+                );
+                let page = crate::error_journal::page(&mut fs, 0).await.unwrap();
+                assert_eq!(&page.ids[..page.len], &[1]);
+                fs.begin_remove("/SYSTEM/ERRORS/UNREAD/E00000001.SEEN")
+                    .await
+                    .unwrap();
+                while !fs.remove_step().await.unwrap() {}
+                let h = fs
+                    .open("/SYSTEM/ERRORS/E00000009.TMP", OpenMode::CreateNew)
+                    .await
+                    .unwrap();
+                fs.write(h, b"incomplete").await.unwrap();
+                fs.close(h).await.unwrap();
+                fs.shutdown().await.unwrap();
+            }
+            let mut volume = Volume::mount(&mut stream).await.unwrap();
+            assert!(!volume.needs_recovery());
+            let mut fs = FileTable::<_, 5>::new(&mut volume);
+            let mut journal = Journal::default();
+            assert_eq!(
+                journal
+                    .publish(&mut fs, b"{\"title\":\"next\"}")
+                    .await
+                    .unwrap(),
+                10
+            );
+            let h = fs
+                .open("/SYSTEM/ERRORS/E00000001.JSON", OpenMode::Read)
+                .await
+                .unwrap();
+            let mut bytes = [0u8; 32];
+            let n = fs.read(h, &mut bytes).await.unwrap();
+            assert_eq!(&bytes[..n], b"{\"title\":\"test\"}");
+            fs.close(h).await.unwrap();
+            let page = crate::error_journal::page(&mut fs, 0).await.unwrap();
+            assert_eq!(&page.ids[..page.len], &[10]);
+            assert!(fs
+                .open("/SYSTEM/ERRORS/E00000009.JSON", OpenMode::Read)
+                .await
+                .is_err());
+            // A large archive must not be returned or filtered by the browser.
+            for id in 100..1100 {
+                let path = std::format!("/SYSTEM/ERRORS/E{id:08X}.JSON");
+                let h = fs.open(&path, OpenMode::CreateNew).await.unwrap();
+                fs.close(h).await.unwrap();
+            }
+            for id in 1100..1106 {
+                let path = std::format!("/SYSTEM/ERRORS/UNREAD/E{id:08X}.SEEN");
+                let h = fs.open(&path, OpenMode::CreateNew).await.unwrap();
+                fs.close(h).await.unwrap();
+            }
+            let first = crate::error_journal::page(&mut fs, 0).await.unwrap();
+            assert_eq!(&first.ids[..first.len], &[10, 1100, 1101, 1102, 1103]);
+            let second = crate::error_journal::page(&mut fs, first.next.unwrap())
+                .await
+                .unwrap();
+            assert_eq!(&second.ids[..second.len], &[1104, 1105]);
+            assert_eq!(second.next, None);
+            assert_eq!(fs.open_count(), 0);
+            fs.shutdown().await.unwrap();
+        });
+    }
 }

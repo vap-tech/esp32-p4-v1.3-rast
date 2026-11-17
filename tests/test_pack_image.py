@@ -1,5 +1,4 @@
 """python3 -m unittest discover -s tests -p 'test_pack_image.py'."""
-import gzip
 import importlib.util
 from pathlib import Path
 import struct
@@ -39,21 +38,12 @@ class PackImage(unittest.TestCase):
         self.assertEqual(packed[offset + 64:], segments[1][1])
         self.assertEqual(packed[len(rom):offset], b'\xff' * (offset-len(rom)))
 
-    def test_flash_asset_is_separate_bounded_and_checksummed(self):
-        html = b'<html>Flashbox</html>' * 100
-        packed = packer.pack(self.raw(), html)
-        at = packer.ASSET - packer.FLASH_BASE
-        magic, size, crc = struct.unpack_from('<8sII', packed, at)
-        self.assertEqual(magic, b'P4WEB001')
-        asset = packed[at + 16:at + 16 + size]
-        self.assertEqual(zlib.crc32(asset), crc)
-        self.assertEqual(gzip.decompress(asset), html)
-        self.assertEqual(len(packed) % 4, 0)
-        self.assertEqual(packer.pack(self.raw(), html), packed)
-        # Reject asset overflow rather than truncating it.
-        import random
-        with self.assertRaises(ValueError):
-            packer.pack(self.raw(), random.Random(123).randbytes(70000))
+    def test_no_embedded_web_or_padding_to_former_asset_slot(self):
+        packed=packer.pack(self.raw())
+        self.assertEqual(len(packed),packer.PAYLOAD-packer.FLASH_BASE+128)
+        self.assertNotIn(b'P4WEB001',packed)
+        with self.assertRaises(TypeError):
+            packer.pack(self.raw(),b'<html>obsolete</html>')
 
     def test_rejects_rom_corruption_truncation_and_trailing_bytes(self):
         raw = self.raw()

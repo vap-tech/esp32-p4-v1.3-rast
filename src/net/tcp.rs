@@ -267,6 +267,18 @@ impl<'a> Stack<'a> {
         self.stats.rx_consumed += n as u64;
         n
     }
+    /// Consume at most `limit` received bytes without copying them out of the TCP ring.
+    pub fn discard(&mut self, i: usize, limit: usize) -> usize {
+        let n = self
+            .socket_mut(i)
+            .recv(|data| {
+                let n = data.len().min(limit);
+                (n, n)
+            })
+            .unwrap_or(0);
+        self.stats.rx_consumed += n as u64;
+        n
+    }
     pub fn write(&mut self, i: usize, bytes: &[u8]) -> usize {
         let n = self.socket_mut(i).send_slice(bytes).unwrap_or(0);
         self.stats.tx_queued += n as u64;
@@ -537,7 +549,12 @@ mod tests {
                     slot = (0..SLOTS).find(|&i| server.request_pending(i));
                     if let Some(i) = slot {
                         server.hold(i);
-                        server.consume(i, 7);
+                        assert_eq!(server.discard(i, 3), 3);
+                        let mut tail = [0; 4];
+                        assert_eq!(server.read(i, &mut tail), 4);
+                        assert_eq!(&tail, b"uest");
+                        assert_eq!(server.discard(i, 0), 0);
+                        assert_eq!(server.discard(i, 100), 0);
                     }
                 }
                 if let Some(i) = slot {

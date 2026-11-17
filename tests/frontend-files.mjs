@@ -27,7 +27,7 @@ for (const page of ['index.html', 'demo.html']) {
   vm.runInContext(raw.slice(raw.indexOf('const $')),ctx);await flush();
   vm.runInContext('render([{name:"PIC.JPG",dir:false,size:10}])',ctx);
   const row = get('files').children[0].children[0];
-  const name = row.children[0].children[1].children[0], menu=row.children[3];
+  const name = row.children[0].children[1].children[0], menu=row.children.find(e=>e.className==='file-actions');
   assert.equal(name.tag,'a');assert.equal(name.href,'/fs/PIC.JPG');assert.equal(name.target,'_blank');
   assert.equal(menu.children[0].tag,'button');
   const popup=menu.children[1]; popup.hidePopover=()=>{};

@@ -1,6 +1,5 @@
 // Run with node tests/frontend-uploads.mjs; no browser or npm dependencies.
 import {readFileSync} from 'node:fs';
-import {gunzipSync} from 'node:zlib';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {xhrAdapter} from './frontend-xhr.mjs';
@@ -89,11 +88,9 @@ for (const page of ['index.html', 'demo.html']) {
   sandbox.window.P4PhotoTools = {prepare(source, options) {
     return new Promise((resolve, reject) => preparations.push({source, options, resolve, reject}));
   }};
-  get('prepare-photos').checked = true;
   vm.runInContext('current="/PREPARED"', sandbox);
   const before = requests.length;
-  drop([file('one.jpg'), file('two.png')]); await flush();
-  get('prepare-photos').checked = false;
+  get('photo-picker').onchange({target:{files:[file('one.jpg'),file('two.png')]}}); await flush();
   vm.runInContext('current="/ELSEWHERE"', sandbox);
   const converted = file('one.frame.jpg');
   preparations.shift().resolve(converted); await flush();
@@ -107,8 +104,21 @@ for (const page of ['index.html', 'demo.html']) {
   preparations.shift().reject(cancel); await flush();
   assert.equal(requests.length, count); // Cancelled conversion never starts a PUT.
   assert.match(get('upload-phase').textContent, /Передача файла не начиналась/);
+  const rawPhoto=file('raw.jpg'), rawAt=requests.length;
+  get('picker').onchange({target:{files:[rawPhoto]}});
+  assert.equal(requests[rawAt].opts.body,rawPhoto);
+  assert.equal(preparations.length,0);
+  pending.shift()(201); await flush();
+  vm.runInContext('current="/RETRY"', sandbox);
+  const retryAt = requests.length;
+  drop([file('RETRY.BIN')]); pending.shift()(503); await flush();
+  assert.equal(vm.runInContext('failedUploadJobs.length', sandbox), 1);
+  assert.equal(get('upload-errors').hidden, false);
+  vm.runInContext('current="/ELSEWHERE"', sandbox);
+  get('retry-failed').onclick();
+  assert.equal(requests[retryAt + 1].url, '/fs/RETRY/RETRY.BIN');
+  pending.shift()(201); await flush();
+  assert.equal(get('upload-errors').hidden, true);
+  assert.equal(vm.runInContext('failedUploadJobs.length', sandbox), 0);
   console.log(page + ': sequential PUT, captured paths, error continuation, refresh race, FAT32 limits OK');
 }
-assert.deepEqual(gunzipSync(readFileSync(new URL('../frontend/index.html.gz', import.meta.url))),
-  readFileSync(new URL('../frontend/index.html', import.meta.url)));
-console.log('gzip matches index.html');

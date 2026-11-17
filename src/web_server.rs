@@ -18,7 +18,7 @@ use esp32_p4::{
         files::FileTable,
         volume::Volume,
     },
-    web::{self, Asset, Transport},
+    web::{self, Transport},
 };
 const HTTP_SCRATCH: usize = match option_env!("P4_HTTP_SCRATCH_KIB") {
     Some(v) if v.as_bytes()[0] == b'3' => 32768,
@@ -199,59 +199,6 @@ impl<P: Port> disk::BlockDevice for Card<'_, P> {
     async fn sync(&mut self) -> Result<(), Self::Error> {
         Ok(())
     } // write awaits CMD13 READY/TRANSFER
-}
-struct FlashPage {
-    length: u32,
-}
-impl FlashPage {
-    fn open() -> Result<Self, web::Error> {
-        let mut h = [0u32; 4];
-        unsafe { hal::flash::read(0x100000, &mut h) }.map_err(|_| web::Error::Asset)?;
-        if h[0] != u32::from_le_bytes(*b"P4WE")
-            || h[1] != u32::from_le_bytes(*b"B001")
-            || h[2] == 0
-            || h[2] > 65536
-        {
-            return Err(web::Error::Asset);
-        }
-        let mut page = Self { length: h[2] };
-        let mut offset = 0;
-        let mut crc = !0u32;
-        let mut buf = [0u8; 1024];
-        while offset < page.length {
-            let n = page.read(offset, &mut buf)?;
-            for &b in &buf[..n] {
-                crc ^= u32::from(b);
-                for _ in 0..8 {
-                    crc = (crc >> 1) ^ if crc & 1 != 0 { 0xedb88320 } else { 0 };
-                }
-            }
-            offset += n as u32;
-        }
-        if !crc != h[3] {
-            return Err(web::Error::Asset);
-        }
-        Ok(page)
-    }
-}
-impl Asset for FlashPage {
-    fn len(&self) -> u32 {
-        self.length
-    }
-    fn read(&mut self, offset: u32, out: &mut [u8]) -> Result<usize, web::Error> {
-        // All nonfinal chunks are word-sized. Small workspace stays in SRAM.
-        if !offset.is_multiple_of(4) || offset > self.length {
-            return Err(web::Error::Asset);
-        }
-        let mut words = [0u32; 256];
-        let n = out.len().min(1024).min((self.length - offset) as usize);
-        unsafe { hal::flash::read(0x100010 + offset, &mut words[..n.div_ceil(4)]) }
-            .map_err(|_| web::Error::Asset)?;
-        for (i, b) in out[..n].iter_mut().enumerate() {
-            *b = words[i / 4].to_le_bytes()[i % 4];
-        }
-        Ok(n)
-    }
 }
 /// TX tokens lend a CPU workspace until the driver has copied the frame into
 /// its owned DMA storage; hardware completion may happen after the token returns.
@@ -827,7 +774,6 @@ fn serve<P: Port>(
     } = resources;
     #[cfg(not(feature = "diagnostics"))]
     let _ = benchmark_mib;
-    let mut asset = FlashPage::open()?;
     let busy = Cell::new(false);
     let writes = Cell::new(WriteStats::default());
     // Queue storage is a scoped SRAM lease; 88KiB is reclaimed when web-run ends.
@@ -1365,7 +1311,7 @@ fn serve<P: Port>(
                         web::serve_control(r, &mut connection, scratch, clipboard, &mut controls)
                     } else {
                         esp32_p4::runtime::run(
-                            web::asyncfs::serve(r, &mut fs, &mut connection, &mut asset, scratch),
+                            web::asyncfs::serve(r, &mut fs, &mut connection, scratch),
                             || network.borrow_mut().io_tick(),
                         )
                         .and_then(|r| r)

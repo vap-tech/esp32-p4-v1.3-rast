@@ -23,3 +23,5 @@ pub mod clock_face;
 pub mod runtime;
 
 pub mod photoframe;
+
+pub mod error_journal;

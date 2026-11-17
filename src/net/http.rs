@@ -35,6 +35,7 @@ pub enum Route {
     Brightness,
     Release,
     NetTest,
+    Errors,
     PhotoStatus,
     PhotoStart,
     PhotoStop,
@@ -135,17 +136,20 @@ pub fn parse(bytes: &[u8]) -> Result<Request, u16> {
     let (target, query) = target.split_once('?').unwrap_or((target, ""));
     let mut argument = "";
     let mut download = false;
-    let (route, path) = if target == "/flash" && (query.is_empty() || query.starts_with("path=")) {
-        // The UI stores its current directory in history; /flash stays the
-        // recovery endpoint after directory navigation and browser reload.
-        argument = "flash=1";
-        (Route::Index, "/")
-    } else if matches!(target, "/" | "/index.html")
-        && (matches!(query, "" | "flash=1") || query.starts_with("path="))
+    let (route, path) = if matches!(target, "/" | "/index.html")
+        && (query.is_empty() || query.starts_with("path="))
     {
-        // Directory history belongs to the browser; a reload still serves the UI.
-        argument = if query == "flash=1" { query } else { "" };
         (Route::Index, "/")
+    } else if target == "/api/errors" {
+        argument = if query.is_empty() {
+            "0"
+        } else {
+            query.strip_prefix("cursor=").ok_or(400u16)?
+        };
+        if argument.parse::<u64>().is_err() {
+            return Err(400);
+        }
+        (Route::Errors, "/")
     } else if target == "/api/photoframe" && query.is_empty() {
         (Route::PhotoStatus, "/")
     } else if target == "/api/photoframe/stop" && query.is_empty() {
@@ -196,16 +200,17 @@ pub fn parse(bytes: &[u8]) -> Result<Request, u16> {
         return Err(404);
     };
     let allowed = match route {
-        Route::Index | Route::List | Route::State | Route::Static => {
+        Route::Index | Route::List | Route::State => {
             matches!(method, Method::Get | Method::Head)
         }
+        Route::Static => matches!(method, Method::Get | Method::Head),
         Route::File => {
             matches!(
                 method,
                 Method::Get | Method::Head | Method::Put | Method::Delete | Method::Mkcol
             ) || cfg!(feature = "diagnostics") && method == Method::Post
         }
-        Route::PhotoStatus => method == Method::Get,
+        Route::PhotoStatus | Route::Errors => method == Method::Get,
         Route::PhotoStart
         | Route::PhotoStop
         | Route::Rename
@@ -464,27 +469,23 @@ mod tests {
         );
     }
     #[test]
-    fn explicit_flash_page_only_accepts_get_head_and_exact_flag() {
-        extern crate std;
-        for target in [
-            "/?flash=1",
-            "/index.html?flash=1",
-            "/flash",
-            "/flash?path=%2Fwww",
-        ] {
-            for method in ["GET", "HEAD"] {
-                let text = std::format!("{method} {target} HTTP/1.1\r\nHost: p4\r\n\r\n");
-                let r = parse(text.as_bytes()).unwrap();
-                assert_eq!(r.route, Route::Index);
-                assert_eq!(r.argument(), "flash=1");
-            }
+    fn removed_flash_and_no_special_www_overwrite_routes() {
+        for path in ["/flash", "/?flash=1", "/index.html?flash=1"] {
+            let request = std::format!("GET {path} HTTP/1.1\r\nHost: p4\r\n\r\n");
+            assert!(parse(request.as_bytes()).is_err());
         }
-        assert!(parse(b"GET /?flash=0 HTTP/1.1\r\nHost: p4\r\n\r\n").is_err());
-        assert!(parse(b"GET /?flash=1&x=1 HTTP/1.1\r\nHost: p4\r\n\r\n").is_err());
+        assert!(
+            parse(b"PUT /fs/www/index.html HTTP/1.1\r\nHost: p4\r\nContent-Length: 1\r\n\r\n")
+                .is_ok()
+        );
         assert_eq!(
-            parse(b"POST /?flash=1 HTTP/1.1\r\nHost: p4\r\nContent-Length: 0\r\n\r\n").unwrap_err(),
+            parse(b"PUT /www/index.html HTTP/1.1\r\nHost: p4\r\nContent-Length: 1\r\n\r\n")
+                .unwrap_err(),
             405
         );
+        let result =
+            parse(b"POST /fs/www/index.html HTTP/1.1\r\nHost: p4\r\nContent-Length: 1\r\n\r\n");
+        assert_eq!(result.is_ok(), cfg!(feature = "diagnostics"));
     }
     #[test]
     fn diagnostic_append_requires_bounded_body() {
@@ -563,5 +564,20 @@ mod tests {
         let mut t = Text::<64>::new();
         json_string(&mut t, "a\"\\\n").unwrap();
         assert_eq!(t.data(), b"\"a\\\"\\\\\\u000a\"");
+    }
+    #[test]
+    fn errors_have_bounded_numeric_cursor_and_get_only() {
+        let r = parse(b"GET /api/errors?cursor=512 HTTP/1.1\r\nHost: board\r\n\r\n").unwrap();
+        assert_eq!(r.route, Route::Errors);
+        assert_eq!(r.argument(), "512");
+        assert_eq!(
+            parse(b"GET /api/errors?cursor=bad HTTP/1.1\r\nHost: board\r\n\r\n").unwrap_err(),
+            400
+        );
+        assert_eq!(
+            parse(b"POST /api/errors HTTP/1.1\r\nHost: board\r\nContent-Length: 0\r\n\r\n")
+                .unwrap_err(),
+            405
+        );
     }
 }

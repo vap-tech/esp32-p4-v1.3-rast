@@ -42,6 +42,8 @@ pub(super) struct Frame<'a> {
     directory_offset: u64,
     directory_eof: bool,
     round_shown: u32,
+    error_saved: bool,
+    journal: esp32_p4::error_journal::Journal,
     last_error: &'static str,
     error_detail: http::Text<192>,
     attempt_detail: http::Text<192>,
@@ -83,6 +85,8 @@ impl Default for Frame<'_> {
             directory_offset: 0,
             directory_eof: false,
             round_shown: 0,
+            error_saved: false,
+            journal: esp32_p4::error_journal::Journal::default(),
             last_error: "",
             error_detail: http::Text::new(),
             attempt_detail: http::Text::new(),
@@ -104,6 +108,47 @@ impl Default for Frame<'_> {
     }
 }
 impl<'a> Frame<'a> {
+    fn persist_error<P: Port, D: disk::BlockDevice, const N: usize>(
+        &mut self,
+        fs: &mut FileTable<'_, '_, D, N>,
+        network: &RefCell<Network<'a, '_, '_, P>>,
+        panel: &mut esp32_p4::devices::jd9165::Display,
+    ) -> Result<(), web::Error> {
+        let mut body = http::Text::<4096>::new();
+        let uptime = network.borrow().port.borrow_mut().now_us();
+        write!(body, "{{\"version\":1,\"source\":\"photoframe\",\"title\":\"Пропуск фотографии\",\"uptime_us\":{},\"code\":", uptime).map_err(|_| web::Error::Format)?;
+        http::json_string(&mut body, self.last_error).map_err(|_| web::Error::Format)?;
+        body.write_str(",\"file\":")
+            .map_err(|_| web::Error::Format)?;
+        http::json_string(
+            &mut body,
+            core::str::from_utf8(self.error_file.data()).unwrap(),
+        )
+        .map_err(|_| web::Error::Format)?;
+        body.write_str(",\"detail\":")
+            .map_err(|_| web::Error::Format)?;
+        http::json_string(
+            &mut body,
+            core::str::from_utf8(self.error_detail.data()).unwrap(),
+        )
+        .map_err(|_| web::Error::Format)?;
+        let (bytes, w, h, out) = self.error_stats;
+        write!(body, ",\"jpeg\":{{\"input_bytes\":{},\"width\":{},\"height\":{},\"decoded_bytes\":{}}},\"shown\":{},\"skipped\":{},\"runtime\":\"", bytes,w,h,out,self.shown,self.skipped).map_err(|_| web::Error::Format)?;
+        // These Debug snapshots contain numeric fields and fixed identifiers only.
+        write!(body, "cache={:x?}; stack={:?}; lcd={:x?}; handles={}/{}; recovery={}; poisoned={}; network={:?}; port={:x?}",
+            hal::memory::cache_snapshot(),hal::memory::stack_usage(),panel.framebuffer_status(),fs.open_count(),fs.capacity(),fs.needs_recovery(),fs.is_poisoned(),network.borrow().tcp.stats,network.borrow().port.borrow_mut().status()).map_err(|_| web::Error::Format)?;
+        body.write_str("\"}").map_err(|_| web::Error::Format)?;
+        let id = esp32_p4::runtime::run(self.journal.publish(fs, body.data()), || {
+            network.borrow_mut().io_tick()
+        })?
+        .map_err(|_| web::Error::Storage)?;
+        let _ = writeln!(
+            network.borrow_mut().console,
+            "ERROR JOURNAL E{:08X}.JSON",
+            id
+        );
+        Ok(())
+    }
     pub fn status(&self, io: &mut impl Transport) -> Result<(), web::Error> {
         let mut body = http::Text::<4096>::new();
         write!(body, "{{\"running\":{},\"folder\":", self.running)
@@ -134,6 +179,8 @@ impl<'a> Frame<'a> {
         )
         .map_err(|_| web::Error::Format)?;
         write!(body,",\"input_bytes\":{},\"width\":{},\"height\":{},\"decoded_bytes\":{},\"max_jpeg_bytes\":{},\"max_decoded_bytes\":{}}}",self.error_stats.0,self.error_stats.1,self.error_stats.2,self.error_stats.3,INPUT,DECODED).map_err(|_|web::Error::Format)?;
+        body.len -= 1;
+        write!(body, ",\"error_saved\":{}}}", self.error_saved).map_err(|_| web::Error::Format)?;
         web::json(io, body.data())
     }
     pub fn start<P: Port, D: disk::BlockDevice, const N: usize>(
@@ -201,6 +248,7 @@ impl<'a> Frame<'a> {
         self.options = options;
         self.page_index = 0;
         self.last_error = "";
+        self.error_saved = false;
         self.error_stats = (0, 0, 0, 0);
         self.error_detail = http::Text::new();
         self.error_file = http::Text::new();
@@ -436,6 +484,16 @@ impl<'a> Frame<'a> {
                 "{}",
                 core::str::from_utf8(self.file.data()).unwrap()
             );
+            self.error_saved = false;
+            let logged = self.persist_error(fs, network, panel);
+            self.error_saved = logged.is_ok();
+            if let Err(error) = logged {
+                let _ = writeln!(
+                    network.borrow_mut().console,
+                    "ERROR JOURNAL unavailable {:?}; original error retained in RAM",
+                    error
+                );
+            }
             let _ = writeln!(
                 network.borrow_mut().console,
                 "PHOTO SKIP {} {}",
@@ -618,6 +676,21 @@ impl<'a> Frame<'a> {
                     });
                 if let Err(e) = result {
                     let _ = writeln!(network.borrow_mut().console, "PHOTO JPEG {:x?}", e);
+                    // Persist a compact failure snapshot for HTTP clients after USB disconnects.
+                    self.attempt_detail = http::Text::new();
+                    match e {
+                        hal::jpeg::Error::Hardware(s) | hal::jpeg::Error::Timeout(s) => {
+                            let kind = if matches!(e, hal::jpeg::Error::Timeout(_)) {
+                                "timeout"
+                            } else {
+                                "hardware"
+                            };
+                            let _ = write!(self.attempt_detail, "{} j={:x} rx={:x} tx={:x} rs={:x} ts={:x} dec={:x} axi={:x} reset={:x} ready={:x} tx0={:x} rx0={:x} drain={:x} abort={:x}", kind, s.jpeg, s.rx, s.tx, s.rx_state, s.tx_state, s.decoder, s.axi, s.axi_reset, s.axi_ready, s.axi_tx, s.axi_rx, s.axi_drained, s.axi_aborted);
+                        }
+                        _ => {
+                            let _ = write!(self.attempt_detail, "{:?}", e);
+                        }
+                    }
                     return Err("JPEG hardware error");
                 }
                 if cancelled(network) {

@@ -7,206 +7,241 @@
   <style>
     :root {
       color-scheme: light;
-      --bg: #f5f7fb; --surface: #fff; --ink: #152238; --muted: #718096;
-      --line: #e7ebf1; --accent: #425fd7; --accent-light: #eef2ff;
-      --shadow: 0 15px 50px rgba(20, 34, 61, .055);
+      --bg: #f2f5f6; --surface: #ffffff; --ink: #172b35; --muted: #526572;
+      --line: #d5dee2; --control: #80929d; --accent: #176b56; --on-accent: #ffffff;
+      --accent-light: #e8f4ee; --soft: #f6f8f9; --danger: #a92836; --danger-bg: #fff0f1;
+      --focus: #146bce; --radius: 12px;
     }
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); color: var(--ink);
-      font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif; }
     button, input, select, textarea { font: inherit; }
-    button { cursor: pointer; }
+    button, summary, input[type=checkbox] { cursor: pointer; }
+    button, a, summary { touch-action: manipulation; }
     button:disabled { opacity: .55; cursor: wait; }
-    :focus-visible { outline: 3px solid #9eb0ff; outline-offset: 3px; }
-    .shell { width: min(100% - 36px, 1050px); margin-inline: auto; }
+    :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+    [hidden] { display: none !important; }
+    .narrow { display: none; }
+    .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    .skip-link { position: fixed; top: 8px; left: 12px; z-index: 20; transform: translateY(-180%); padding: 10px 16px; background: var(--surface); color: var(--ink); }
+    .skip-link:focus { transform: none; }
+    .shell { width: min(100% - 48px, 1120px); margin-inline: auto; }
+    main.shell { padding-top: 16px; }
     .topbar { background: var(--surface); border-bottom: 1px solid var(--line); }
-    .topbar-inner { min-height: 76px; display: flex; align-items: center;
-      justify-content: space-between; gap: 16px; }
-    .brand { display: flex; align-items: center; gap: 12px; }
-    .brand-mark { display: grid; place-items: center; width: 40px; height: 40px;
-      border-radius: 12px; color: #fff; background: var(--accent);
-      font-size: 20px; font-weight: 750; letter-spacing: -.05em; }
+    .topbar-inner { min-height: 68px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .brand-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; background: var(--ink); color: var(--surface); font-size: 20px; font-weight: 750; }
     .brand strong, .brand small { display: block; }
     .brand strong { font-size: 15px; letter-spacing: -.02em; }
-    .brand small { color: var(--muted); font-size: 11px; }
+    .brand small { color: var(--muted); font-size: 12px; }
     .protocol { display: inline-flex; align-items: center; gap: 8px;
       padding: 7px 11px; border: 1px solid var(--line); border-radius: 99px;
-      color: #526078; background: var(--surface); font-size: 11px; font-weight: 700;
-      letter-spacing: .04em; }
-    .protocol::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #3bb98a; }
-    .intro { padding: 49px 0 25px; }
-    .eyebrow { color: var(--accent); font-size: 11px; font-weight: 800; letter-spacing: .13em; }
-    h1 { margin: 7px 0 5px; font-size: clamp(27px, 5vw, 36px); line-height: 1.2;
-      font-weight: 750; letter-spacing: -.045em; }
-    .intro p { margin: 0; color: var(--muted); font-size: 14px; }
-    .panel { overflow: hidden; border: 1px solid var(--line); border-radius: 18px;
-      background: var(--surface); box-shadow: var(--shadow); }
-    .panel.dragover { outline: 3px dashed var(--accent); outline-offset: -7px; }
-    .toolbar { display: flex; align-items: center; justify-content: space-between;
-      gap: 18px; padding: 23px 25px; }
-    .location { min-width: 0; }
-    .hint-label { display: block; margin-bottom: 6px; font-size: 11px; color: var(--muted); }
-    .crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-    .crumbs button { padding: 0; border: 0; background: transparent; color: #65738c;
-      font-weight: 600; }
-    .crumbs button:last-child { color: var(--ink); }
-    .crumbs .separator { color: #b1b9c7; }
-    .actions { flex-wrap: wrap; display: flex; gap: 9px; flex-shrink: 0; }
-    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px;
-      min-height: 39px; padding: 9px 14px; border: 1px solid var(--line);
-      border-radius: 10px; background: var(--surface); color: #3f4b61;
-      text-decoration: none; font-weight: 650; white-space: nowrap; cursor: pointer; }
-    .btn:hover { background: #f8f9fd; }
-    .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-    .btn.primary:hover { background: #334fc6; }
-    .btn:disabled { opacity: .55; cursor: wait; }
-    #picker { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
-    .status { min-height: 0; padding: 0 25px 14px; color: var(--muted); font-size: 12px; }
-    .status:empty { display: none; }
-    .status.error { color: #c13f4a; }
-    .columns, .file-row { display: grid;
-      grid-template-columns: minmax(0, 1fr) 112px 170px 94px; align-items: center; column-gap: 14px; }
-    .columns { padding: 12px 25px; background: #f9fafd; border-block: 1px solid var(--line);
-      color: #8b97aa; font-size: 10px; font-weight: 800; letter-spacing: .09em; }
-    .file-row { min-height: 69px; padding: 12px 25px; border-bottom: 1px solid var(--line); }
+      color: var(--muted); background: var(--surface); font-size: 11px; font-weight: 700;
+      letter-spacing: .04em; white-space: nowrap; }
+    .protocol::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #3bb98a; flex-shrink: 0; }
+    h1 { margin: 0; font-size: 25px; line-height: 1.25; letter-spacing: -.035em; }
+    .panel { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+    .panel.dragover { outline: 3px dashed var(--accent); outline-offset: -5px; }
+    .path-bar { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
+    .path-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+    .location { min-width: 0; flex: 1; }
+    .hint-label { display: block; color: var(--muted); font-size: 12px; }
+    .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; min-width: 0; }
+    .crumbs a { display: inline-block; min-height: 28px; max-width: 100%; padding: 3px 0; color: var(--muted); text-decoration: none; overflow-wrap: anywhere; }
+    .crumbs a:hover { color: var(--accent); text-decoration: underline; }
+    .crumbs a[aria-current] { color: var(--ink); font-weight: 650; }
+    .separator { color: var(--muted); }
+    .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font-weight: 600; text-decoration: none; white-space: nowrap; }
+    .btn:hover { background: var(--soft); border-color: var(--control); }
+    .btn:active { background: var(--accent-light); }
+    .btn.primary { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
+    .btn.primary:hover { filter: brightness(.93); }
+    .btn.icon-button { width: 40px; padding: 8px; flex-shrink: 0; }
+    .photo-stop-control { display: flex; margin: 12px 20px; }
+    .btn.stop { color: var(--danger); border-color: var(--danger); }
+    .icon { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+    .more-tools { position: relative; }
+    .more-tools > summary { list-style: none; }
+    .more-tools > summary::-webkit-details-marker { display: none; }
+    .more-tools[open] > summary { border-color: var(--control); background: var(--soft); }
+    .more-body { position: absolute; top: calc(100% + 8px); right: 0; width: min(330px, calc(100vw - 48px)); padding: 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: 0 8px 24px #172b351a; z-index: 5; }
+    .more-body > button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 42px; padding: 10px; border: 0; border-radius: 6px; text-align: left; color: var(--ink); background: transparent; }
+    .more-body > button:hover { background: var(--soft); }
+    .prepare-option { display: block; padding: 12px 10px 8px; border-top: 1px solid var(--line); margin-top: 6px; }
+    .prepare-option label { display: flex; align-items: flex-start; gap: 8px; font-weight: 550; }
+    .prepare-option input { width: 16px; height: 16px; margin-top: 3px; accent-color: var(--accent); }
+    .prepare-option small { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
+    .find-bar { display: flex; gap: 12px; padding: 0 20px 14px; }
+    .find { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; padding: 0 10px; border: 1px solid var(--control); border-radius: 8px; color: var(--muted); }
+    .find:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+    .find input { width: 100%; min-width: 0; height: 38px; padding: 6px 0; border: 0; outline: none; background: transparent; color: var(--ink); }
+    input::placeholder { color: var(--muted); opacity: 1; }
+    select, input[type=number] { min-height: 38px; border: 1px solid var(--control); border-radius: 7px; color: var(--ink); background: var(--surface); padding: 6px 8px; }
+    .columns, .file-row { display: grid; grid-template-columns: minmax(0, 1fr) 112px 52px; align-items: center; gap: 12px; }
+    .columns { padding: 10px 20px; border-block: 1px solid var(--line); background: var(--soft); color: var(--muted); font-size: 12px; font-weight: 600; }
+    .sort-heading { border: 0; background: transparent; color: inherit; font: inherit; text-align: left; padding: 0; cursor: pointer; }
+    .column-eye { display: grid; place-items: center; justify-self: end; width: 40px; height: 16px; padding: 0; border: 0; background: transparent; color: inherit; }
+    .column-eye[aria-pressed="true"], .column-eye[aria-pressed="true"]:hover { color: var(--accent); }
+    .column-eye:hover { color: var(--ink); }
+    .sort-heading:hover { color: var(--ink); }
+    .sort-size { text-align: right; }
+    .file-row { min-height: 58px; padding: 10px 20px; border-bottom: 1px solid var(--line); }
     .file-row:last-child { border-bottom: 0; }
-    .file-row:hover { background: #fafbff; }
-    .file-main { display: flex; align-items: center; min-width: 0; gap: 13px; }
-    .file-icon { display: grid; place-items: center; flex: 0 0 39px; width: 39px; height: 39px;
-      border-radius: 11px; color: #5c6b82; background: #f0f3f8; font-size: 19px; }
-    .file-icon.folder { color: #516cce; background: var(--accent-light); }
-    .file-icon.folder::before { content: "▱"; }
-    .file-icon:not(.folder)::before { content: "▤"; }
-    .file-stack { min-width: 0; }
-    .file-name { display: block; overflow: hidden; max-width: 100%; padding: 0;
-      border: 0; background: none; color: var(--ink); font-weight: 650;
-      text-align: left; white-space: nowrap; text-overflow: ellipsis; }
-    button.file-name:hover { color: var(--accent); }
-    .file-sub { display: none; }
-    .meta { color: #738097; font-size: 12px; white-space: nowrap; }
-    .file-action { justify-self: end; padding: 6px 0; border: 0;
-      background: none; color: var(--accent); font-weight: 650;
-      text-decoration: none; }
-    .action-menu { width: 48px; min-height: 40px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font-size: 20px; cursor: pointer; }
+    .file-row:hover { background: var(--soft); }
+    .file-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .file-icon { display: grid; place-items: center; width: 28px; height: 32px; flex: 0 0 28px; color: var(--muted); }
+    .file-icon.folder { color: var(--accent); }
+    .file-icon::before { content: ''; display: block; width: 24px; height: 24px; background: currentColor; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' d='M14 3H6a1 1 0 0 0-1 1v16h14V8zM14 3v5h5M8 12h8M8 16h6'/%3E%3C/svg%3E") center / contain no-repeat; }
+    .file-icon.folder::before { mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' d='M3 7V5h6l2 2h10v13H3zM3 10h18'/%3E%3C/svg%3E"); }
+    .file-stack { min-width: 0; flex: 1; }
+    .file-name { display: block; max-width: 100%; min-height: 28px; padding: 3px 0; color: var(--ink); font-weight: 600; text-align: left; text-decoration: none; overflow-wrap: anywhere; }
+    .file-name:hover { color: var(--accent); text-decoration: underline; }
+    .file-sub { display: none; color: var(--muted); font-size: 12px; }
+    .meta { color: var(--muted); font-size: 13px; white-space: nowrap; font-variant-numeric: tabular-nums; text-align: right; }
     .file-actions { justify-self: end; }
-    .file-popup { position: fixed; inset: auto; margin: 0; padding: 5px; min-width: 180px;
-      border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink);
-      box-shadow: 0 12px 32px #17254426; }
-    .file-popup button { display: block; width: 100%; padding: 10px 12px; border: 0;
-      border-radius: 7px; background: none; color: inherit; text-align: left; cursor: pointer; }
+    .file-action { border: 0; text-decoration: none; }
+    .action-menu { display: grid; place-items: center; width: 40px; min-height: 40px; border: 1px solid transparent; border-radius: 7px; color: var(--muted); background: none; font-size: 22px; }
+    .action-menu:hover, .action-menu:focus-visible { color: var(--ink); border-color: var(--line); background: var(--surface); }
+    .file-popup { position: fixed; inset: auto; margin: 0; padding: 5px; min-width: 180px; max-width: calc(100vw - 24px); border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); box-shadow: 0 8px 24px #172b3526; }
+    .file-popup button { display: block; width: 100%; min-height: 42px; padding: 10px 12px; border: 0; border-radius: 6px; background: none; color: inherit; text-align: left; }
     .file-popup button:hover, .file-popup button:focus-visible { background: var(--accent-light); }
-    .file-popup button:last-child { color: #c13f4a; }
-    .board-tools { margin-top: 20px; padding: 20px; }
-    .board-tools summary { cursor: pointer; font-weight: 650; }
-    .board-tools textarea { display: block; width: 100%; min-height: 100px; margin: 12px 0; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
-    .board-tools input { width: 75px; }
-    .board-tools p { color: var(--muted); }
-    a.file-name { text-decoration: none; }
-
-    .empty { padding: 58px 20px; text-align: center; color: var(--muted); }
-    .empty strong { display: block; margin-bottom: 4px; color: var(--ink); font-size: 16px; }
-    .panel-foot { display: flex; justify-content: space-between; gap: 15px;
-      padding: 15px 25px; border-top: 1px solid var(--line); color: #8a96a9; font-size: 11px; }
-    .footnote { margin: 20px 0 50px; color: #9aa4b3; text-align: center; font-size: 11px; }
-    @media (max-width: 650px) {
-      .shell { width: min(100% - 24px, 1050px); }
-      .topbar-inner { min-height: 65px; }
-      .intro { padding: 30px 0 19px; }
-      .toolbar { align-items: stretch; flex-direction: column; gap: 17px; padding: 19px 17px; }
-      .actions .btn { flex: 1; }
-      .columns { display: none; }
-      .file-row { grid-template-columns: minmax(0, 1fr) auto; padding: 12px 17px; }
-      .file-row > .meta { display: none; }
-      .file-sub { display: block; color: var(--muted); font-size: 11px; }
-      .file-icon { flex-basis: 36px; width: 36px; height: 36px; }
-      .status { padding-inline: 17px; }
-      .panel-foot { padding-inline: 17px; }
-    }
-    @media (prefers-color-scheme: dark) {
-      :root { color-scheme: dark; --bg: #0e1420; --surface: #172032;
-        --ink: #edf1f9; --muted: #9aa9c0; --line: #2a3649;
-        --accent: #8ea3ff; --accent-light: #26365e;
-        --shadow: 0 15px 50px rgba(0,0,0,.14); }
-      .brand-mark, .btn.primary { background: #536dd9; border-color: #536dd9; color: #fff; }
-      .btn.primary:hover { background: #6b82e9; }
-      .protocol { color: #bac5d5; }
-      .crumbs button { color: #a5b1c5; }
-      .btn { color: #d3dbeb; }
-      .btn:hover, .file-row:hover { background: #1d2a40; }
-      .columns { background: #1b273a; color: #a9b4c5; }
-      .file-icon { background: #273349; color: #b4c1d5; }
-      .file-icon.folder { color: #a9bbff; }
-      .meta, .panel-foot { color: #a3afc0; }
-      .status.error { color: #ff9099; }
-    }
-    .upload-panel { margin: 0 24px 20px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--accent-light); }
-    .upload-panel[hidden] { display: none; }
-    .upload-head, .upload-metrics { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .file-popup button:last-child { color: var(--danger); }
+    .status, .notice { margin: 0 20px 12px; font-size: 13px; overflow-wrap: anywhere; }
+    .status:empty { display: none; }
+    .status.error { color: var(--danger); }
+    .notice { padding: 12px; border-radius: 8px; background: var(--soft); border-left: 3px solid var(--accent); }
+    .error-journal { margin: 0 20px 14px; padding: 12px; border: 1px solid var(--danger); border-radius: 8px; }
+    .error-journal h2 { margin: 0 0 8px; font-size: 14px; }
+    .error-record { display: flex; align-items: flex-start; gap: 12px; padding: 10px 0; }
+    .error-record + .error-record { border-top: 1px solid var(--line); }
+    .error-record-text { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+    .error-record-text a { display: inline-block; margin-top: 6px; color: var(--accent); }
+    #photo-state { white-space: pre-line; }
+    .toast-stack { position: fixed; left: 20px; bottom: 20px; z-index: 100; width: min(420px, calc(100vw - 40px)); display: grid; gap: 10px; pointer-events: none; }
+    .toast { display: flex; align-items: flex-start; gap: 12px; padding: 14px 16px; border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 10px; background: var(--surface); color: var(--ink); box-shadow: 0 6px 24px #0002; pointer-events: auto; overflow-wrap: anywhere; }
+    .toast.error { border-left-color: #d65757; }
+    .toast-text { flex: 1; min-width: 0; }
+    .toast-close { border: 0; background: transparent; color: inherit; font-size: 22px; line-height: 1; padding: 0 4px; cursor: pointer; }
+    .operation-panel { display: flow-root; overflow-wrap: anywhere; }
+    .upload-panel { margin: 0 20px 14px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--accent-light); }
+    .upload-head, .upload-metrics { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
     .upload-name { min-width: 0; overflow-wrap: anywhere; flex: 1; font-weight: 600; }
-    .upload-panel progress { width: 100%; height: 12px; margin: 14px 0 8px; accent-color: var(--accent); }
+    .upload-panel progress { width: 100%; height: 10px; margin: 12px 0 8px; accent-color: var(--accent); }
     .upload-metrics { font-size: 13px; font-variant-numeric: tabular-nums; }
-    .upload-phase { margin: 10px 0 4px; font-size: 14px; }
+    .upload-phase { margin: 8px 0 4px; }
     .upload-note { color: var(--muted); font-size: 12px; margin-top: 8px; }
-    [hidden] { display: none !important; }
-    dialog { border: 1px solid var(--line); border-radius: 16px; padding: 24px; max-width: min(92vw, 520px); background: var(--bg); color: inherit; }
-    dialog::backdrop { background: #0008; }
+    .upload-errors { margin: 0 20px 14px; padding: 12px; border: 1px solid var(--danger); border-radius: 8px; color: var(--danger); }
+    .upload-errors summary { font-weight: 600; }
+    .upload-errors ul { padding-left: 20px; overflow-wrap: anywhere; }
+    .empty { padding: 36px 20px; text-align: center; color: var(--muted); }
+    .empty strong { display: block; margin-bottom: 5px; color: var(--ink); font-size: 16px; }
+    .empty .btn { margin-top: 14px; }
+    .panel-foot { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    .board-tools { margin-top: 16px; padding: 16px 20px; }
+    .board-tools > summary { font-weight: 650; }
+    .board-tools textarea { display: block; width: 100%; min-height: 100px; margin: 12px 0; padding: 10px; background: var(--bg); color: var(--ink); border: 1px solid var(--control); border-radius: 8px; }
+    .board-tools input { width: 80px; }
+    .board-tools .btn { max-width: 100%; white-space: normal; text-align: center; }
+    .board-tools p { color: var(--muted); overflow-wrap: anywhere; }
+    .footnote { margin: 18px 0 32px; color: var(--muted); text-align: center; font-size: 12px; }
+    dialog { border: 1px solid var(--line); border-radius: 12px; padding: 24px; max-width: min(92vw, 520px); max-height: calc(100dvh - 32px); overflow: auto; overscroll-behavior: contain; background: var(--surface); color: var(--ink); }
+    dialog::backdrop { background: #07172099; }
     #photo-form > label, #photo-form fieldset label { display: block; margin: 12px 0; }
     #photo-form input[type=number] { width: 110px; }
     #photo-form fieldset { border: 1px solid var(--line); border-radius: 8px; }
-    #photo-folder, #photo-state { overflow-wrap: anywhere; }
-    #photo-state { padding: 0 20px; }
-    #photo-error { color: #dc4545; }
+    #photo-folder { overflow-wrap: anywhere; }
+    #photo-error { color: var(--danger); }
+    @media (max-width: 560px) {
+      body { font-size: 16px; }
+      .shell { width: calc(100% - 24px); }
+      .topbar-inner { min-height: 58px; }
+      .brand small { font-size: 11px; }
+      .protocol { font-size: 11px; }
+      h1 { font-size: 23px; }
+      .wide { display: none; }
+      .path-bar { padding: 12px 14px; position: relative; }
+      .crumbs { font-size: 14px; }
+      .more-tools { position: static; }
+      .actions { gap: 8px; }
+      .btn { font-size: 14px; min-height: 42px; padding: 8px 10px; }
+      .narrow { display: inline; }
+      .more-body { left: 14px; right: 14px; top: calc(100% - 2px); width: auto; }
+      .find-bar { padding: 0 14px 12px; gap: 8px; }
+      .find input, select, input[type=number], textarea { font-size: 16px; }
+      .columns { grid-template-columns: minmax(0, 1fr) 100px 40px; padding: 10px 14px; gap: 8px; }
+      .file-row { grid-template-columns: minmax(0, 1fr) 40px; padding: 10px 14px; gap: 8px; }
+      .file-row > .meta { display: none; }
+      .file-main { gap: 9px; }
+      .file-name { font-size: 15px; }
+      .file-sub { display: block; }
+      .status, .notice, .upload-panel, .upload-errors { margin-inline: 14px; }
+      .panel-foot { padding-inline: 14px; }
+      .board-tools { padding: 14px; }
+      .upload-metrics { font-size: 12px; }
+      .footnote { text-align: left; }
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { color-scheme: dark; --bg: #0e181f; --surface: #17262f; --ink: #edf3f6; --muted: #acbdc7;
+        --line: #344a56; --control: #8199a7; --accent: #70d4af; --on-accent: #10271e; --accent-light: #203e35; --soft: #1e303b;
+        --danger: #ff9aa4; --danger-bg: #41252d; --focus: #80bdff; }
+      .more-body, .file-popup { box-shadow: 0 8px 24px #0004; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; } }
   </style>
 </head>
 <body>
+  <a class="skip-link" href="#folder-heading">К списку файлов</a>
   <header class="topbar">
     <div class="shell topbar-inner">
-      <div class="brand"><span class="brand-mark" aria-hidden="true">F</span>
-        <div><strong>Flashbox</strong><small>ESP32-P4 · file storage</small></div>
-      </div>
-      <span class="protocol">LAN / HTTP</span>
+      <div class="brand"><span class="brand-mark" aria-hidden="true">F</span><div><strong translate="no">Flashbox</strong><small>ESP32-P4 · карта памяти</small></div></div>
+      <span class="protocol">24,6/256G</span>
     </div>
   </header>
+  <div class="toast-stack" id="toasts" aria-label="Уведомления"></div>
   <main class="shell">
-    <div class="intro">
-      <div class="eyebrow">ФАЙЛОВЫЙ МЕНЕДЖЕР</div>
-      <h1>Мои файлы</h1>
-      <p>Просмотр, загрузка и скачивание файлов в локальной сети.</p>
-    </div>
+    <h1 class="sr-only" id="folder-heading" tabindex="-1">Файлы</h1>
     <section class="panel" id="panel" aria-label="Файлы">
-      <div class="toolbar">
-        <div class="location"><span class="hint-label">Текущая папка</span>
-          <nav class="crumbs" id="crumbs" aria-label="Путь"></nav>
-        </div>
-        <div class="actions">
-          <button class="btn" id="refresh" type="button">↻ &nbsp;Обновить</button>
-          <label class="btn primary" for="picker">＋ &nbsp;Загрузить</label>
-          <button class="btn" id="photo-open" type="button">Фоторамка</button>
-          <button class="btn" id="photo-stop" type="button" hidden>Остановить фоторамку</button>
-          <button class="btn" id="mkdir" type="button">Новая папка</button>
-          <label class="btn" for="folderpicker">Загрузить папку</label>
-          <input id="folderpicker" type="file" webkitdirectory multiple hidden>
-          <input id="picker" type="file" multiple aria-label="Выбрать файлы">
+      <div class="path-bar">
+        <div class="location"><span class="hint-label">Текущая папка</span><nav class="crumbs" id="crumbs" aria-label="Путь"></nav></div>
+        <div class="path-actions">
+          <button class="btn icon-button" id="add-files" type="button" aria-label="Добавить файлы" title="Добавить файлы"><svg class="icon" aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg></button>
+          <details class="more-tools" id="more-tools">
+            <summary class="btn icon-button" id="path-more" aria-label="Ещё действия" title="Ещё действия"><svg class="icon" aria-hidden="true" viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg></summary>
+            <div class="more-body">
+              <button id="mkdir" type="button">Новая папка</button>
+              <button id="folder-choose" type="button">Загрузить папку целиком</button>
+              <button id="photo-open" type="button">Фоторамка из этой папки</button>
+              <button id="photo-upload-choose" type="button" title="Уменьшить до 1536 пикселей и сохранить JPEG; пропорции сохраняются">Загрузить фото для фоторамки</button>
+            </div>
+          </details>
+          <button class="btn icon-button" id="search-focus" type="button" aria-controls="search-panel" aria-expanded="false" aria-label="Поиск файлов" title="Поиск файлов"><svg class="icon" aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></button>
+        <button class="btn icon-button" id="refresh" type="button" aria-label="Обновить папку" title="Обновить папку"><svg class="icon" aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg></button>
         </div>
       </div>
-      <div style="padding: 12px 20px">
-        <label><input id="prepare-photos" type="checkbox"> Подготовить фотографии перед загрузкой</label>
-        <small>До 1536 пикселей, с учётом поворота. JPEG, имена: .frame.jpg. Исходники на компьютере не меняются.</small>
+      <button class="btn stop photo-stop-control" id="photo-stop" type="button" hidden>Остановить фоторамку</button>
+      <input id="folderpicker" type="file" webkitdirectory multiple hidden>
+      <input id="picker" type="file" multiple hidden>
+      <input id="photo-picker" type="file" accept="image/*" multiple hidden>
+      <div class="find-bar" id="search-panel" hidden>
+        <label class="find"><svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><span class="sr-only">Поиск в текущей папке</span><input id="search" name="search" type="search" placeholder="Поиск в папке…" autocomplete="off" spellcheck="false"></label>
       </div>
-      <p id="photo-state" role="status">Фоторамка: запрос состояния…</p>
+      <section class="error-journal" id="error-journal" aria-label="Непросмотренные ошибки" hidden><h2>Ошибки устройства</h2><div id="error-journal-list"></div><div class="actions"><button class="btn" id="error-journal-first" type="button" hidden>Сначала</button><button class="btn" id="error-journal-next" type="button" hidden>Следующие 5</button></div></section>
+      <p class="notice" id="photo-state" role="status" hidden></p>
       <div class="status" id="status" role="status" aria-live="polite"></div>
-      <p id="delete-status" role="status" aria-live="polite" hidden></p>
+      <div class="operation-panel" aria-label="Текущая операция">
+      <p class="upload-panel" id="delete-status" role="status" aria-live="polite" hidden></p>
       <section class="upload-panel" id="upload-panel" aria-label="Загрузка файлов" hidden>
         <div class="upload-head"><span class="upload-name" id="upload-name"></span><button class="btn" id="upload-stop" type="button" disabled>Отменить всё</button></div>
-        <progress id="upload-progress" max="100" value="0" aria-label="Передано файла"></progress>
+        <progress id="upload-progress" max="100" value="0" aria-label="Передача файла" aria-describedby="upload-name upload-phase"></progress>
         <div class="upload-metrics"><strong id="upload-percent">0%</strong><span id="upload-bytes"></span><strong id="upload-speed"></strong><span id="upload-time"></span></div>
-        <p class="upload-phase" id="upload-phase" role="status" aria-live="polite"></p>
-        <span class="upload-note" id="upload-queue"></span>
-        <div class="upload-note">100% передачи ещё не означает сохранение: дождитесь подтверждения борды. Обновление страницы прервёт загрузку.</div>
+        <p class="upload-phase" id="upload-phase" role="status" aria-live="polite"></p><span class="upload-note" id="upload-queue"></span>
+        <div class="upload-note">После передачи ждём подтверждения сохранения на карте. Обновление страницы прервёт загрузку.</div>
       </section>
-      <div class="columns" aria-hidden="true"><span>ИМЯ</span><span>РАЗМЕР</span><span>ИЗМЕНЁН</span><span></span></div>
-      <div id="files" role="list"></div>
-      <div class="panel-foot"><span id="counter">0 элементов</span><span>HTTP · без внешних зависимостей</span></div>
+      </div>
+      <details class="upload-errors" id="upload-errors" hidden><summary id="error-count">Ошибки загрузки</summary><ul id="error-list"></ul><button class="btn" id="retry-failed" type="button">Повторить неудавшиеся</button></details>
+      <div class="columns" aria-label="Сортировка файлов"><button class="sort-heading" id="sort-name" type="button" aria-label="Имя: по возрастанию. Сортировать по убыванию">Имя <span id="sort-name-arrow" aria-hidden="true">↓</span></button><button class="sort-heading sort-size" id="sort-size" type="button" aria-label="Сортировать по размеру по возрастанию">Размер <span id="sort-size-arrow" aria-hidden="true"></span></button><button class="column-eye" id="column-eye" type="button" aria-pressed="false" aria-label="Показать файлы и папки с точкой" title="Показать файлы и папки с точкой"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5Zm0 12.5a5 5 0 1 1 0-10 5 5 0 0 1 0 10Zm0-8a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z"/></svg></button></div>
+      <div id="files" role="list" aria-label="Содержимое папки"></div>
+      <div class="panel-foot"><span id="counter" role="status">Чтение…</span><span>SD · локальное хранение</span></div>
     </section>
     <details class="panel board-tools">
       <summary>Управление бордой</summary>
@@ -225,11 +260,11 @@
       <hr>
       <p>Тест сети без SD: данные из RAM → браузер, затем браузер → RAM. Измеряет TCP/HTTP вместе с Wi-Fi, не скорость радио PHY.</p>
       <label>Объём в каждую сторону <select id="net-size"><option value="262144">256 КиБ</option><option value="1048576">1 МиБ</option><option value="4194304">4 МиБ</option></select></label>
-      <button class="btn" id="net-test" type="button" disabled>Тест доступен на борде</button>
+      <button class="btn" id="net-test" type="button">Тест скорости сети</button>
       <button class="btn" id="net-stop" type="button" disabled>Отмена</button>
       <p id="net-status" role="status" style="white-space: pre-line"></p>
     </details>
-    <p class="footnote">Минимальный интерфейс · HTML + CSS + JavaScript</p>
+    <p class="footnote">На вашей карте. В вашей сети.</p>
   </main>
   <dialog id="photo-dialog" aria-labelledby="photo-title">
     <form id="photo-form">
@@ -245,7 +280,7 @@
         <label><input id="photo-slide" type="checkbox"> Сдвиг</label>
       </fieldset>
       <p>JPEG из этой папки, без подпапок. На время показа часы скрыты. Будильник прервёт фоторамку.</p>
-      <p>Для больших оригиналов включите подготовку фотографий при загрузке. Неподдерживаемые JPEG пропускаются. Переходы пока ступенчатые; при смене фото видна полоса обновления.</p>
+      <p>Для больших оригиналов выберите «Загрузить фото для фоторамки» в меню ⋮. Неподдерживаемые JPEG пропускаются. Переходы пока ступенчатые; при смене фото видна полоса обновления.</p>
       <p id="photo-error" role="alert"></p>
       <div class="actions"><button class="btn primary" id="photo-submit" type="submit">Запустить</button><button class="btn" id="photo-cancel" type="button">Отмена</button></div>
     </form>
@@ -320,8 +355,25 @@
     let requestId = 0;
 
     function status(message = '', error = false) {
+      $('status').hidden = false;
       $('status').textContent = message;
       $('status').classList.toggle('error', error);
+    }
+    const notifications = [];
+    function notify(message, error = false) {
+      const item = {message, error}; notifications.push(item);
+      const dismiss = () => { const i = notifications.indexOf(item); if (i >= 0) notifications.splice(i, 1); paintNotifications(); };
+      item.dismiss = dismiss; paintNotifications();
+      if (!error) globalThis.setTimeout?.(dismiss, 5000);
+    }
+    function paintNotifications() {
+      const host = $('toasts'); host.replaceChildren();
+      for (const item of notifications) {
+        const box = document.createElement('div'); box.className = 'toast' + (item.error ? ' error' : '');
+        const text = document.createElement('span'); text.className = 'toast-text'; text.setAttribute('role', item.error ? 'alert' : 'status'); text.textContent = item.message;
+        const close = document.createElement('button'); close.className = 'toast-close'; close.type = 'button'; close.textContent = '×'; close.setAttribute('aria-label', 'Закрыть уведомление'); close.onclick = item.dismiss;
+        box.append(text, close); host.append(box);
+      }
     }
     function size(bytes) {
       if (bytes == null) return '—';
@@ -331,86 +383,127 @@
       do { bytes /= 1024; i++; } while (bytes >= 1024 && i < units.length - 1);
       return bytes.toFixed(bytes < 10 ? 1 : 0) + ' ' + units[i];
     }
-    function date(value) {
-      if (!value) return '—';
-      const d = new Date(value);
-      return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('ru-RU');
+    let directoryEntries = [], directoryReady = false;
+    let sortOrder = "name";
+    let showDotFiles = false;
+    const compareNames = new Intl.Collator('ru', {numeric: true, sensitivity: 'base'}).compare;
+    const elementCount = n => n + ' ' + (n % 100 >= 11 && n % 100 <= 14 ? 'элементов' : n % 10 === 1 ? 'элемент' : n % 10 >= 2 && n % 10 <= 4 ? 'элемента' : 'элементов');
+    const folderURL = path => location.pathname + '?path=' + encodeURIComponent(path);
+    function navigationLink(link, path) {
+      link.href = folderURL(path);
+      link.onclick = event => {
+        if (event && (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button > 0)) return;
+        event?.preventDefault(); go(path);
+      };
     }
     function go(path) {
       current = normalize(path);
-      history.pushState(null, '', location.pathname + '?path=' + encodeURIComponent(current));
-      load();
+      $('search').value = '';
+      history.pushState(null, '', folderURL(current));
+      return load(false, true);
     }
     function breadcrumbs() {
-      const nav = $('crumbs');
-      nav.replaceChildren();
+      const nav = $('crumbs'); nav.replaceChildren();
       const parts = current.split('/').filter(Boolean);
-      const items = [{name: 'Флешка', path: '/'}];
+      const items = [{name: 'root', path: '/'}];
       parts.forEach((name, i) => items.push({name, path: '/' + parts.slice(0, i + 1).join('/')}));
       items.forEach((item, i) => {
-        if (i) {
-          const sep = document.createElement('span');
-          sep.className = 'separator'; sep.textContent = '/'; nav.append(sep);
-        }
-        const b = document.createElement('button');
-        b.type = 'button'; b.textContent = item.name;
-        b.onclick = () => go(item.path);
-        if (i === items.length - 1) b.setAttribute('aria-current', 'page');
-        nav.append(b);
+        if (i) { const sep = document.createElement('span'); sep.className = 'separator'; sep.textContent = '/'; sep.setAttribute('aria-hidden', 'true'); nav.append(sep); }
+        const link = document.createElement('a'); link.textContent = item.name;
+        navigationLink(link, item.path);
+        if (i === items.length - 1) link.setAttribute('aria-current', 'page');
+        nav.append(link);
       });
+      $('folder-heading').setAttribute('aria-label', current === '/' ? 'Файлы на карте памяти' : 'Файлы в папке ' + current);
+    }
+    function listMessage(title, message, retry = false) {
+      const list = $('files'); list.replaceChildren();
+      const box = document.createElement('div'); box.className = 'empty';
+      const heading = document.createElement('strong'); heading.textContent = title;
+      const text = document.createElement('span'); text.textContent = message;
+      box.append(heading, text);
+      if (retry) { const button = document.createElement('button'); button.type = 'button'; button.className = 'btn'; button.textContent = 'Повторить'; button.onclick = () => load(); box.append(button); }
+      list.append(box);
     }
     function render(entries) {
-      const list = $('files');
+      directoryEntries = entries.slice(); directoryReady = true;
+      renderDirectory();
+    }
+    function renderDirectory() {
+      if (!directoryReady) return;
+      const list = $('files'), focusKey = document.activeElement?.getAttribute?.('data-focus-key');
+      const query = $('search').value.trim().toLocaleLowerCase('ru');
+      const order = sortOrder;
+      const visibleEntries = directoryEntries.filter(e => showDotFiles || !e.name.startsWith('.'));
+      const entries = visibleEntries.filter(e => !query || e.name.toLocaleLowerCase('ru').includes(query));
+      entries.sort((a, b) => {
+        if (Boolean(a.dir) !== Boolean(b.dir)) return a.dir ? -1 : 1;
+        const names = compareNames(a.name, b.name);
+        if (order === 'size' || order === 'size-desc') return ((a.size || 0) - (b.size || 0)) * (order === 'size' ? 1 : -1) || names;
+        return names * (order === 'name-desc' ? -1 : 1);
+      });
       list.replaceChildren();
-      $('counter').textContent = entries.length + ' элементов';
+      $('counter').textContent = query ? 'Найдено: ' + entries.length + ' из ' + visibleEntries.length : entries.length + ' элементов';
       if (!entries.length) {
-        const empty = document.createElement('div');
-        empty.className = 'empty';
-        const title = document.createElement('strong'); title.textContent = 'Папка пуста';
-        const text = document.createElement('span'); text.textContent = 'Загрузите сюда первый файл.';
-        empty.append(title, text); list.append(empty); return;
+        if (!query && directoryEntries.length && !visibleEntries.length) {
+          listMessage('Файлы скрыты', 'Включите глаз, чтобы показать файлы и папки с точкой.');
+          return;
+        }
+        listMessage(query ? 'Ничего не найдено' : 'Папка пуста', query ? 'Попробуйте другое имя или очистите поиск.' : 'Загрузите файлы или создайте папку.');
+        if (focusKey) $('folder-heading').focus?.({preventScroll: true});
+        return;
       }
       const frag = document.createDocumentFragment();
       for (const entry of entries) {
-        const dir = entry.dir === true;
-        const path = join(current, entry.name);
+        const dir = entry.dir === true, path = join(current, entry.name);
         const row = document.createElement('div'); row.className = 'file-row'; row.setAttribute('role', 'listitem');
         const main = document.createElement('div'); main.className = 'file-main';
-        const icon = document.createElement('span'); icon.className = 'file-icon' + (dir ? ' folder' : '');
-        icon.setAttribute('aria-hidden', 'true');
+        const icon = document.createElement('span'); icon.className = 'file-icon' + (dir ? ' folder' : ''); icon.setAttribute('aria-hidden', 'true');
         const stack = document.createElement('div'); stack.className = 'file-stack';
-        const name = document.createElement(dir ? 'button' : 'a');
-        name.className = 'file-name'; name.textContent = entry.name; name.title = entry.name;
-        if (dir) { name.type = 'button'; name.onclick = () => go(path); }
+        const name = document.createElement('a'); name.className = 'file-name'; name.textContent = entry.name;
+        name.setAttribute('data-focus-key', 'name:' + path); name.setAttribute('data-kind', dir ? 'directory' : 'file');
+        if (dir) navigationLink(name, path);
         else { name.href = fileURL(path); name.target = '_blank'; name.rel = 'noopener'; }
-        const sub = document.createElement('span'); sub.className = 'file-sub';
-        sub.textContent = dir ? 'Папка' : size(entry.size);
+        const sub = document.createElement('span'); sub.className = 'file-sub'; sub.textContent = dir ? 'Папка' : size(entry.size);
         stack.append(name, sub); main.append(icon, stack);
-        const bytes = document.createElement('span'); bytes.className = 'meta';
-        bytes.textContent = dir ? '—' : size(entry.size);
-        const modified = document.createElement('span'); modified.className = 'meta';
-        modified.textContent = date(entry.modified);
+        const bytes = document.createElement('span'); bytes.className = 'meta'; bytes.textContent = dir ? '—' : size(entry.size);
         const action = actionMenu(entry, path);
-        row.append(main, bytes, modified, action); frag.append(row);
+        row.append(main, bytes, action); frag.append(row);
       }
       list.append(frag);
+      if (focusKey) {
+        const target = Array.from(list.querySelectorAll?.('[data-focus-key]') || []).find(e => e.getAttribute('data-focus-key') === focusKey);
+        (target || $('folder-heading')).focus?.({preventScroll: true});
+      }
     }
-    async function load(silent = false) {
-      breadcrumbs();
-      const seq = ++requestId;
-      if (!silent) status('Читаю каталог…');
+    function requestError(code) {
+      return ({404: 'Папка больше не существует или карта недоступна.', 409: 'Файл занят другой операцией.', 503: 'Устройство занято или карта требует проверки. Попробуйте ещё раз.'})[code] || 'Устройство вернуло HTTP ' + code + '.';
+    }
+    async function load(silent = false, navigate = false) {
+      breadcrumbs(); const seq = ++requestId;
+      $('files').setAttribute('aria-busy', 'true');
+      $('search').disabled = $('sort-name').disabled = $('sort-size').disabled = true;
+      if (navigate || !directoryReady) { directoryReady = false; listMessage('Чтение папки…', 'Получаем список с карты памяти.'); }
+      if (!silent) status('Чтение папки…');
       try {
         const res = await fetch('/api/list?path=' + encodeURIComponent(current), {cache: 'no-store'});
-        if (!res.ok) throw Error('HTTP ' + res.status);
+        if (!res.ok) throw Error(requestError(res.status));
         const data = await res.json();
-        if (!Array.isArray(data.entries)) throw Error('Неверный формат списка');
+        if (!Array.isArray(data.entries)) throw Error('Устройство прислало неверный список файлов.');
         if (seq !== requestId) return;
-        render(data.entries);
-        if (!silent) status();
+        render(data.entries); if (!silent) status();
       } catch (e) {
         if (seq !== requestId) return;
-        render([]);
-        status('Не удалось получить список: ' + e.message, true);
+        directoryReady = false; directoryEntries = [];
+        $('counter').textContent = 'Список недоступен';
+        listMessage('Не удалось прочитать папку', e.message, true);
+        status('Список файлов не получен. Можно повторить запрос.', true);
+      } finally {
+        if (seq === requestId) {
+          $('files').setAttribute('aria-busy', 'false');
+          $('search').disabled = $('sort-name').disabled = $('sort-size').disabled = !directoryReady;
+          if (navigate && !document.activeElement?.closest?.('button,input,select,textarea,a,summary')) $('folder-heading').focus?.({preventScroll: true});
+        }
       }
     }
     const uploadQueue = [];
@@ -529,6 +622,7 @@
     }
     async function preparePhoto(file) {
       $('upload-panel').hidden = false; $('upload-stop').disabled = false;
+      $('upload-progress').removeAttribute?.('value');
       $('upload-name').textContent = file.name;
       $('upload-percent').textContent = ''; $('upload-speed').textContent = ''; $('upload-time').textContent = '';
       $('upload-bytes').textContent = transferSize(file.size);
@@ -536,29 +630,46 @@
       const tools = await photoTools();
       return tools.prepare(file, {cancelled: () => cancelUploads});
     }
+    let failedUploadJobs = [];
+    function showUploadErrors() {
+      $('upload-errors').hidden = failedUploadJobs.length === 0;
+      $('error-count').textContent = 'Не загрузились: ' + failedUploadJobs.length;
+      $('error-list').replaceChildren();
+      for (const job of failedUploadJobs) {
+        const item = document.createElement('li'); item.textContent = join(job.dir, job.relative) + ' — ' + job.error;
+        $('error-list').append(item);
+      }
+      $('retry-failed').disabled = uploadRunning || mutating || cleanupRunning;
+    }
+    $('retry-failed').onclick = () => {
+      if (uploadRunning || mutating || cleanupRunning || !failedUploadJobs.length) return;
+      const jobs = failedUploadJobs.map(({error, ...job}) => job);
+      return queueJobs(jobs);
+    };
     function queueJobs(jobs) {
       if (cleanupRunning) { status('Дождитесь освобождения кешей.', true); return; }
       if (cancelUploads && uploadRunning) { status('Дождитесь завершения отмены.'); return; }
-      const preparePhotos = Boolean($('prepare-photos').checked);
-      uploadQueue.push(...jobs.map(job => ({...job, preparePhotos})));
+      uploadQueue.push(...jobs.map(job => ({...job, preparePhotos: job.preparePhotos ?? false})));
       if (!uploadRunning && !mutating && uploadQueue.length) return drainUploads();
     }
-    function upload(files) {
+    function upload(files, preparePhotos = false) {
       const dir = current;
-      const jobs = Array.from(files).map(file => ({file, dir, relative: file.webkitRelativePath || file.name}));
-      $('picker').value = ''; $('folderpicker').value = '';
+      const jobs = Array.from(files).map(file => ({file, dir, relative: file.webkitRelativePath || file.name, preparePhotos}));
+      $('picker').value = ''; $('folderpicker').value = ''; $('photo-picker').value = '';
       return queueJobs(jobs);
     }
     async function drainUploads() {
       uploadRunning = true; cancelUploads = false;
+      failedUploadJobs = []; showUploadErrors();
       $('refresh').disabled = true;
       let done = 0, failed = 0, cancelled = 0, lastError = '';
       try {
         do {
           while (uploadQueue.length) {
-            let {file, dir, relative, directory, preparePhotos} = uploadQueue.shift();
+            const job = uploadQueue.shift();
+            let {file, dir, relative, directory, preparePhotos} = job;
             let beganUpload = false;
-            status('Загрузка: ' + join(dir, relative) + ' · в очереди: ' + uploadQueue.length);
+            status();
             try {
               if (!directory && preparePhotos && ((file.type || '').startsWith('image/') || /\.(jpe?g|png|webp|gif|bmp|avif|heic)$/i.test(file.name))) {
                 file = await preparePhoto(file);
@@ -587,17 +698,20 @@
                     : code === 200 ? 'Отмена отправлена. Файл с этим именем присутствует на борде.'
                     : 'Отмена отправлена. Проверьте список файлов позже.';
                 } catch { $('upload-phase').textContent = 'Отмена отправлена. Нет связи с бордой для проверки.'; }
-              } else { failed++; lastError = e.message; }
+              } else { failed++; lastError = e.message; failedUploadJobs.push({...job, error: e.message}); showUploadErrors(); }
             }
           }
           await load(true);
           // Files dropped during the catalog refresh belong to the same drain.
         } while (uploadQueue.length);
         status('Загружено файлов: ' + done + (cancelled ? '. Отменено: ' + cancelled : '') + (failed ? '. Ошибок: ' + failed + '. ' + lastError : ''), failed > 0);
+        notify($('status').textContent, failed > 0); $('status').hidden = true;
       } finally {
         uploadRunning = false; cancelUploads = false;
+        $('upload-panel').hidden = true;
         $('upload-stop').disabled = true;
         $('refresh').disabled = false;
+        $('retry-failed').disabled = failedUploadJobs.length === 0;
       }
     }
     async function api(method, url, body) {
@@ -607,9 +721,9 @@
     }
     let mutating = false;
     async function mutate(action) {
-      if (uploadRunning || mutating || cleanupRunning) { status('Дождитесь окончания очереди загрузки.', true); return; }
+      if (uploadRunning || mutating || cleanupRunning) { status(mutating ? 'Дождитесь завершения текущей файловой операции.' : 'Дождитесь окончания очереди загрузки или освобождения ресурсов.', true); return; }
       mutating = true;
-      try { await action(); await load(); } catch (e) { status(e.message, true); }
+      try { await action(); await load(); } catch (e) { if (e.notified) status(); else status(e.message, true); }
       finally { mutating = false; if (uploadQueue.length && !uploadRunning) drainUploads(); }
     }
     let deleteStarted = null, deletePath = '';
@@ -619,15 +733,18 @@
     }
     async function deleteSelection(path, dir) {
       deleteStarted = performance.now(); deletePath = path;
+      $('upload-panel').hidden = true;
       $('delete-status').hidden = false; paintDeletion();
       const timer = setInterval(paintDeletion, 1000);
       try {
         await removeTree(path, dir);
         $('delete-status').textContent = 'Удалено: ' + path + '. Место на SD освобождено.';
+        notify($('delete-status').textContent);
       } catch (e) {
         $('delete-status').textContent = 'Удаление не подтверждено: ' + path + '. ' + e.message + '. При потере связи начатая операция продолжается на плате; обновите список после восстановления связи.';
+        notify($('delete-status').textContent, true); e.notified = true;
         throw e;
-      } finally { clearInterval(timer); deleteStarted = null; }
+      } finally { clearInterval(timer); deleteStarted = null; $('delete-status').hidden = true; }
     }
     async function removeTree(path, dir) {
       deletePath = path; paintDeletion();
@@ -644,6 +761,7 @@
       const trigger = document.createElement('button');
       trigger.type = 'button'; trigger.className = 'file-action action-menu'; trigger.textContent = '⋮';
       trigger.setAttribute('aria-label', 'Действия: ' + entry.name);
+      trigger.setAttribute('data-focus-key', 'actions:' + path);
       trigger.setAttribute('aria-expanded', 'false');
       const popup = document.createElement('div'); popup.className = 'file-popup';
       popup.setAttribute('popover', 'auto');
@@ -804,16 +922,19 @@
         dimensions_alignment: 'Ширина и высота JPEG должны быть кратны 8. Подготовьте фото при загрузке.',
         jpeg_baseline_required: 'Нужен baseline JPEG; progressive пока не поддерживается.',
         jpeg_unsupported: 'Этот тип JPEG пока не поддерживается.', jpeg_invalid: 'Повреждённый или неполный JPEG.',
+        'JPEG hardware error': 'Контроллер JPEG не смог декодировать файл.', 'SRM hardware error': 'Не удалось подготовить кадр для дисплея.',
+        'truncated JPEG': 'Файл JPEG прочитан не полностью.', 'file missing or busy': 'Файл отсутствует или занят.', 'SD read': 'Ошибка чтения карты памяти.',
       };
       return reasons[state.last_error] || state.last_error;
     }
     function renderPhoto(state) {
+      $('photo-state').hidden = !state.running && (!state.last_error || state.error_saved) && (!state.message || ['idle', 'stopped by web', 'time elapsed', 'resources released'].includes(state.message));
       $('photo-stop').hidden = !state.running;
       $('photo-open').disabled = Boolean(state.running);
       $('photo-state').textContent = state.running
         ? 'Фоторамка · ' + state.folder + ' · ' + (state.file || 'Подготовка…') + ' · показано ' + state.shown + ', пропущено ' + state.skipped
         : 'Фоторамка остановлена' + (state.message && state.message !== 'idle' ? ' · ' + photoMessage(state.message) : '') + '. Часы и будильник доступны.';
-      if (state.last_error) $('photo-state').textContent += '\nПоследний пропуск: ' + (state.error_file || state.file || '') + ' — ' + photoFailure(state);
+      if (state.last_error && !state.error_saved) $('photo-state').textContent += '\nПоследний пропуск: ' + (state.error_file || state.file || '') + ' — ' + photoFailure(state);
       $('photo-state').style && ($('photo-state').style.whiteSpace = 'pre-line');
     }
     async function photoRequest(url, method = 'GET') {
@@ -827,11 +948,12 @@
       if (photoBusy) return;
       photoBusy = true;
       try { await photoRequest('/api/photoframe'); }
-      catch (e) { $('photo-state').textContent = 'Состояние фоторамки недоступно: ' + e.message; }
+      catch (e) { $('photo-state').hidden = false; $('photo-state').textContent = 'Состояние фоторамки недоступно: ' + e.message; }
       finally { photoBusy = false; }
     }
     $('photo-open').onclick = () => {
       photoFolder = current;
+      $('more-tools').open = false;
       $('photo-folder').textContent = 'Папка: ' + photoFolder;
       $('photo-error').textContent = '';
       $('photo-dialog').showModal();
@@ -859,8 +981,99 @@
     };
     if (typeof setInterval === 'function') setInterval(photoStatus, 2000);
     photoStatus();
+    const errorReports = new Map();
+    let journalBusy = false, journalCursor = 0, journalNext = null, journalVersion = 0;
+    const errorDirectory = '/SYSTEM/ERRORS/';
+    function renderErrorJournal() {
+      const list = $('error-journal-list'); list.replaceChildren();
+      $('error-journal').hidden = errorReports.size === 0 && journalCursor === 0 && journalNext === null;
+      $('error-journal-first').hidden = journalCursor === 0;
+      $('error-journal-next').hidden = journalNext === null;
+      $('error-journal-first').disabled = $('error-journal-next').disabled = journalBusy;
+      for (const [name, report] of errorReports) {
+        const card = document.createElement('article'); card.className = 'error-record';
+        const text = document.createElement('div'); text.className = 'error-record-text';
+        const title = document.createElement('strong'); title.textContent = report.title || 'Ошибка устройства';
+        const subtitle = document.createElement('div'); subtitle.textContent = (report.file || '') + (report.code ? ' — ' + photoFailure({last_error:report.code}) : '');
+        const link = document.createElement('a'); link.textContent = 'Полная диагностика · ' + name.slice(0,-5); link.href = fileURL(errorDirectory + name); link.target = '_blank'; link.rel = 'noopener';
+        text.append(title,subtitle,link);
+        const close = document.createElement('button'); close.className = 'btn icon-button'; close.type = 'button'; close.textContent = '×'; close.setAttribute('aria-label','Отметить ошибку просмотренной'); close.title = 'Отметить просмотренной';
+        close.onclick = async () => {
+          close.disabled = true;
+          try {
+            const res = await fetch(fileURL(errorDirectory + 'UNREAD/' + name.slice(0,-5) + '.SEEN'),{method:'DELETE',cache:'no-store'});
+            if (!res.ok && res.status !== 404) throw Error('HTTP ' + res.status);
+            journalVersion++; errorReports.delete(name); renderErrorJournal();
+          } catch(e) { notify('Не удалось отметить ошибку просмотренной: ' + e.message,true); }
+          finally { close.disabled = false; }
+        };
+        card.append(text,close); list.append(card);
+      }
+    }
+    async function pollErrorJournal(cursor = journalCursor) {
+      if (journalBusy || uploadRunning || mutating || cleanupRunning) return;
+      journalBusy = true; const version = journalVersion;
+      try {
+        const res = await fetch('/api/errors?cursor=' + cursor,{cache:'no-store'});
+        if (!res.ok) return;
+        const data = await res.json(); if (!Array.isArray(data.entries) || data.entries.length > 5) return;
+        if (version !== journalVersion) return;
+        journalCursor = cursor; journalNext = data.next_cursor ?? null;
+        const names = new Set(data.entries.filter(n=>/^E[0-9A-F]{8}\.JSON$/i.test(n)));
+        for (const name of errorReports.keys()) if (!names.has(name)) errorReports.delete(name);
+        for (const name of names) {
+          if (errorReports.has(name) && !errorReports.get(name).pending) continue;
+          const response = await fetch(fileURL(errorDirectory+name),{cache:'no-store'});
+          if (version !== journalVersion) return;
+          if (response.status===404) {errorReports.set(name,{title:'Отчёт ещё не опубликован или недоступен',pending:true});continue;}
+          if (!response.ok) continue;
+          try { const body=await response.json();if(version===journalVersion)errorReports.set(name,body); }
+          catch { if(version===journalVersion)errorReports.set(name,{title:'Отчёт об ошибке повреждён'}); }
+        }
+      } catch { /* Offline refresh preserves the last confirmed page. */ }
+      finally { journalBusy = false; renderErrorJournal(); }
+    }
+    $('error-journal-next').onclick = () => journalNext === null ? undefined : pollErrorJournal(journalNext);
+    $('error-journal-first').onclick = () => pollErrorJournal(0);
+    if (typeof setInterval === 'function') setInterval(pollErrorJournal,10000);
+    pollErrorJournal();
+    $('add-files').onclick = () => $('picker').click();
+    $('search-focus').onclick = () => {
+      const panel = $('search-panel'), button = $('search-focus');
+      panel.hidden = !panel.hidden;
+      button.setAttribute('aria-expanded', String(!panel.hidden));
+      if (!panel.hidden) $('search').focus();
+      else { $('search').value = ''; renderDirectory(); button.focus(); }
+    };
     $('refresh').onclick = () => load();
+    $('folder-choose').onclick = () => { $('more-tools').open = false; $('folderpicker').click(); };
+    document.addEventListener?.('click', event => { const more = $('more-tools'); if (more.open && !more.contains(event.target)) more.open = false; });
+    document.addEventListener?.('keydown', event => { if (event.key === 'Escape' && $('more-tools').open) { $('more-tools').open = false; $('more-tools').querySelector('summary')?.focus(); } });
+    $('search').oninput = renderDirectory;
+    function sortBy(column) {
+      sortOrder = sortOrder === column ? column + '-desc' : column;
+      for (const key of ['name', 'size']) {
+        const active = sortOrder === key || sortOrder === key + '-desc';
+        const descending = sortOrder === key + '-desc';
+        $('sort-' + key + '-arrow').textContent = active ? (descending ? '↑' : '↓') : '';
+        const label = key === 'name' ? 'Имя' : 'Размер';
+        $('sort-' + key).setAttribute('aria-label', label + (active ? ': по ' + (descending ? 'убыванию' : 'возрастанию') + '. ' : '. ') + 'Сортировать по ' + (active && !descending ? 'убыванию' : 'возрастанию'));
+      }
+      renderDirectory();
+    }
+    $('sort-name').onclick = () => sortBy('name');
+    $('sort-size').onclick = () => sortBy('size');
+    $('column-eye').onclick = () => {
+      showDotFiles = !showDotFiles;
+      const eye = $('column-eye');
+      eye.setAttribute('aria-pressed', String(showDotFiles));
+      const label = (showDotFiles ? 'Скрыть' : 'Показать') + ' файлы и папки с точкой';
+      eye.setAttribute('aria-label', label); eye.title = label;
+      renderDirectory();
+    };
     $('picker').onchange = e => upload(e.target.files);
+    $('photo-upload-choose').onclick = () => { $('more-tools').open = false; $('photo-picker').click(); };
+    $('photo-picker').onchange = e => upload(e.target.files, true);
     const panel = $('panel');
     panel.addEventListener('dragover', e => { e.preventDefault(); panel.classList.add('dragover'); });
     panel.addEventListener('dragleave', e => {

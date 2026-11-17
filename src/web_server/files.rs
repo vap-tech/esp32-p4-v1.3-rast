@@ -26,6 +26,7 @@ pub(super) enum Transfer {
     Download { file: FileHandle, left: u32 },
     Upload(Upload),
     Delete { started: u64 },
+    Reject { left: u32, status: u16 },
     Drain,
 }
 impl Transfer {
@@ -53,6 +54,24 @@ pub(super) enum Step {
     Progress,
     Waiting,
     Done,
+}
+// Keep receiving a rejected upload cooperatively before sending its final response.
+// No file handle, staging lease, or extra body buffer is acquired.
+fn reject(r: &http::Request, io: &mut impl Transport, status: u16) -> Result<Transfer, web::Error> {
+    if matches!(r.method, http::Method::Put | http::Method::Post) && r.length != 0 {
+        if r.expect {
+            io.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
+            io.flush()?;
+        }
+        Ok(Transfer::Reject {
+            left: r.length,
+            status,
+        })
+    } else {
+        web::error(io, status, r.method == http::Method::Head)?;
+        io.flush()?;
+        Ok(Transfer::Drain)
+    }
 }
 pub(super) async fn start<D: disk::BlockDevice, const N: usize>(
     r: &http::Request,
@@ -82,9 +101,7 @@ pub(super) async fn start<D: disk::BlockDevice, const N: usize>(
     let handle = match files.open(r.path(), mode).await {
         Ok(h) => h,
         Err(e) => {
-            web::error(io, web::asyncfs::status(&e), r.method == http::Method::Head)?;
-            io.flush()?;
-            return Ok(Transfer::Drain);
+            return reject(r, io, web::asyncfs::status(&e));
         }
     };
     let len = if writing {
@@ -99,9 +116,7 @@ pub(super) async fn start<D: disk::BlockDevice, const N: usize>(
             files.abort(handle).await
         }
         .map_err(|_| web::Error::Storage)?;
-        web::error(io, 503, false)?;
-        io.flush()?;
-        return Ok(Transfer::Drain);
+        return reject(r, io, 503);
     }
     let result = if writing {
         if r.expect {
@@ -470,6 +485,33 @@ pub(super) async fn step<P: Port, D: disk::BlockDevice, const N: usize>(
                 *state = Transfer::Upload(upload);
             }
             Ok(Step::Progress)
+        }
+        Transfer::Reject { mut left, status } => {
+            // Bound work per turn; consume the socket's own RX ring without memcpy.
+            let n = network
+                .borrow_mut()
+                .tcp
+                .discard(slot, (left as usize).min(8192));
+            left -= n as u32;
+            *state = Transfer::Reject { left, status };
+            if left == 0 {
+                let mut io = Connection {
+                    network,
+                    slot,
+                    buffer: [0; tcp::MSS],
+                    used: 0,
+                };
+                web::error(&mut io, status, false)?;
+                io.flush()?;
+                *state = Transfer::Drain;
+                Ok(Step::Progress)
+            } else if network.borrow().tcp.eof(slot) {
+                Err(web::Error::Transport)
+            } else if n != 0 {
+                Ok(Step::Progress)
+            } else {
+                Ok(Step::Waiting)
+            }
         }
         Transfer::Drain => {
             if !network.borrow().tcp.flushed(slot) {

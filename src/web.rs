@@ -14,19 +14,11 @@ pub enum Error {
     Frame,
     Storage,
     Format,
-    Asset,
 }
 pub trait Transport {
     fn read(&mut self, out: &mut [u8]) -> Result<usize, Error>;
     fn write_all(&mut self, bytes: &[u8]) -> Result<(), Error>;
     fn flush(&mut self) -> Result<(), Error>;
-}
-pub trait Asset {
-    fn len(&self) -> u32;
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    fn read(&mut self, offset: u32, out: &mut [u8]) -> Result<usize, Error>;
 }
 fn status<E>(error: &storage::Error<E>) -> u16 {
     use storage::Error::*;
@@ -108,31 +100,28 @@ pub fn serve<D: BlockDevice>(
     request: &Request,
     fs: &mut Fat32<D>,
     io: &mut impl Transport,
-    asset: &mut impl Asset,
     scratch: &mut [u8],
 ) -> Result<(), Error> {
     let head = request.method == Method::Head;
     match request.route {
-        Route::Static | Route::PhotoStatus | Route::PhotoStart | Route::PhotoStop => {
-            return error(io, 501, head)
-        }
+        Route::Errors
+        | Route::Static
+        | Route::PhotoStatus
+        | Route::PhotoStart
+        | Route::PhotoStop => return error(io, 501, head),
         Route::Index => {
-            headers(
-                io,
-                200,
-                Some(asset.len()),
-                "text/html; charset=utf-8",
-                "Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n",
-            )?;
+            let mut file = match fs.open("/www/index.html") {
+                Ok(f) => f,
+                Err(e) => return error(io, status(&e), head),
+            };
+            headers(io, 200, Some(file.len()), "text/html; charset=utf-8", "")?;
             if !head {
-                let mut offset = 0;
-                while offset < asset.len() {
-                    let n = asset.read(offset, scratch)?;
-                    if n == 0 || n as u32 > asset.len() - offset {
-                        return Err(Error::Asset);
+                loop {
+                    let n = file.read(scratch).map_err(|_| Error::Storage)?;
+                    if n == 0 {
+                        break;
                     }
                     io.write_all(&scratch[..n])?;
-                    offset += n as u32;
                 }
             }
         }
@@ -523,17 +512,6 @@ mod tests {
             Ok(())
         }
     }
-    struct Page;
-    impl Asset for Page {
-        fn len(&self) -> u32 {
-            4
-        }
-        fn read(&mut self, at: u32, out: &mut [u8]) -> Result<usize, Error> {
-            let n = out.len().min(4 - at as usize);
-            out[..n].copy_from_slice(&b"PAGE"[at as usize..at as usize + n]);
-            Ok(n)
-        }
-    }
     fn request(method: &str, path: &str, length: usize) -> Request {
         let mut t = Text::<256>::new();
         write!(
@@ -570,7 +548,6 @@ mod tests {
                 &request(method, path, data.len()),
                 &mut fs,
                 &mut wire,
-                &mut Page,
                 &mut scratch,
             )
             .unwrap();
@@ -764,7 +741,6 @@ mod tests {
             &request("PUT", "/fs/GOOD.BIN", data.len()),
             &mut fs,
             &mut wire,
-            &mut Page,
             &mut scratch,
         )
         .unwrap();
@@ -774,7 +750,6 @@ mod tests {
             &request("PUT", "/fs/GOOD.BIN", data.len()),
             &mut fs,
             &mut wire,
-            &mut Page,
             &mut scratch,
         )
         .unwrap();
@@ -786,7 +761,6 @@ mod tests {
                 &request("PUT", "/fs/ABORT.BIN", data.len()),
                 &mut fs,
                 &mut wire,
-                &mut Page,
                 &mut scratch
             ),
             Err(Error::Transport)
@@ -801,7 +775,6 @@ mod tests {
             &request("GET", "/fs/GOOD.BIN", 0),
             &mut fs,
             &mut wire,
-            &mut Page,
             &mut scratch,
         )
         .unwrap();
@@ -812,7 +785,6 @@ mod tests {
             &request("HEAD", "/fs/GOOD.BIN", 0),
             &mut fs,
             &mut wire,
-            &mut Page,
             &mut scratch,
         )
         .unwrap();
@@ -822,7 +794,6 @@ mod tests {
             &request("GET", "/api/list?path=%2F", 0),
             &mut fs,
             &mut wire,
-            &mut Page,
             &mut scratch,
         )
         .unwrap();
@@ -836,7 +807,7 @@ mod tests {
         let mut old = request("GET", "/api/list?path=%2F", 0);
         old.http11 = false;
         let mut wire = Wire::new(&[]);
-        serve(&old, &mut fs, &mut wire, &mut Page, &mut scratch).unwrap();
+        serve(&old, &mut fs, &mut wire, &mut scratch).unwrap();
         let start = http::header_end(&wire.out).unwrap();
         assert!(wire.out[start..].starts_with(b"{\"entries\":["));
         assert!(wire.out.ends_with(b"]}"));

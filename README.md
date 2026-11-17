@@ -78,7 +78,7 @@ HAL доступен через `esp32_p4::hal`; драйверы внешних
 
 Монитор использует только стандартную библиотеку Python (Linux). Он освобождает DTR/RTS и переподключается после USB reset. Во время прошивки монитор нужно остановить. В этой сессии обычный монитор espflash оставлял плату в download mode; для проверки запуска используется `scripts/monitor.py`.
 
-Текущий stage-2 образ с HTTP и Flash-assets — около **1 MiB** с padding;
+Текущий stage-2 образ с HTTP без встроенного веба — **606676 байт**;
 загружаемый runtime — около **189 KiB**. Точные размеры выводит `scripts/image.sh`.
 Исторические образы до HTTP занимали 420656 B, а до stage-2 — 141936 B. Read-only RTC выводится с heartbeat; VLF/VDET установлены, календарь некорректен, время не менялось. На плате подтверждены GT911 1024×600, поток касаний и подтверждение кадров. Результаты предыдущих проверок I²C, таймера и GPIO сохранены в документации. Минимальный исходный образ 368 байт и особенности запуска описаны в [docs/boot.md](docs/boot.md).
 
@@ -158,7 +158,7 @@ minute runs; the detector catches an injected repeated frame without DMA error.
 Default DAC volume is now **-21 dB** (+3 dB). [Results and build](docs/wav-lab.md).
 
 Веб-файлы Flashbox: `python3 scripts/display-control.py --web-run 3600`.
-Адрес печатается в `WEB READY`: страница из Flash, список, чередующиеся GET/PUT
+Адрес печатается в `WEB READY`: страница из `/www/index.html` на SD, список, чередующиеся GET/PUT
 на SD через таблицу файлов. Без перезаписи существующих файлов, поддержаны Unicode LFN. Свободно
 около 189 KiB work SRAM; отдельно DMA arena136 KiB и fixed DMA16 KiB. [API и проверки](docs/web.md).
 
